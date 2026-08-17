@@ -49,10 +49,11 @@ re-checks every one so a regression fails loudly. Getting there took nine
 campaigns against AutoCAD as the oracle and turned up defects no
 self-consistent test could ever have found, because a reader and a writer
 can share the same wrong belief and still round-trip perfectly. R2007
-carries two documented limits, both reported to the caller rather than
-dropped: ACAD_TABLE, whose AC1021 record is still unsolved, and an
-ASM-dialect ACIS payload, which that container's kernel cannot read
-inline. See [PARITY.md](PARITY.md).
+carries one documented limit, and it is the format's own rather than
+ours: an ASM-dialect ACIS payload cannot travel inline in an AC1021 file,
+because that container's kernel reads only the pre-ASM form — so it
+leaves as SAT text, or is reported to the caller. See
+[PARITY.md](PARITY.md).
 
 **A drawing that is laid out at an angle stays that way.** Site plans are
 routinely drawn turned — the model sits at 45°, and it reads square only
@@ -168,7 +169,7 @@ worker or store.
 | **DWG R13 / R14** (AC1012, AC1014) | ✅ | ✅ |
 | **DWG R2000** (AC1015) | ✅ | ✅ |
 | **DWG R2004** (AC1018) | ✅ | ✅ compressed pages |
-| **DWG R2007** (AC1021) | ✅ | ✅ Reed-Solomon pages; ACAD_TABLE and ASM-dialect ACIS reported |
+| **DWG R2007** (AC1021) | ✅ | ✅ Reed-Solomon pages; an ASM-dialect ACIS payload leaves as SAT |
 | **DWG R2010 / R2013 / R2018** (AC1024/27/32) | ✅ | ✅ compressed pages |
 | **DXF ASCII** | ✅ | ✅ |
 | **DXF binary** (both group-code widths) | ✅ | ✅ |

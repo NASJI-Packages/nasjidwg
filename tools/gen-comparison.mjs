@@ -57,7 +57,7 @@ const ROWS = [
   },
   {
     cap: ['Native AC1021 (R2007) write'],
-    cells: [g('yes — opens at AUDIT 0,', 'gated (ACAD_TABLE reported)'), n('falls back to R2010'), a('AC1021 header writer', 'is a stub (source read)'), n('n/a')]
+    cells: [g('yes — opens at AUDIT 0,', 'gated, every entity'), n('falls back to R2010'), a('AC1021 header writer', 'is a stub (source read)'), n('n/a')]
   },
   { cap: ['Reads / writes DXF'], cells: [g('ASCII + binary'), g('ASCII + binary'), g('ASCII + binary'), g('ASCII + binary')] },
   null,

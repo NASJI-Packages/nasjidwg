@@ -20,19 +20,16 @@ const line = (over: Partial<Entity & { type: 'line' }> = {}): Entity => ({
 } as Entity);
 
 describe('real-world reader pins (campaign 5)', () => {
-  it('R2007 ACAD_TABLE is reported, not written', () => {
-    /* AutoCAD-2027-minted 2007 tables carry a BD (1.0) after each cell's
-       rotation and close each cell with three BLs (3,0,0) — solved by
-       brute force against 2x4 and 3x4 real grids until every cell decoded
-       with the title-row merge pattern and the stream landed exactly on
-       the four tail bits. That grammar is still what the READER expects,
-       and it is not the whole record: AutoCAD 2027 refuses an AC1021
-       drawing carrying the inline grid every other pre-R2010 container
-       takes (R2000 and R2004 are externally gated on the same spelling),
-       with cell text and without it alike, and its own AC1021 table read
-       back through this reader decodes with empty cell text. Until that
-       record is solved the R2007 writer reports the entity instead of
-       writing a drawing AutoCAD refuses whole. */
+  it('R2007 ACAD_TABLE: the cell is a table VALUE, not a bare string', () => {
+    /* AC1021 keeps a cell's content as a full table value — the
+       additional-data flag, then the format flags, the data type, the text
+       inline as byte-counted UTF-16, the unit type, and two string-stream
+       entries (the value's format string and its rendered form). Writing a
+       single string there is what AutoCAD had been refusing.
+       Pinned against AutoCAD-minted AC1021 tables: each 1-character cell
+       is 109 bits, the walk lands on the four override bits exactly, and
+       AutoCAD reads our output back as 2 rows x 2 columns with the cell
+       text intact. */
     const d: Drawing = emptyDrawing();
     d.entities.push({
       type: 'table', layer: '0', color: { kind: 'byLayer' },
@@ -46,9 +43,17 @@ describe('real-world reader pins (campaign 5)', () => {
       ]
     } as Entity);
     const res = writeDwg2007(d);
-    expect(res.skipped).toContain('table (R2007 record unsolved)');
+    expect(res.skipped).toEqual([]);
     const back = readDwg(res.data);
-    expect(back.entities.some((e) => e.type === 'table')).toBe(false);
+    const t = back.entities.find((e) => e.type === 'table');
+    expect(t?.type).toBe('table');
+    if (t?.type !== 'table') return;
+    expect(t.numRows).toBe(3);
+    expect(t.numColumns).toBe(2);
+    expect(t.cells[0].spanColumns).toBe(2);
+    expect(t.cells[0].text).toBe('Title');
+    expect(t.cells[3].text).toBe('B');
+    expect(t.cells[4].text).toBe('C1');
     expect(back.warnings).toEqual([]);
   });
 

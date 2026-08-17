@@ -1,7 +1,7 @@
 {
-  "updated": "2026-08-17 16:30 EDT",
+  "updated": "2026-08-17 17:15 EDT",
   "tests": "655 passing · gate exit 0 · pack clean",
-  "headline": "Rotated layouts now survive: VIEWTWIST and the header UCS are read, written and exported",
+  "headline": "R2007 ACAD_TABLE solved — the last open ledger is closed",
   "verdicts": [
     {
       "label": "R12 · R13 · R14 · R2000 · R2004 · R2007 · R2018",
@@ -70,8 +70,8 @@
     },
     {
       "label": "R2007 ACAD_TABLE record",
-      "state": "todo",
-      "note": "the one entity AC1021 output cannot carry: the inline grid every other pre-R2010 container takes is refused there, with cell text and without it — reported in skipped, never dropped silently"
+      "state": "pass",
+      "note": "a cell keeps its content as a full table VALUE at AC1021, not a bare string — the flag, format flags, data type, the text inline as byte-counted UTF-16, the unit type, then the format string and rendered form in the string stream. AutoCAD reads our output back cell for cell"
     },
     {
       "label": "Licence + provenance audit",
@@ -89,10 +89,10 @@
       "note": "genuine files fully recompressed and re-encoded by us: AUDIT 0 errors (180 KB file, 2600 objects)"
     }
   ],
-  "inflight": "A real drawing found the next defect: an AC1014 site plan laid out at 45 degrees drew turned, because the whole rotation lives in two fields the library dropped. VIEWTWIST was never decoded at all — and because the walk skipped it, every field after it drifted one BD, which is why snapBase and gridSpacing used to come back as 6e-294 and 1e-314, and why the view direction and target came back swapped. The header UCS was read and discarded outright. Worst of the three, the DXF writer then put a hard zero in group 51: not missing data a consumer could handle, but a confident \"this drawing is not rotated\". The record layout was pinned bit for bit with AutoCAD DXFOUT as the oracle, and now grades 36 of 36 fields on nine drawings.",
+  "inflight": "The AC1021 ACAD_TABLE record is solved, and the method was the same one that cracked the VPORT: let AutoCAD mint the reference, then measure. Two AutoCAD-converted tables — a 2x2 of single letters and a 3x2 of 1-to-8 character cells — showed the cell is 109 bits for a one-character text, that its record carries TWO string-stream entries per cell, and that a field varying 97, 98, 99, 100 across the four cells was the text itself, inline in the data stream. That is a table VALUE, not a string: the additional-data flag comes first, then the format flags, the data type, the byte-counted UTF-16 text, the unit type, and finally the value's format string and its rendered form. Writing a bare string there is what AutoCAD had been refusing. Both references now decode, our own output opens at AUDIT 0, and AutoCAD reads its cells back as 2 rows x 2 columns with the text intact.",
   "recentlyLanded": [
-    "VIEWTWIST, the viewport UCS and the whole VPORT record read, written and round-tripped — graded 36/36 against AutoCAD",
-    "Header UCS captured instead of discarded, and written back by every DWG writer and the DXF writer",
-    "viewTwistTransform and ucsTransform: the transform that squares a rotated drawing, measured rather than assumed"
+    "R2007 ACAD_TABLE written and gated — the cell content is a table VALUE, pinned against two AutoCAD-minted references",
+    "The same reader defect fixed: AC1021 tables from AutoCAD used to decode with empty cell text",
+    "VIEWTWIST, the viewport UCS and the header UCS read, written and exported — graded 36/36 against AutoCAD"
   ]
 }

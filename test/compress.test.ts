@@ -177,14 +177,13 @@ describe('whole files through the compressed containers', () => {
        * section arrived in 2013 — so 'acis' never survives that container.
        * The never-compressed R2000 baseline drops it the same way.
        *
-       * AC1021 drops two of the sample's entities, both reported in
-       * `skipped` rather than lost silently: the corpus body is an ASM
-       * stream and R2007's kernel only reads the pre-ASM ACIS dialect
-       * inline (a genuine ACIS-dialect blob written by this library into
-       * an AC1021 file opens at AUDIT 0, the ASM one is refused), and the
-       * R2007 ACAD_TABLE record is still unsolved. */
+       * AC1021 drops one of them, reported in `skipped` rather than lost
+       * silently: the corpus body is an ASM stream, and R2007's kernel
+       * reads only the pre-ASM ACIS dialect inline — a genuine
+       * ACIS-dialect blob written by this library into an AC1021 file
+       * opens at AUDIT 0, the ASM one is refused. */
       if (version === 'R2004') delete expected.acis;
-      if (version === 'R2007') { delete expected.acis; delete expected.table; }
+      if (version === 'R2007') delete expected.acis;
       expect(mix(back.entities)).toEqual(expected);
     });
 

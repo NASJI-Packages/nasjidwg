@@ -49,19 +49,15 @@ group-code width.
   fidelity it was wanted for (untouched entities survive byte for byte);
   what remains unbuilt is the in-place container patch that would also
   save the rebuild cost on very large files.
-- **R2007 write: one entity short.** AC1021 output opens in AutoCAD 2027
-  at AUDIT 0 errors and is regression-gated like the rest. The single
-  entity it cannot carry is **ACAD_TABLE**: the inline grid every other
-  pre-R2010 container takes (R2000 and R2004 are gated on that same
-  spelling) is refused at AC1021 with cell text and without it alike, and
-  an AutoCAD-minted AC1021 table read back through this reader decodes
-  with empty cell text — so the record is incompletely understood on both
-  sides. The writer reports it in `skipped` rather than emitting a
-  drawing AutoCAD refuses whole. An **ASM-dialect** ACIS payload is the
-  other R2007 limit, and that one is the format's: AC1021's kernel reads
-  only the pre-ASM "ACIS BinaryFile" form inline (a genuine ACIS-dialect
-  blob written by this library into an AC1021 file opens at AUDIT 0), so
-  an ASM stream leaves an R2007 target as SAT text or is reported.
+- **R2007 write.** AC1021 output opens in AutoCAD 2027 at AUDIT 0 errors
+  and is regression-gated like the rest, ACAD_TABLE included. The one
+  R2007 limit left is the format's own, not ours: an **ASM-dialect** ACIS
+  payload cannot travel inline in an AC1021 file, because that container's
+  kernel reads only the pre-ASM "ACIS BinaryFile" form (a genuine
+  ACIS-dialect blob written by this library into an AC1021 file opens at
+  AUDIT 0; the same file carrying an ASM stream is refused). An ASM
+  payload therefore leaves an R2007 target as SAT text, or is reported in
+  `skipped`.
 
   What had blocked it for four campaigns was a wrong suspect. The header
   field at record offset 0x100 that every earlier ledger called the
@@ -208,7 +204,7 @@ the entity is retained with its source type name — verified per version.
 | R2004 (AC1018) page container | ✅ page/section maps, LZ77 system pages, encrypted file header |
 | R2018 (AC1032) container | ✅ same page container + R2010+ object framing (BOT type, handle-size prefix) and R2007+ string streams |
 | Header variables write | ✅ every container generation. R2007+ splits the section into data/handle/string streams exactly as it splits objects (bitsize field, UTF-16 tail) and adds its own fields (CMATERIAL, DIMFXL/DIMARCSYM/DIMFXLON, R2010 DIMTXTDIRECTION, R2013 REQUIREDVERSIONS); written R2000-style the section did not parse at all and every variable in an R2007/2018 file was lost |
-| R2007 (AC1021) write | ✅ the Reed-Solomon page container, its LZ77 dialect, all three header checksums and the R2007 object framing; **externally gated at AUDIT 0 errors** in AutoCAD 2027 with the full corpus. Two limits, both reported in `skipped`: ACAD_TABLE (record unsolved) and an ASM-dialect ACIS payload (AC1021's kernel reads only the pre-ASM binary form inline — a genuine ACIS-dialect blob written by this library opens clean) |
+| R2007 (AC1021) write | ✅ the Reed-Solomon page container, its LZ77 dialect, all three header checksums, the R2007 object framing and the inline ACAD_TABLE grid; **externally gated at AUDIT 0 errors** in AutoCAD 2027 with the full corpus. One limit, reported in `skipped`: an ASM-dialect ACIS payload, which AC1021's kernel cannot read inline — a genuine ACIS-dialect blob written by this library opens clean |
 | Page compression (R2004/R2007/R2010+) | ✅ real greedy hash-chain LZ77 matchers for both dialects, self-verified: every compressed page decodes byte-for-byte through the library's own oracle-tested decompressors, plus a structured fuzz sweep. The corpus containers shrank 37-43% (R2004 6624→3776, R2007 9600→6016, R2018 7712→4384 bytes) |
 | Pre-R13 write (R12 / AC1009) | ✅ `writeDwgR12`: fixed 205-variable header block, split table directory (five entries up front, five embedded at fixed offsets), per-record CRCs, all 14 section sentinels, second header — every pre-R13 fixture (R1.4→R12) survives a rewrite number-for-number |
 | Pre-R12 write (R10 / R9 / R2.6 / R2.10) | ✅ `writeDwgR10/R9/R2_6/R2_10`: per-release header-variable blocks (761/741/506-byte layouts), leading-run table directory, one-byte linetype refs, 2D bodies with shared elevation before R10 (3DLINE/3DFACE as the exact-3D escape hatches), per-record CRCs — each verified by round trip through the pre-R13 reader, number-for-number. What a release cannot hold is downgraded to visible geometry or reported, never dropped silently |
@@ -223,7 +219,7 @@ the entity is retained with its source type name — verified per version.
 | Byte-preserving rewrite (`retainRecords` + `verbatimRecords`) | ✅ read with `readDwg(bytes, { retainRecords: true })`, write with `{ preserveHandles: true, verbatimRecords: true }`, and every entity still carrying the record the reader sealed is emitted from those exact bytes instead of being re-encoded — incremental-save fidelity without an incremental container. Symbol tables keep their source handles so those bytes stay meaningful; the object map, size prefixes, R2010+ handle-stream split, CRCs and container are built as always. Verified byte-identical over three generations at R13/R14/R2000/R2004/R2018, each opening in AutoCAD with AUDIT 0 errors. Off by default, a no-op without `preserveHandles`, and refused for foreign encoding generations, mismatched record types, XDATA carriers and the entity kinds whose records reach into objects this library mints fresh (dimension, mline, image, insert-with-attributes, ACIS, the class-numbered records). **The contract: a caller that changes an entity must `delete entity.record`** — the writer trusts the seal rather than diffing it |
 | Mutation fuzz | ✅ 840 seeded byte mutations + truncations across all 7 written containers, every run: the reader either decodes with a warnings array or throws an ordinary Error — never hangs, never leaks a non-Error |
 | SHX shape fonts | ✅ full bytecode interpreter (16-direction vectors, octant / fractional / bulge arcs, subshapes, push/pop, scale, vertical-skip; unifont structurally), font registry, and the SVG/PDF exporters draw text as the font's real vector strokes when a font is registered — byte-identical output when none is |
-| External validation vs AutoCAD | ✅ `node tools/validate-external.mjs` drives AutoCAD 2027's Core Console (open + AUDIT per container) with a regression-gated PASS_BASELINE of **all seven writable release families — R12, R13, R14, R2000, R2004, R2007 and R2018 — every one opening AUDIT-CLEAN 0/0 on the full corpus**: every entity family, the hand-built ASM solid (carried in the AcDs section, as 2013+ requires), the Bill-of-Materials table with merged cells (AutoCAD's own DXFOUT returns every cell string), MULTILEADER with its synthesized Standard MLEADERSTYLE, and Arabic layer names normalized clean. Nine campaign rounds burned ~70 splice-proven format rules into the writers and structural tests — among them: the R2004 LZ terminator is `0x11 0x00 0x00`; CLASSES bind positionally, number densely from 500, and may not be empty from R2007 on; R2010+ LEADER keeps endptproj and drops box h/w; R13/14 BT/BE are full BD/3BD; the R2010+ TABLE folds TABLECONTENT into the entity and closes with a five-field break range; R2018 MTEXT carries an annotative/column tail; R2007+ symbol names travel raw UTF-16; AC1032 stores ACIS as ASM blobs in AcDs while AC1021 reads only the pre-ASM form, inline, starting on the bit after its version field and followed by a cached wireframe block. Several were symmetric reader+writer beliefs no self-round-trip could catch — exactly what the external loop exists for. One ledger is still open and honourably so: the AC1021 ACAD_TABLE record, reported in `skipped` rather than written |
+| External validation vs AutoCAD | ✅ `node tools/validate-external.mjs` drives AutoCAD 2027's Core Console (open + AUDIT per container) with a regression-gated PASS_BASELINE of **all seven writable release families — R12, R13, R14, R2000, R2004, R2007 and R2018 — every one opening AUDIT-CLEAN 0/0 on the full corpus**: every entity family, the hand-built ASM solid (carried in the AcDs section, as 2013+ requires), the Bill-of-Materials table with merged cells (AutoCAD's own DXFOUT returns every cell string), MULTILEADER with its synthesized Standard MLEADERSTYLE, and Arabic layer names normalized clean. Nine campaign rounds burned ~70 splice-proven format rules into the writers and structural tests — among them: the R2004 LZ terminator is `0x11 0x00 0x00`; CLASSES bind positionally, number densely from 500, and may not be empty from R2007 on; R2010+ LEADER keeps endptproj and drops box h/w; R13/14 BT/BE are full BD/3BD; the R2010+ TABLE folds TABLECONTENT into the entity and closes with a five-field break range; R2018 MTEXT carries an annotative/column tail; R2007+ symbol names travel raw UTF-16; AC1032 stores ACIS as ASM blobs in AcDs while AC1021 reads only the pre-ASM form, inline, starting on the bit after its version field and followed by a cached wireframe block. Several were symmetric reader+writer beliefs no self-round-trip could catch — exactly what the external loop exists for. One ledger is still open and honourably so: every ledger closed |
 | Reader certified against real AutoCAD files | ✅ **317 real drawings, 139 MB, spanning 1982 to 2027** — every AutoCAD 2027 sample library, field drawings up to 3 MB from real producers, vintage R1.4/R2.6/R2.10/R9/R10/R12/R13/R14 files, and 49 purpose-minted references — all read with **zero throws, zero timeouts, zero CRC mismatches** in 13.2 s with CRC verification enabled, and the decoded geometry matches AutoCAD's own DXFOUT field for field. The whole corpus produces four warning occurrences in total. Twelve reader defects the generated corpus could never expose were found and pinned, among them: the R2007 table cell grammar and the R2010+ inline grid (real tables had been decoding as empty stubs); MLINESTYLE's per-element linetype (a data-stream index through R2013, a handle only from R2018 — this alone had been sealing the record on 155 of 280 files, and the same error lived in the R2007 writer); the MTEXT background-scale field (BD, not BL — 89 MTEXTs were being sealed with their text already parsed); XRECORD trusting a declared size that overran the record; a header-extents guard that let a Z of 7.35e+223 through; the DICTIONARY hard-owner byte that starts at R13c3 (61 of 71 dictionaries in a genuine R13 file were failing silently); GROUP naming; anonymous-block numbering; the 2004+ CMC ByLayer/ByBlock methods; and entities whose owner resolves to nothing, which now land in model space with a warning instead of vanishing. **No test reads any of these files** — they are external oracles only; the suite still generates every fixture it asserts on |
 | OLE2FRAME write | ✅ R14→R2018: frame + embedded compound document byte-for-byte; a hand-built entity gets its 0x62-byte frame header synthesized from the corners. R13 (which predates OLE2FRAME) reports the skip |
 | Dynamic-block visibility write | ✅ R2000→R2018: blocks with visibility states leave as a real BLOCKVISIBILITYPARAMETER — name, prompt, member list and per-state entity lists remapped onto the written file's handles — and come back as the same dynamic block through the reader |
@@ -237,9 +233,8 @@ shape, tolerance, leader, viewport, mline, polygon/polyface meshes with
 their vertex chains, images (+CLASSES and IMAGEDEF objects), hatch
 (exact edges, deflines, seeds, gradient), all 8 dimension kinds, LIGHT,
 MULTILEADER (its own AcDbMLeader record in every container), ACAD_TABLE
-(its own record in every container but AC1021 — through R2004 as the
-inline grid, from R2010 as the placed entity plus its paired
-TABLECONTENT object; at R2007 it is reported in `skipped`),
+(its own record everywhere — through R2007 as the inline grid, from
+R2010 as the placed entity plus its paired TABLECONTENT object),
 PDF/DGN/DWF underlays with their shared definition objects, and ACIS
 solids — SAT in every container, SAB from R2007 on in the kernel dialect
 that container reads, and a binary payload leaves a target that cannot
@@ -313,14 +308,14 @@ The axes a DWG/DXF library is judged on, and where this one stands:
 | DWG read R13–R2018 | ✅ all 8 container versions |
 | DWG read pre-R13 (R1.x–R12) | ✅ nine fixtures from 1983 onward |
 | DWG write R2000 / R2004 | ✅ compressed pages |
-| DWG write R2007 | ✅ externally gated at AUDIT 0; ACAD_TABLE and ASM-dialect ACIS reported in `skipped` |
+| DWG write R2007 | ✅ externally gated at AUDIT 0, ACAD_TABLE included; an ASM-dialect ACIS payload leaves as SAT or is reported |
 | DWG write R2010 / R2013 / R2018 | ✅ compressed pages |
 | DWG write R12 (AC1009) | ✅ |
 | DWG write R10 / R9 / R2.6 / R2.10 | ✅ round-trip verified per release |
 | Proxy passthrough (0x1F2 + 0x1F3) | ✅ payload bit-exact, graphics byte-exact, refs code-exact, class re-emitted — every container R13→R2018 |
 | OLE2FRAME | ✅ read + write (R14+), document byte-for-byte |
 | Dynamic-block visibility | ✅ read + write (R2000+) |
-| ACAD_TABLE | ✅ read everywhere; written in every container but AC1021, where the record is unsolved and the entity is reported (R2010+ writes through the paired TABLECONTENT object) |
+| ACAD_TABLE | ✅ read and written in every container. AC1021 keeps a cell's content as a full table VALUE — the additional-data flag, the format flags, the data type, the text inline as byte-counted UTF-16, the unit type, then the value's format string and rendered form in the record's string stream — which is why a bare string there was refused; pinned against AutoCAD-minted AC1021 tables and verified by AutoCAD reading our output back cell for cell (R2010+ writes through the paired TABLECONTENT object) |
 | MULTILEADER | ✅ read + write, its own record |
 | ACIS solids | ✅ SAT write everywhere, SAB from R2007 in the dialect that container's kernel reads (pre-ASM inline at AC1021, ASM through AcDs at AC1032), and SAB→SAT conversion so a binary payload reaches a target that cannot hold it |
 | GEODATA + georeferenced GeoJSON | ✅ DWG and DXF read, DXF write, WGS84 output |

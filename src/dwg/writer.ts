@@ -944,20 +944,6 @@ const writeDwgImpl = (
         }
       }
 
-      /* AC1021 is the one container whose ACAD_TABLE record we cannot
-         spell yet. The inline grid every other pre-R2010 container takes
-         (R2000 and R2004 are externally gated on it) is refused at R2007
-         with ErrorStatus 53 — with cell text and without it alike, and
-         under every variant of the two R2007-only cell fields — and the
-         same record read back out of an AutoCAD-minted AC1021 table
-         decodes with empty cell text, so our belief about that record is
-         incomplete on the read side too. Reported rather than written:
-         one skipped entity beats a drawing AutoCAD refuses whole. */
-      if (V === 2007 && e.type === 'table') {
-        skipped.push('table (R2007 record unsolved)');
-        return false;
-      }
-
       /* ACAD_TABLE, MULTILEADER, LIGHT and the underlays are application
          classes, and a class needs a CLASSES record to be nameable. R13
          and R14 have no such record, so they cannot carry them at all. */
@@ -2267,14 +2253,35 @@ const writeDwgImpl = (
             w.bl(cell.spanColumns ?? 1);
             w.bl(cell.spanRows ?? 1);
             w.bd(0);                      /* rotation */
-            /* R2007 alone inserts a BD (1.0) after the rotation and closes
-               each cell with three BLs (3, 0, 0) — both constants in every
-               cell of AutoCAD-2027-minted 2007 tables (brute-force solved
-               against 2x4 and 3x4 grids landing exactly on the tail bits) */
-            if (V === 2007) w.bd(1);
-            w.t(outText(cell.text ?? '')); /* the style handle is below */
-            w.b(0);                       /* no per-cell overrides */
-            if (V === 2007) { w.bl(3); w.bl(0); w.bl(0); }
+            /* R2007 alone inserts a BD (1.0) after the rotation, and its
+               cell content is a full table VALUE rather than a bare
+               string: the additional-data flag comes first, then the
+               format flags, the data type, the text inline as
+               byte-counted UTF-16, the unit type, and finally the two
+               string-stream entries (the value's format string and its
+               rendered form). Pinned against AutoCAD-minted AC1021
+               tables: each 1-character cell is 109 bits, and the walk
+               lands on the four override bits exactly, on a 2x2 grid of
+               single letters and a 3x2 grid of 1-to-8 character cells. */
+            if (V === 2007) {
+              w.bd(1);
+              w.b(0);                     /* no per-cell overrides */
+              w.bl(4);                    /* format flags: value inline */
+              w.bl(4);                    /* data type: string */
+              const s = cell.text ?? '';
+              w.bs((s.length + 1) * 2);   /* bytes, NUL included */
+              for (let k = 0; k < s.length; k++) {
+                const cu = s.charCodeAt(k);
+                w.rc(cu & 0xff); w.rc((cu >> 8) & 0xff);
+              }
+              w.rc(0); w.rc(0);           /* the terminator */
+              w.bl(0);                    /* unit type */
+              w.t('');                    /* format string */
+              w.t(s);                     /* the rendered form */
+            } else {
+              w.t(outText(cell.text ?? '')); /* the style handle is below */
+              w.b(0);                     /* no per-cell overrides */
+            }
           }
           /* the four override-presence flags: table, border colour,
              border lineweight, border visibility. AutoCAD reads them

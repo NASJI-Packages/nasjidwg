@@ -2569,8 +2569,25 @@ const decodeTable = (x: Ctx, raw: RawObject): Entity => {
     let additional = false;
     if (type === 1) {
       x.hr.h();                           /* text style */
-      cell.text = x.text() || undefined;
-      additional = r.b() === 1;
+      /* R2007 stores the cell's content as a full table VALUE, not a bare
+         string: the record's string stream holds two entries per cell (an
+         empty format string, then the rendered text), which a single
+         string read cannot account for. */
+      if (extras) {
+        /* R2007 keeps the cell's content as a full table VALUE, and puts
+           the additional-data flag ahead of it rather than behind. Pinned
+           on an AutoCAD-minted AC1021 table: each cell is 109 bits, the
+           44-bit prologue above leaves 65, and
+           B(0) BL(4) BL(4) BS(4) 'a'  BL(0) consumes exactly that — the
+           format flags say the value is stored inline, the data type says
+           string, and the two string-stream entries the record carries per
+           cell are the value's format string and its rendered text. */
+        additional = r.b() === 1;
+        cell.text = readTableValue(x);
+      } else {
+        cell.text = x.text() || undefined;
+        additional = r.b() === 1;
+      }
     } else if (type === 2) {
       x.hr.h();                           /* block handle */
       r.bd();                             /* block scale */
@@ -2606,7 +2623,6 @@ const decodeTable = (x: Ctx, raw: RawObject): Entity => {
     }
     /* R2007 closes every cell with three BLs — 3, 0, 0 in real files
        (same brute-force evidence as the BD above). */
-    if (extras) { r.bl(); r.bl(); r.bl(); }
     cells.push(cell);
   }
   };
