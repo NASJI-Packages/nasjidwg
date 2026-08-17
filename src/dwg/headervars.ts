@@ -8,7 +8,7 @@
 
 import { BitReader, decodeCodepage } from './bitstream.js';
 import { versionRank } from './fileheader.js';
-import type { FileVersion, Point2, Point3 } from '../core/model.js';
+import type { FileVersion, HeaderUcs, Point2, Point3 } from '../core/model.js';
 
 export interface HeaderVars {
   insUnits?: number;
@@ -26,6 +26,12 @@ export interface HeaderVars {
   dimStyleHandle?: number;
   handseed?: number;
   celColorIndex?: number;
+  /** UCSORG/UCSXDIR/UCSYDIR: the current coordinate system. A drawing laid
+   *  out at an angle carries the rotation here, so dropping it draws the
+   *  model turned. */
+  ucs?: HeaderUcs;
+  /** The paper-space twin (PUCSORG/PUCSXDIR/PUCSYDIR). */
+  pUcs?: HeaderUcs;
   measurementMetricUnits?: boolean;
   /** Assorted named scalars, for callers that want more. */
   vars: Record<string, number | string | boolean>;
@@ -186,7 +192,7 @@ const readHeaderVarsWith = (
     p3(); p3();                           /* PEXTMIN/MAX */
     p2(); p2();                           /* PLIMMIN/MAX */
     r.bd();                               /* PELEVATION */
-    p3(); p3(); p3();                     /* PUCSORG/XDIR/YDIR */
+    out.pUcs = { origin: p3(), xAxis: p3(), yAxis: p3() };
     H();                                  /* PUCSNAME */
     if (v >= 2000) {
       H(); r.bs(); H();                   /* PUCSORTHOREF/VIEW/BASE */
@@ -199,7 +205,7 @@ const readHeaderVarsWith = (
     out.limMin = p2();
     out.limMax = p2();
     r.bd();                               /* ELEVATION */
-    p3(); p3(); p3();                     /* UCSORG/XDIR/YDIR */
+    out.ucs = { origin: p3(), xAxis: p3(), yAxis: p3() };
     H();                                  /* UCSNAME */
     if (v >= 2000) {
       H(); r.bs(); H();

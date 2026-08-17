@@ -850,7 +850,46 @@ export interface VPort {
   direction?: Point3;
   target?: Point3;
   snapBase?: Point2;
+  snapSpacing?: Point2;
   gridSpacing?: Point2;
+  /** VIEWTWIST, in radians. The view is drawn rotated by this much, so a
+   *  drawing laid out at an angle in model space still reads square on
+   *  screen — a consumer that ignores it shows the model tilted. */
+  twist?: number;
+  lensLength?: number;
+  frontClip?: number;
+  backClip?: number;
+  viewMode?: number;
+  circleSides?: number;
+  fastZoom?: boolean;
+  /** UCSICON: bit 0 the icon is on, bit 1 it sits at the origin. */
+  ucsIcon?: number;
+  /** UCSFOLLOW. DXF folds it into group 71 as bit 8. */
+  ucsFollow?: boolean;
+  gridOn?: boolean;
+  snapOn?: boolean;
+  snapStyle?: number;
+  snapIsoPair?: number;
+  snapAngle?: number;
+  /** The viewport's own UCS (R2000+ carries it in the record itself). */
+  ucsOrigin?: Point3;
+  ucsXAxis?: Point3;
+  ucsYAxis?: Point3;
+  ucsElevation?: number;
+  ucsOrthoType?: number;
+  /** UCSVP: whether the viewport keeps its own UCS. */
+  ucsPerViewport?: boolean;
+  renderMode?: number;
+}
+
+/** The drawing's current coordinate system, from the header's UCSORG /
+ *  UCSXDIR / UCSYDIR. A rotated UCS is how a drawing comes to sit at an
+ *  angle in model space, so a consumer that drops it draws the model
+ *  turned. */
+export interface HeaderUcs {
+  origin: Point3;
+  xAxis: Point3;
+  yAxis: Point3;
 }
 
 /** A dictionary-owned proxy object (ACAD_PROXY_OBJECT): the non-entity
@@ -914,6 +953,9 @@ export interface Header {
   limMin?: Point2;
   limMax?: Point2;
   linetypeScale?: number;
+  /** The current UCS (model space), and the paper-space one beside it. */
+  ucs?: HeaderUcs;
+  pUcs?: HeaderUcs;
   /** Anything else read from the source header, keyed by variable name. */
   vars?: Record<string, unknown>;
   /** Document summary properties (title, author, custom fields). */

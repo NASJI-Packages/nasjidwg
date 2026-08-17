@@ -20,7 +20,7 @@ import { assemble2007 } from './container2007.js';
 import { buildAcDs } from './meta.js';
 import { sabToSat } from '../acis/sab.js';
 import type {
-  DimStyle, Drawing, Entity, Layer, Linetype, Point2, TextStyle
+  DimStyle, Drawing, Entity, Layer, Linetype, Point2, Point3, TextStyle
 } from '../core/model.js';
 import { shapeArabic, mirrorBrackets, hasComplexScript } from '../text/arabic.js';
 import { encodeCadSymbols } from '../text/escapes.js';
@@ -3334,45 +3334,70 @@ const writeDwgImpl = (
 
   /* ---- the active model viewport: every AutoCAD drawing has one ---- */
   {
+    /* The saved view goes out as the drawing carries it — the twist above
+       all, since a drawing laid out at an angle is drawn turned without
+       it. A drawing with no view of its own gets the defaults that were
+       here before. */
+    const av = (drawing.vports ?? []).find((p) => /^\*active$/i.test(p.name));
+    const p2 = (p: Point2 | undefined, dx: number, dy: number): [number, number] =>
+      p ? [p.x, p.y] : [dx, dy];
+    const p3v = (p: Point3 | undefined, d: readonly [number, number, number])
+      : [number, number, number] => p ? [p.x, p.y, p.z ?? 0] : [d[0], d[1], d[2]];
     makeObject(65, vportActive, (w) => {
       tableFlags(w, '*Active');
-      w.bd(100);                          /* view height */
-      w.bd(150);                          /* view width */
-      w.rd(50); w.rd(50);                 /* view center */
-      w.bd3(0, 0, 0);                     /* view target */
-      w.bd3(0, 0, 1);                     /* view direction */
-      w.bd(0);                            /* twist */
-      w.bd(50);                           /* lens length */
-      w.bd(0); w.bd(0);                   /* front / back clip */
-      w.b(0); w.b(0); w.b(0); w.b(0);     /* view mode bits */
-      if (V >= 2000) w.rc(0);             /* render mode */
+      w.bd(av?.height ?? 100);            /* view height */
+      w.bd(av?.aspectRatio ?? 150);       /* view width / aspect */
+      const [ccx, ccy] = p2(av?.center, 50, 50);
+      w.rd(ccx); w.rd(ccy);               /* view center */
+      const [ttx, tty, ttz] = p3v(av?.target, [0, 0, 0]);
+      w.bd3(ttx, tty, ttz);               /* view target */
+      const [ddx, ddy, ddz] = p3v(av?.direction, [0, 0, 1]);
+      w.bd3(ddx, ddy, ddz);               /* view direction */
+      w.bd(av?.twist ?? 0);               /* VIEWTWIST, radians */
+      w.bd(av?.lensLength ?? 50);         /* lens length */
+      w.bd(av?.frontClip ?? 0); w.bd(av?.backClip ?? 0);
+      /* three view-mode flags, low bit first, then the fourth bit every
+         genuine file sets (see the reader for how that was graded) */
+      const vm = av?.viewMode ?? 0;
+      w.b(vm & 1); w.b((vm >> 1) & 1); w.b((vm >> 2) & 1); w.b(1);
+      if (V >= 2000) w.rc(av?.renderMode ?? 0);
       if (V >= 2007) {
         w.b(1);                           /* default lights */
         w.rc(1);                          /* default lighting type */
         w.bd(0); w.bd(0);                 /* brightness, contrast */
         w.bs(250); w.bl(0); w.rc(0);      /* ambient color (CMC) */
       }
-      w.rd(0); w.rd(0);                   /* lower left */
-      w.rd(1); w.rd(1);                   /* upper right */
-      w.b(0);                             /* UCSFOLLOW */
-      w.bs(1000);                         /* circle sides */
-      w.b(1);                             /* fast zoom */
-      w.bb(3);                            /* UCS icon on + at origin */
-      w.b(0);                             /* grid off */
-      w.rd(10); w.rd(10);                 /* grid spacing */
-      w.b(0);                             /* snap off */
-      w.b(0);                             /* snap style */
-      w.bs(0);                            /* snap isopair */
-      w.bd(0);                            /* snap angle */
-      w.rd(0); w.rd(0);                   /* snap base */
-      w.rd(10); w.rd(10);                 /* snap spacing */
+      const [llx, lly] = p2(av?.lowerLeft, 0, 0);
+      const [urx, ury] = p2(av?.upperRight, 1, 1);
+      w.rd(llx); w.rd(lly);               /* lower left */
+      w.rd(urx); w.rd(ury);               /* upper right */
+      w.b(av?.ucsFollow ? 1 : 0);         /* UCSFOLLOW */
+      w.bs(av?.circleSides ?? 1000);      /* circle sides */
+      w.b(av?.fastZoom === false ? 0 : 1);
+      const icon = av?.ucsIcon ?? 3;      /* icon on / at origin, low bit first */
+      w.b(icon & 1); w.b((icon >> 1) & 1);
+      w.b(av?.gridOn ? 1 : 0);
+      const [gsx, gsy] = p2(av?.gridSpacing, 10, 10);
+      w.rd(gsx); w.rd(gsy);               /* grid spacing */
+      w.b(av?.snapOn ? 1 : 0);
+      w.b(av?.snapStyle ?? 0);
+      w.bs(av?.snapIsoPair ?? 0);
+      w.bd(av?.snapAngle ?? 0);
+      const [sbx, sby] = p2(av?.snapBase, 0, 0);
+      w.rd(sbx); w.rd(sby);               /* snap base */
+      const [ssx, ssy] = p2(av?.snapSpacing, 10, 10);
+      w.rd(ssx); w.rd(ssy);               /* snap spacing */
       if (V >= 2000) {
-        w.b(1);                           /* UCS at origin */
-        w.b(1);                           /* UCS per viewport */
-        w.bd3(0, 0, 0);                   /* UCS origin */
-        w.bd3(1, 0, 0); w.bd3(0, 1, 0);   /* UCS axes */
-        w.bd(0);                          /* UCS elevation */
-        w.bs(0);                          /* orthographic view type */
+        w.b((icon >> 2) & 1);             /* UCSICON's third bit */
+        w.b(av?.ucsPerViewport === false ? 0 : 1);
+        const hu = drawing.header.ucs;
+        const [uox, uoy, uoz] = p3v(av?.ucsOrigin ?? hu?.origin, [0, 0, 0]);
+        const [uxx, uxy, uxz] = p3v(av?.ucsXAxis ?? hu?.xAxis, [1, 0, 0]);
+        const [uyx, uyy, uyz] = p3v(av?.ucsYAxis ?? hu?.yAxis, [0, 1, 0]);
+        w.bd3(uox, uoy, uoz);             /* UCS origin */
+        w.bd3(uxx, uxy, uxz); w.bd3(uyx, uyy, uyz);
+        w.bd(av?.ucsElevation ?? 0);      /* UCS elevation */
+        w.bs(av?.ucsOrthoType ?? 0);      /* orthographic view type */
       }
       if (V >= 2007) { w.bs(3); w.bs(5); }  /* grid flags, major */
     }, (w) => {
@@ -3692,8 +3717,10 @@ const writeDwgImpl = (
     w.bd3(0, 0, 0); w.bd3(0, 0, 0);       /* PEXTMIN/MAX */
     w.rd(0); w.rd(0); w.rd(12); w.rd(9);  /* PLIMMIN/MAX */
     w.bd(0);                              /* PELEVATION */
-    w.bd3(0, 0, 0);                       /* PUCSORG */
-    w.bd3(1, 0, 0); w.bd3(0, 1, 0);       /* PUCSXDIR/YDIR */
+    const pu = drawing.header.pUcs;
+    w.bd3(pu?.origin.x ?? 0, pu?.origin.y ?? 0, pu?.origin.z ?? 0);   /* PUCSORG */
+    w.bd3(pu?.xAxis.x ?? 1, pu?.xAxis.y ?? 0, pu?.xAxis.z ?? 0);      /* PUCSXDIR */
+    w.bd3(pu?.yAxis.x ?? 0, pu?.yAxis.y ?? 1, pu?.yAxis.z ?? 0);      /* PUCSYDIR */
     H(5, 0);                              /* PUCSNAME */
     if (V >= 2000) {
       H(5, 0); w.bs(0); H(5, 0);          /* PUCSORTHOREF/VIEW/BASE */
@@ -3713,8 +3740,12 @@ const writeDwgImpl = (
     };
     w.rd(lim.min.x); w.rd(lim.min.y); w.rd(lim.max.x); w.rd(lim.max.y);
     w.bd(0);                              /* ELEVATION */
-    w.bd3(0, 0, 0);                       /* UCSORG */
-    w.bd3(1, 0, 0); w.bd3(0, 1, 0);
+    /* the current UCS: a drawing laid out at an angle keeps its rotation
+       here, and writing the world default instead turns the model back */
+    const hu = drawing.header.ucs;
+    w.bd3(hu?.origin.x ?? 0, hu?.origin.y ?? 0, hu?.origin.z ?? 0);   /* UCSORG */
+    w.bd3(hu?.xAxis.x ?? 1, hu?.xAxis.y ?? 0, hu?.xAxis.z ?? 0);      /* UCSXDIR */
+    w.bd3(hu?.yAxis.x ?? 0, hu?.yAxis.y ?? 1, hu?.yAxis.z ?? 0);      /* UCSYDIR */
     H(5, 0);                              /* UCSNAME */
     if (V >= 2000) {
       H(5, 0); w.bs(0); H(5, 0);          /* UCSORTHOREF/VIEW/BASE */

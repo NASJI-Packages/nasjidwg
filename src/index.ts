@@ -56,11 +56,11 @@ export type { AuditFinding } from './core/audit.js';
 export {
   entityBounds, drawingBounds, contentBounds, transformEntity, explodeInsert,
   explodePolyline, flattenPolyline, sampleBulge, clone,
-  identity, compose, translation, rotationT, scaling, insertTransform
+  identity, compose, translation, rotationT, scaling, insertTransform, applyPt
 } from './core/geo.js';
 export { explodeDimension } from './core/dim.js';
-export { ocsTransform, ocsToWcs, toWcs } from './core/geo.js';
-export type { Transform3 } from './core/geo.js';
+export { ocsTransform, ocsToWcs, toWcs, ucsTransform, viewTwistTransform } from './core/geo.js';
+export type { Transform2, Transform3 } from './core/geo.js';
 
 export {
   shapeArabic, unshapeArabic, mirrorBrackets,

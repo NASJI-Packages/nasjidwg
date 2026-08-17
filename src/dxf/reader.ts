@@ -286,6 +286,10 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
     /* ---- HEADER ---- */
     const parseHeader = (start: number, end: number): void => {
       const hdr = drawing.header;
+      /* the UCS triples arrive as three separate header variables, so they
+         are collected here and assembled once the section is done */
+      let ucsOrg: Point3 | undefined, ucsX: Point3 | undefined, ucsY: Point3 | undefined;
+      let pucsOrg: Point3 | undefined, pucsX: Point3 | undefined, pucsY: Point3 | undefined;
       let k = start;
       while (k < end) {
         if (pairs[k][0] !== 9) { k++; continue; }
@@ -314,6 +318,14 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
             if (v != null && v > 0) hdr.linetypeScale = v;
             break;
           }
+          /* the current coordinate system: a drawing laid out at an angle
+             carries its rotation here, so it has to survive the DXF trip */
+          case '$UCSORG': ucsOrg = pt3(q, 10, 20, 30); break;
+          case '$UCSXDIR': ucsX = pt3(q, 10, 20, 30); break;
+          case '$UCSYDIR': ucsY = pt3(q, 10, 20, 30); break;
+          case '$PUCSORG': pucsOrg = pt3(q, 10, 20, 30); break;
+          case '$PUCSXDIR': pucsX = pt3(q, 10, 20, 30); break;
+          case '$PUCSYDIR': pucsY = pt3(q, 10, 20, 30); break;
           case '$DIMSCALE': case '$DIMASZ': case '$DIMEXO': case '$DIMDLI':
           case '$DIMEXE': case '$DIMRND': case '$DIMDLE': case '$DIMTP':
           case '$DIMTM': case '$DIMTXT': case '$DIMCEN': case '$DIMTSZ':
@@ -342,6 +354,15 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
             break;
         }
       }
+      /* only a UCS that is actually turned is worth carrying: the world
+         default says nothing a consumer does not already assume */
+      const turned = (o?: Point3, x?: Point3, y?: Point3): boolean =>
+        !!o && !!x && !!y
+        && !(x.x === 1 && x.y === 0 && x.z === 0
+             && y.x === 0 && y.y === 1 && y.z === 0
+             && o.x === 0 && o.y === 0 && o.z === 0);
+      if (turned(ucsOrg, ucsX, ucsY)) hdr.ucs = { origin: ucsOrg!, xAxis: ucsX!, yAxis: ucsY! };
+      if (turned(pucsOrg, pucsX, pucsY)) hdr.pUcs = { origin: pucsOrg!, xAxis: pucsX!, yAxis: pucsY! };
     };
 
     /* ---- CLASSES: retained by position — class ids start at 500 with
@@ -1382,7 +1403,51 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
               if (q.numOr(16) != null) vp.direction = pt3(q, 16, 26, 36);
               if (q.numOr(17) != null) vp.target = pt3(q, 17, 27, 37);
               if (q.numOr(13) != null) vp.snapBase = { x: q.num(13, 0), y: q.num(23, 0) };
+              if (q.numOr(14) != null) vp.snapSpacing = { x: q.num(14, 0), y: q.num(24, 0) };
               if (q.numOr(15) != null) vp.gridSpacing = { x: q.num(15, 0), y: q.num(25, 0) };
+              /* group 51 is the view twist in degrees; the model keeps
+                 angles in radians, as every other angle in it does */
+              const tw = q.numOr(51);
+              if (tw != null) vp.twist = tw * RAD;
+              const sa = q.numOr(50);
+              if (sa != null) vp.snapAngle = sa * RAD;
+              const lens = q.numOr(42);
+              if (lens != null) vp.lensLength = lens;
+              const fc = q.numOr(43);
+              if (fc != null) vp.frontClip = fc;
+              const bc = q.numOr(44);
+              if (bc != null) vp.backClip = bc;
+              const vm = q.numOr(71);
+              if (vm != null) {
+                /* AutoCAD folds UCSFOLLOW into 71 as bit 8 */
+                vp.viewMode = vm & ~8;
+                vp.ucsFollow = (vm & 8) !== 0;
+              }
+              const cs = q.numOr(72);
+              if (cs != null) vp.circleSides = cs;
+              const fz = q.numOr(73);
+              if (fz != null) vp.fastZoom = fz !== 0;
+              const ic = q.numOr(74);
+              if (ic != null) vp.ucsIcon = ic;
+              const sn = q.numOr(75);
+              if (sn != null) vp.snapOn = sn !== 0;
+              const gr = q.numOr(76);
+              if (gr != null) vp.gridOn = gr !== 0;
+              const ss = q.numOr(77);
+              if (ss != null) vp.snapStyle = ss;
+              const si = q.numOr(78);
+              if (si != null) vp.snapIsoPair = si;
+              const rm = q.numOr(281);
+              if (rm != null) vp.renderMode = rm;
+              const uvp = q.numOr(65);
+              if (uvp != null) vp.ucsPerViewport = uvp !== 0;
+              if (q.numOr(110) != null) vp.ucsOrigin = pt3(q, 110, 120, 130);
+              if (q.numOr(111) != null) vp.ucsXAxis = pt3(q, 111, 121, 131);
+              if (q.numOr(112) != null) vp.ucsYAxis = pt3(q, 112, 122, 132);
+              const uot = q.numOr(79);
+              if (uot != null) vp.ucsOrthoType = uot;
+              const uel = q.numOr(146);
+              if (uel != null) vp.ucsElevation = uel;
               (drawing.vports ??= []).push(vp);
             } else if (tName === 'STYLE') {
               const st: TextStyle = { name: decodeCadText(nm) };

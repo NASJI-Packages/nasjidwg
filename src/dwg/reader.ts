@@ -8,7 +8,7 @@
  */
 
 import type {
-  BlockDefinition, Drawing, Entity, FileVersion, Layer, MeshEntity,
+  BlockDefinition, Drawing, Entity, FileVersion, HeaderUcs, Layer, MeshEntity,
   PolylineEntity
 } from '../core/model.js';
 import { emptyDrawing } from '../core/model.js';
@@ -131,6 +131,18 @@ export const readDwg = (
       drawing.header.limMax = hv.limMax;
     }
     if (hv.insUnits !== undefined) drawing.header.insUnits = hv.insUnits;
+    /* The current UCS. A drawing laid out at an angle carries its rotation
+       here and nowhere else before R2000, so a consumer that never sees it
+       draws the model turned — which is exactly what dropping it did. */
+    const sameAsWorld = (u?: HeaderUcs): boolean =>
+      !!u && u.origin.x === 0 && u.origin.y === 0 && u.origin.z === 0
+      && u.xAxis.x === 1 && u.xAxis.y === 0 && u.xAxis.z === 0
+      && u.yAxis.x === 0 && u.yAxis.y === 1 && u.yAxis.z === 0;
+    const usable = (u?: HeaderUcs): boolean =>
+      !!u && [u.origin, u.xAxis, u.yAxis].every(
+        (p2) => [p2.x, p2.y, p2.z].every((q) => Number.isFinite(q) && Math.abs(q) < 1e19));
+    if (usable(hv.ucs) && !sameAsWorld(hv.ucs)) drawing.header.ucs = hv.ucs;
+    if (usable(hv.pUcs) && !sameAsWorld(hv.pUcs)) drawing.header.pUcs = hv.pUcs;
     if (hv.ltScale && hv.ltScale > 0 && hv.ltScale !== 1) {
       drawing.header.linetypeScale = hv.ltScale;
     }

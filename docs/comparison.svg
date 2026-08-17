@@ -1,189 +1,193 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1560" height="2148" viewBox="0 0 1560 2148" font-family="Segoe UI, -apple-system, Roboto, Helvetica, Arial, sans-serif">
-<rect width="1560" height="2148" fill="#0a0c10"/>
-<rect x="24" y="24" width="1512" height="2100" rx="14" fill="#161b22"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="1560" height="2195" viewBox="0 0 1560 2195" font-family="Segoe UI, -apple-system, Roboto, Helvetica, Arial, sans-serif">
+<rect width="1560" height="2195" fill="#0a0c10"/>
+<rect x="24" y="24" width="1512" height="2147" rx="14" fill="#161b22"/>
 <text x="54" y="82" font-size="30" font-weight="700" fill="#e6edf3">nasjidwg compared with the other open DWG/DXF libraries</text>
 <text x="54" y="110" font-size="14" fill="#9198a1">Facts checked against each project's own source and documentation. Names are used to identify the projects; no affiliation is implied.</text>
-<text x="54" y="148" font-size="18" font-weight="700" fill="#58a6ff">R2007 write solved: all seven writable releases now open in AutoCAD at AUDIT 0</text>
-<text x="1506" y="148" text-anchor="end" font-size="13" fill="#9198a1">2026-08-17 15:20 EDT   ·   646 passing · gate exit 0 · pack clean</text>
+<text x="54" y="148" font-size="18" font-weight="700" fill="#58a6ff">Rotated layouts now survive: VIEWTWIST and the header UCS are read, written and exported</text>
+<text x="1506" y="148" text-anchor="end" font-size="13" fill="#9198a1">2026-08-17 16:30 EDT   ·   655 passing · gate exit 0 · pack clean</text>
 <text x="62" y="186" font-size="14" fill="#3fb950">✓  R12 · R13 · R14 · R2000 · R2004 · R2007 · R2018</text>
 <text x="484" y="186" font-size="14" fill="#3fb950">all OPEN + AUDIT 0 errors in AutoCAD 2027 (gated)</text>
-<text x="62" y="210" font-size="14" fill="#3fb950">✓  R2007: empty CLASSES payload</text>
-<text x="484" y="210" font-size="14" fill="#3fb950">AC1021 refuses it exactly as AC1032 does — the stub record now goes out from R2007 on</text>
-<text x="62" y="234" font-size="14" fill="#3fb950">✓  R2007: inline ACIS framing</text>
-<text x="484" y="234" font-size="14" fill="#3fb950">the payload starts on the BIT after its version field, then a flag and the cached wireframe block — measured on genuine records, both hidden by a</text>
-<text x="484" y="252" font-size="14" fill="#3fb950">reader that probes for the magic</text>
-<text x="62" y="276" font-size="14" fill="#3fb950">✓  R2007: kernel dialect</text>
-<text x="484" y="276" font-size="14" fill="#3fb950">AC1021 reads only the pre-ASM binary form inline; an ASM stream now leaves as SAT or is reported</text>
-<text x="62" y="300" font-size="14" fill="#3fb950">✓  random_seed at record 0x100</text>
-<text x="484" y="300" font-size="14" fill="#3fb950">retired as a blocker: five drawings saved from five separate AutoCAD launches carry the identical value — it is a per-process RNG draw, not a</text>
-<text x="484" y="318" font-size="14" fill="#3fb950">function of the file</text>
-<text x="62" y="342" font-size="14" fill="#3fb950">✓  Page slack is a generated stream</text>
-<text x="484" y="342" font-size="14" fill="#3fb950">one MT19937 init array per file feeds every slack region and the seven envelope fields; its content is free (zeroed + re-parity'd audits clean)</text>
-<text x="62" y="366" font-size="14" fill="#3fb950">✓  Provenance: AcDs section</text>
-<text x="484" y="366" font-size="14" fill="#3fb950">4429 lifted bytes replaced by a hand-written emitter — still AUDIT 0/0, no thumbnail bytes</text>
-<text x="62" y="390" font-size="14" fill="#3fb950">✓  Provenance: header keystream run</text>
-<text x="484" y="390" font-size="14" fill="#3fb950">20 copied bytes now generated from the LCG (stream index = file offset)</text>
-<text x="62" y="414" font-size="14" fill="#3fb950">✓  Provenance: 3DSOLID bit tail</text>
-<text x="484" y="414" font-size="14" fill="#3fb950">decoded field by field (the GUID was a plain UUIDv4) — 163 bits, all computed, AUDIT 0/0</text>
-<text x="62" y="438" font-size="14" fill="#3fb950">✓  Byte-preserving rewrite</text>
-<text x="484" y="438" font-size="14" fill="#3fb950">verbatimRecords shipped</text>
-<text x="62" y="462" font-size="14" fill="#3fb950">✓  Reader: 317 real files</text>
-<text x="484" y="462" font-size="14" fill="#3fb950">zero throws, CRCs on</text>
-<text x="62" y="486" font-size="14" fill="#8b949e">•  R2007 ACAD_TABLE record</text>
-<text x="484" y="486" font-size="14" fill="#8b949e">the one entity AC1021 output cannot carry: the inline grid every other pre-R2010 container takes is refused there, with cell text and without it</text>
-<text x="484" y="504" font-size="14" fill="#8b949e">— reported in skipped, never dropped silently</text>
-<text x="62" y="528" font-size="14" fill="#3fb950">✓  Licence + provenance audit</text>
-<text x="484" y="528" font-size="14" fill="#3fb950">no third-party file or code in the tree (hash-verified); PROVENANCE.md + NOTICE state the method</text>
-<text x="62" y="552" font-size="14" fill="#3fb950">✓  R2007 Reed-Solomon parity</text>
-<text x="484" y="552" font-size="14" fill="#3fb950">rsEncode used one generator for both codes — fixed, now byte-exact on 102 headers + 1231 pages + 55189 blocks</text>
-<text x="62" y="576" font-size="14" fill="#3fb950">✓  Whole-file recompression</text>
-<text x="484" y="576" font-size="14" fill="#3fb950">genuine files fully recompressed and re-encoded by us: AUDIT 0 errors (180 KB file, 2600 objects)</text>
-<text x="62" y="602" font-size="13" fill="#9198a1">R2007 was never blocked by the header field four campaigns had pinned on. Making AutoCAD mint the evidence settled it: five</text>
-<text x="62" y="621" font-size="13" fill="#9198a1">different drawings saved to R2007 from five separate accoreconsole launches carry the IDENTICAL random_seed, prologue key,</text>
-<text x="62" y="640" font-size="13" fill="#9198a1">check-data word and crc_seed_encoded — one draw of a per-process RNG, carrying no information about the file, and zero is</text>
-<text x="62" y="659" font-size="13" fill="#9198a1">accepted. The real defects were three, all in shipped code and all invisible to a self round trip: an empty CLASSES payload</text>
-<text x="62" y="678" font-size="13" fill="#9198a1">(refused at AC1021 exactly as at AC1032), an inline ACIS payload written a bit-alignment off, and the cached wireframe block that</text>
-<text x="62" y="697" font-size="13" fill="#9198a1">has to follow it. The one entity still short is ACAD_TABLE, which the writer now reports instead of emitting a drawing AutoCAD</text>
-<text x="62" y="716" font-size="13" fill="#9198a1">refuses whole.</text>
-<text x="62" y="737" font-size="13" fill="#e6edf3">+ R2007 write solved and gated — the seventh release now opens at AUDIT 0 errors with the full corpus</text>
-<text x="62" y="758" font-size="13" fill="#e6edf3">+ random_seed retired as a blocker by an experiment, not an argument: same value from five separate AutoCAD launches</text>
-<text x="62" y="779" font-size="13" fill="#e6edf3">+ Page slack identified as one MT19937 init array per file, and proven free — an earlier ledger called it uninitialised memory</text>
-<line x1="54" y1="797" x2="1506" y2="797" stroke="#30363d"/>
-<text x="54" y="837" font-size="16" font-weight="600" fill="#e6edf3">Capability</text>
-<text x="524" y="837" font-size="16" font-weight="600" fill="#58a6ff">nasjidwg</text>
-<text x="774" y="837" font-size="16" font-weight="600" fill="#e6edf3">LibreDWG</text>
-<text x="1024" y="837" font-size="16" font-weight="600" fill="#e6edf3">ACadSharp</text>
-<text x="1274" y="837" font-size="16" font-weight="600" fill="#e6edf3">ezdxf</text>
-<line x1="54" y1="855" x2="1506" y2="855" stroke="#30363d"/>
-<text x="54" y="894" font-size="15" fill="#e6edf3">Language / runtime</text>
-<text x="524" y="894" font-size="15" fill="#3fb950">TypeScript</text>
-<text x="524" y="915" font-size="15" fill="#3fb950">browser + Node</text>
-<text x="774" y="894" font-size="15" fill="#e6edf3">C</text>
-<text x="1024" y="894" font-size="15" fill="#e6edf3">C#  .NET</text>
-<text x="1274" y="894" font-size="15" fill="#e6edf3">Python</text>
-<rect x="38" y="931" width="1484" height="47" rx="6" fill="rgba(255,255,255,0.025)"/>
-<text x="54" y="962" font-size="15" fill="#e6edf3">Licence</text>
-<text x="524" y="962" font-size="15" fill="#3fb950">MIT</text>
-<text x="774" y="962" font-size="15" fill="#d29922">GPL-3.0</text>
-<text x="1024" y="962" font-size="15" fill="#3fb950">MIT</text>
-<text x="1274" y="962" font-size="15" fill="#3fb950">MIT</text>
-<text x="54" y="1009" font-size="15" fill="#e6edf3">Native dependencies</text>
-<text x="524" y="1009" font-size="15" fill="#3fb950">none</text>
-<text x="774" y="1009" font-size="15" fill="#d29922">libc toolchain</text>
-<text x="1024" y="1009" font-size="15" fill="#d29922">.NET runtime</text>
-<text x="1274" y="1009" font-size="15" fill="#d29922">CPython</text>
-<rect x="38" y="1025" width="1484" height="47" rx="6" fill="rgba(255,255,255,0.025)"/>
-<text x="54" y="1056" font-size="15" fill="#e6edf3">Runs in the browser</text>
-<text x="524" y="1056" font-size="15" fill="#3fb950">yes</text>
-<text x="774" y="1056" font-size="15" fill="#d29922">via WASM port</text>
-<text x="1024" y="1056" font-size="15" fill="#8b949e">no</text>
-<text x="1274" y="1056" font-size="15" fill="#8b949e">no</text>
-<line x1="54" y1="1078" x2="1506" y2="1078" stroke="#30363d"/>
-<text x="54" y="1115" font-size="15" fill="#e6edf3">Reads DWG</text>
-<text x="524" y="1115" font-size="15" fill="#3fb950">R1.4 – R2018</text>
-<text x="774" y="1115" font-size="15" fill="#3fb950">R1.4 – R2018</text>
-<text x="1024" y="1115" font-size="15" fill="#3fb950">R13 – R2018</text>
-<text x="1274" y="1115" font-size="15" fill="#8b949e">no</text>
-<rect x="38" y="1131" width="1484" height="68" rx="6" fill="rgba(255,255,255,0.025)"/>
-<text x="54" y="1162" font-size="15" fill="#e6edf3">Writes DWG</text>
-<text x="524" y="1162" font-size="15" fill="#3fb950">R2.6 – R2018, every release</text>
-<text x="524" y="1183" font-size="15" fill="#3fb950">pages LZ77-compressed</text>
-<text x="774" y="1162" font-size="15" fill="#d29922">R13 – R2018</text>
-<text x="774" y="1183" font-size="15" fill="#d29922">(no native R2007)</text>
+<text x="62" y="210" font-size="14" fill="#3fb950">✓  Saved view: VIEWTWIST + VPORT record</text>
+<text x="484" y="210" font-size="14" fill="#3fb950">36 of 36 fields agree with AutoCAD DXFOUT on nine drawings across R14/R2000/R2007/R2018 — the twist was never decoded before and the walk drifted</text>
+<text x="484" y="228" font-size="14" fill="#3fb950">one BD from there on</text>
+<text x="62" y="252" font-size="14" fill="#3fb950">✓  Header UCS</text>
+<text x="484" y="252" font-size="14" fill="#3fb950">UCSORG/UCSXDIR/UCSYDIR were read and thrown away; captured now, written back, and carried through DXF as $UCSORG/$UCSXDIR/$UCSYDIR</text>
+<text x="62" y="276" font-size="14" fill="#3fb950">✓  R2007: empty CLASSES payload</text>
+<text x="484" y="276" font-size="14" fill="#3fb950">AC1021 refuses it exactly as AC1032 does — the stub record now goes out from R2007 on</text>
+<text x="62" y="300" font-size="14" fill="#3fb950">✓  R2007: inline ACIS framing</text>
+<text x="484" y="300" font-size="14" fill="#3fb950">the payload starts on the BIT after its version field, then a flag and the cached wireframe block — measured on genuine records, both hidden by a</text>
+<text x="484" y="318" font-size="14" fill="#3fb950">reader that probes for the magic</text>
+<text x="62" y="342" font-size="14" fill="#3fb950">✓  R2007: kernel dialect</text>
+<text x="484" y="342" font-size="14" fill="#3fb950">AC1021 reads only the pre-ASM binary form inline; an ASM stream now leaves as SAT or is reported</text>
+<text x="62" y="366" font-size="14" fill="#3fb950">✓  random_seed at record 0x100</text>
+<text x="484" y="366" font-size="14" fill="#3fb950">retired as a blocker: five drawings saved from five separate AutoCAD launches carry the identical value — it is a per-process RNG draw, not a</text>
+<text x="484" y="384" font-size="14" fill="#3fb950">function of the file</text>
+<text x="62" y="408" font-size="14" fill="#3fb950">✓  Page slack is a generated stream</text>
+<text x="484" y="408" font-size="14" fill="#3fb950">one MT19937 init array per file feeds every slack region and the seven envelope fields; its content is free (zeroed + re-parity'd audits clean)</text>
+<text x="62" y="432" font-size="14" fill="#3fb950">✓  Provenance: AcDs section</text>
+<text x="484" y="432" font-size="14" fill="#3fb950">4429 lifted bytes replaced by a hand-written emitter — still AUDIT 0/0, no thumbnail bytes</text>
+<text x="62" y="456" font-size="14" fill="#3fb950">✓  Provenance: header keystream run</text>
+<text x="484" y="456" font-size="14" fill="#3fb950">20 copied bytes now generated from the LCG (stream index = file offset)</text>
+<text x="62" y="480" font-size="14" fill="#3fb950">✓  Provenance: 3DSOLID bit tail</text>
+<text x="484" y="480" font-size="14" fill="#3fb950">decoded field by field (the GUID was a plain UUIDv4) — 163 bits, all computed, AUDIT 0/0</text>
+<text x="62" y="504" font-size="14" fill="#3fb950">✓  Byte-preserving rewrite</text>
+<text x="484" y="504" font-size="14" fill="#3fb950">verbatimRecords shipped</text>
+<text x="62" y="528" font-size="14" fill="#3fb950">✓  Reader: 317 real files</text>
+<text x="484" y="528" font-size="14" fill="#3fb950">zero throws, CRCs on</text>
+<text x="62" y="552" font-size="14" fill="#8b949e">•  R2007 ACAD_TABLE record</text>
+<text x="484" y="552" font-size="14" fill="#8b949e">the one entity AC1021 output cannot carry: the inline grid every other pre-R2010 container takes is refused there, with cell text and without it</text>
+<text x="484" y="570" font-size="14" fill="#8b949e">— reported in skipped, never dropped silently</text>
+<text x="62" y="594" font-size="14" fill="#3fb950">✓  Licence + provenance audit</text>
+<text x="484" y="594" font-size="14" fill="#3fb950">no third-party file or code in the tree (hash-verified); PROVENANCE.md + NOTICE state the method</text>
+<text x="62" y="618" font-size="14" fill="#3fb950">✓  R2007 Reed-Solomon parity</text>
+<text x="484" y="618" font-size="14" fill="#3fb950">rsEncode used one generator for both codes — fixed, now byte-exact on 102 headers + 1231 pages + 55189 blocks</text>
+<text x="62" y="642" font-size="14" fill="#3fb950">✓  Whole-file recompression</text>
+<text x="484" y="642" font-size="14" fill="#3fb950">genuine files fully recompressed and re-encoded by us: AUDIT 0 errors (180 KB file, 2600 objects)</text>
+<text x="62" y="668" font-size="13" fill="#9198a1">A real drawing found the next defect: an AC1014 site plan laid out at 45 degrees drew turned, because the whole rotation lives in</text>
+<text x="62" y="687" font-size="13" fill="#9198a1">two fields the library dropped. VIEWTWIST was never decoded at all — and because the walk skipped it, every field after it drifted</text>
+<text x="62" y="706" font-size="13" fill="#9198a1">one BD, which is why snapBase and gridSpacing used to come back as 6e-294 and 1e-314, and why the view direction and target came</text>
+<text x="62" y="725" font-size="13" fill="#9198a1">back swapped. The header UCS was read and discarded outright. Worst of the three, the DXF writer then put a hard zero in group 51:</text>
+<text x="62" y="744" font-size="13" fill="#9198a1">not missing data a consumer could handle, but a confident "this drawing is not rotated". The record layout was pinned bit for bit</text>
+<text x="62" y="763" font-size="13" fill="#9198a1">with AutoCAD DXFOUT as the oracle, and now grades 36 of 36 fields on nine drawings.</text>
+<text x="62" y="784" font-size="13" fill="#e6edf3">+ VIEWTWIST, the viewport UCS and the whole VPORT record read, written and round-tripped — graded 36/36 against AutoCAD</text>
+<text x="62" y="805" font-size="13" fill="#e6edf3">+ Header UCS captured instead of discarded, and written back by every DWG writer and the DXF writer</text>
+<text x="62" y="826" font-size="13" fill="#e6edf3">+ viewTwistTransform and ucsTransform: the transform that squares a rotated drawing, measured rather than assumed</text>
+<line x1="54" y1="844" x2="1506" y2="844" stroke="#30363d"/>
+<text x="54" y="884" font-size="16" font-weight="600" fill="#e6edf3">Capability</text>
+<text x="524" y="884" font-size="16" font-weight="600" fill="#58a6ff">nasjidwg</text>
+<text x="774" y="884" font-size="16" font-weight="600" fill="#e6edf3">LibreDWG</text>
+<text x="1024" y="884" font-size="16" font-weight="600" fill="#e6edf3">ACadSharp</text>
+<text x="1274" y="884" font-size="16" font-weight="600" fill="#e6edf3">ezdxf</text>
+<line x1="54" y1="902" x2="1506" y2="902" stroke="#30363d"/>
+<text x="54" y="941" font-size="15" fill="#e6edf3">Language / runtime</text>
+<text x="524" y="941" font-size="15" fill="#3fb950">TypeScript</text>
+<text x="524" y="962" font-size="15" fill="#3fb950">browser + Node</text>
+<text x="774" y="941" font-size="15" fill="#e6edf3">C</text>
+<text x="1024" y="941" font-size="15" fill="#e6edf3">C#  .NET</text>
+<text x="1274" y="941" font-size="15" fill="#e6edf3">Python</text>
+<rect x="38" y="978" width="1484" height="47" rx="6" fill="rgba(255,255,255,0.025)"/>
+<text x="54" y="1009" font-size="15" fill="#e6edf3">Licence</text>
+<text x="524" y="1009" font-size="15" fill="#3fb950">MIT</text>
+<text x="774" y="1009" font-size="15" fill="#d29922">GPL-3.0</text>
+<text x="1024" y="1009" font-size="15" fill="#3fb950">MIT</text>
+<text x="1274" y="1009" font-size="15" fill="#3fb950">MIT</text>
+<text x="54" y="1056" font-size="15" fill="#e6edf3">Native dependencies</text>
+<text x="524" y="1056" font-size="15" fill="#3fb950">none</text>
+<text x="774" y="1056" font-size="15" fill="#d29922">libc toolchain</text>
+<text x="1024" y="1056" font-size="15" fill="#d29922">.NET runtime</text>
+<text x="1274" y="1056" font-size="15" fill="#d29922">CPython</text>
+<rect x="38" y="1072" width="1484" height="47" rx="6" fill="rgba(255,255,255,0.025)"/>
+<text x="54" y="1103" font-size="15" fill="#e6edf3">Runs in the browser</text>
+<text x="524" y="1103" font-size="15" fill="#3fb950">yes</text>
+<text x="774" y="1103" font-size="15" fill="#d29922">via WASM port</text>
+<text x="1024" y="1103" font-size="15" fill="#8b949e">no</text>
+<text x="1274" y="1103" font-size="15" fill="#8b949e">no</text>
+<line x1="54" y1="1125" x2="1506" y2="1125" stroke="#30363d"/>
+<text x="54" y="1162" font-size="15" fill="#e6edf3">Reads DWG</text>
+<text x="524" y="1162" font-size="15" fill="#3fb950">R1.4 – R2018</text>
+<text x="774" y="1162" font-size="15" fill="#3fb950">R1.4 – R2018</text>
 <text x="1024" y="1162" font-size="15" fill="#3fb950">R13 – R2018</text>
 <text x="1274" y="1162" font-size="15" fill="#8b949e">no</text>
-<text x="54" y="1230" font-size="15" fill="#e6edf3">Native AC1021 (R2007) write</text>
-<text x="524" y="1230" font-size="15" fill="#3fb950">yes — opens at AUDIT 0,</text>
-<text x="524" y="1251" font-size="15" fill="#3fb950">gated (ACAD_TABLE reported)</text>
-<text x="774" y="1230" font-size="15" fill="#8b949e">falls back to R2010</text>
-<text x="1024" y="1230" font-size="15" fill="#d29922">AC1021 header writer</text>
-<text x="1024" y="1251" font-size="15" fill="#d29922">is a stub (source read)</text>
-<text x="1274" y="1230" font-size="15" fill="#8b949e">n/a</text>
-<rect x="38" y="1267" width="1484" height="47" rx="6" fill="rgba(255,255,255,0.025)"/>
-<text x="54" y="1298" font-size="15" fill="#e6edf3">Reads / writes DXF</text>
-<text x="524" y="1298" font-size="15" fill="#3fb950">ASCII + binary</text>
-<text x="774" y="1298" font-size="15" fill="#3fb950">ASCII + binary</text>
-<text x="1024" y="1298" font-size="15" fill="#3fb950">ASCII + binary</text>
-<text x="1274" y="1298" font-size="15" fill="#3fb950">ASCII + binary</text>
-<line x1="54" y1="1320" x2="1506" y2="1320" stroke="#30363d"/>
-<text x="54" y="1357" font-size="15" fill="#e6edf3">Arabic shaping + RTL</text>
-<text x="524" y="1357" font-size="15" fill="#3fb950">built in</text>
-<text x="774" y="1357" font-size="15" fill="#8b949e">—</text>
-<text x="1024" y="1357" font-size="15" fill="#8b949e">—</text>
-<text x="1274" y="1357" font-size="15" fill="#8b949e">not RTL-designed (docs)</text>
-<rect x="38" y="1373" width="1484" height="68" rx="6" fill="rgba(255,255,255,0.025)"/>
-<text x="54" y="1404" font-size="15" fill="#e6edf3">MTEXT inline codes, MIF,</text>
-<text x="54" y="1425" font-size="15" fill="#e6edf3">\U+ escapes</text>
-<text x="524" y="1404" font-size="15" fill="#3fb950">full</text>
+<rect x="38" y="1178" width="1484" height="68" rx="6" fill="rgba(255,255,255,0.025)"/>
+<text x="54" y="1209" font-size="15" fill="#e6edf3">Writes DWG</text>
+<text x="524" y="1209" font-size="15" fill="#3fb950">R2.6 – R2018, every release</text>
+<text x="524" y="1230" font-size="15" fill="#3fb950">pages LZ77-compressed</text>
+<text x="774" y="1209" font-size="15" fill="#d29922">R13 – R2018</text>
+<text x="774" y="1230" font-size="15" fill="#d29922">(no native R2007)</text>
+<text x="1024" y="1209" font-size="15" fill="#3fb950">R13 – R2018</text>
+<text x="1274" y="1209" font-size="15" fill="#8b949e">no</text>
+<text x="54" y="1277" font-size="15" fill="#e6edf3">Native AC1021 (R2007) write</text>
+<text x="524" y="1277" font-size="15" fill="#3fb950">yes — opens at AUDIT 0,</text>
+<text x="524" y="1298" font-size="15" fill="#3fb950">gated (ACAD_TABLE reported)</text>
+<text x="774" y="1277" font-size="15" fill="#8b949e">falls back to R2010</text>
+<text x="1024" y="1277" font-size="15" fill="#d29922">AC1021 header writer</text>
+<text x="1024" y="1298" font-size="15" fill="#d29922">is a stub (source read)</text>
+<text x="1274" y="1277" font-size="15" fill="#8b949e">n/a</text>
+<rect x="38" y="1314" width="1484" height="47" rx="6" fill="rgba(255,255,255,0.025)"/>
+<text x="54" y="1345" font-size="15" fill="#e6edf3">Reads / writes DXF</text>
+<text x="524" y="1345" font-size="15" fill="#3fb950">ASCII + binary</text>
+<text x="774" y="1345" font-size="15" fill="#3fb950">ASCII + binary</text>
+<text x="1024" y="1345" font-size="15" fill="#3fb950">ASCII + binary</text>
+<text x="1274" y="1345" font-size="15" fill="#3fb950">ASCII + binary</text>
+<line x1="54" y1="1367" x2="1506" y2="1367" stroke="#30363d"/>
+<text x="54" y="1404" font-size="15" fill="#e6edf3">Arabic shaping + RTL</text>
+<text x="524" y="1404" font-size="15" fill="#3fb950">built in</text>
 <text x="774" y="1404" font-size="15" fill="#8b949e">—</text>
 <text x="1024" y="1404" font-size="15" fill="#8b949e">—</text>
-<text x="1274" y="1404" font-size="15" fill="#d29922">full parser; no MIF</text>
-<text x="54" y="1472" font-size="15" fill="#e6edf3">Every DWG codepage</text>
-<text x="524" y="1472" font-size="15" fill="#3fb950">yes</text>
-<text x="774" y="1472" font-size="15" fill="#3fb950">yes</text>
-<text x="1024" y="1472" font-size="15" fill="#8b949e">—</text>
-<text x="1274" y="1472" font-size="15" fill="#8b949e">—</text>
-<line x1="54" y1="1494" x2="1506" y2="1494" stroke="#30363d"/>
-<text x="54" y="1531" font-size="15" fill="#e6edf3">SVG / PDF / GeoJSON export</text>
-<text x="524" y="1531" font-size="15" fill="#3fb950">all three, built in</text>
-<text x="774" y="1531" font-size="15" fill="#d29922">GeoJSON only</text>
-<text x="1024" y="1531" font-size="15" fill="#d29922">SVG only</text>
-<text x="1274" y="1531" font-size="15" fill="#3fb950">all three, via add-ons</text>
-<rect x="38" y="1547" width="1484" height="47" rx="6" fill="rgba(255,255,255,0.025)"/>
-<text x="54" y="1578" font-size="15" fill="#e6edf3">Hatch pattern explosion</text>
-<text x="524" y="1578" font-size="15" fill="#3fb950">yes</text>
-<text x="774" y="1578" font-size="15" fill="#8b949e">—</text>
-<text x="1024" y="1578" font-size="15" fill="#8b949e">—</text>
-<text x="1274" y="1578" font-size="15" fill="#3fb950">yes</text>
-<text x="54" y="1625" font-size="15" fill="#e6edf3">ACIS SAB to SAT</text>
+<text x="1274" y="1404" font-size="15" fill="#8b949e">not RTL-designed (docs)</text>
+<rect x="38" y="1420" width="1484" height="68" rx="6" fill="rgba(255,255,255,0.025)"/>
+<text x="54" y="1451" font-size="15" fill="#e6edf3">MTEXT inline codes, MIF,</text>
+<text x="54" y="1472" font-size="15" fill="#e6edf3">\U+ escapes</text>
+<text x="524" y="1451" font-size="15" fill="#3fb950">full</text>
+<text x="774" y="1451" font-size="15" fill="#8b949e">—</text>
+<text x="1024" y="1451" font-size="15" fill="#8b949e">—</text>
+<text x="1274" y="1451" font-size="15" fill="#d29922">full parser; no MIF</text>
+<text x="54" y="1519" font-size="15" fill="#e6edf3">Every DWG codepage</text>
+<text x="524" y="1519" font-size="15" fill="#3fb950">yes</text>
+<text x="774" y="1519" font-size="15" fill="#3fb950">yes</text>
+<text x="1024" y="1519" font-size="15" fill="#8b949e">—</text>
+<text x="1274" y="1519" font-size="15" fill="#8b949e">—</text>
+<line x1="54" y1="1541" x2="1506" y2="1541" stroke="#30363d"/>
+<text x="54" y="1578" font-size="15" fill="#e6edf3">SVG / PDF / GeoJSON export</text>
+<text x="524" y="1578" font-size="15" fill="#3fb950">all three, built in</text>
+<text x="774" y="1578" font-size="15" fill="#d29922">GeoJSON only</text>
+<text x="1024" y="1578" font-size="15" fill="#d29922">SVG only</text>
+<text x="1274" y="1578" font-size="15" fill="#3fb950">all three, via add-ons</text>
+<rect x="38" y="1594" width="1484" height="47" rx="6" fill="rgba(255,255,255,0.025)"/>
+<text x="54" y="1625" font-size="15" fill="#e6edf3">Hatch pattern explosion</text>
 <text x="524" y="1625" font-size="15" fill="#3fb950">yes</text>
-<text x="774" y="1625" font-size="15" fill="#3fb950">yes</text>
-<text x="1024" y="1625" font-size="15" fill="#d29922">partial</text>
-<text x="1274" y="1625" font-size="15" fill="#d29922">reads SAB, writes SAT</text>
-<line x1="54" y1="1647" x2="1506" y2="1647" stroke="#30363d"/>
-<text x="54" y="1684" font-size="15" fill="#e6edf3">Sealed passthrough of unknown</text>
-<text x="54" y="1705" font-size="15" fill="#e6edf3">objects (bit-exact, incl. proxies)</text>
-<text x="524" y="1684" font-size="15" fill="#3fb950">yes — entities,</text>
-<text x="524" y="1705" font-size="15" fill="#3fb950">objects, failed decodes</text>
-<text x="774" y="1684" font-size="15" fill="#d29922">same-version rewrite only</text>
-<text x="1024" y="1684" font-size="15" fill="#8b949e">—</text>
-<text x="1274" y="1684" font-size="15" fill="#d29922">DXF tags only</text>
-<rect x="38" y="1721" width="1484" height="68" rx="6" fill="rgba(255,255,255,0.025)"/>
-<text x="54" y="1752" font-size="15" fill="#e6edf3">Unknown data across versions</text>
-<text x="54" y="1773" font-size="15" fill="#e6edf3">(A→B→A wrap + unwrap)</text>
-<text x="524" y="1752" font-size="15" fill="#3fb950">yes</text>
-<text x="774" y="1752" font-size="15" fill="#d29922">degrades to placeholders</text>
-<text x="1024" y="1752" font-size="15" fill="#8b949e">—</text>
-<text x="1274" y="1752" font-size="15" fill="#8b949e">—</text>
-<text x="54" y="1820" font-size="15" fill="#e6edf3">Handle-stable rewrite</text>
-<text x="524" y="1820" font-size="15" fill="#3fb950">preserveHandles</text>
-<text x="774" y="1820" font-size="15" fill="#8b949e">—</text>
-<text x="1024" y="1820" font-size="15" fill="#8b949e">—</text>
-<text x="1274" y="1820" font-size="15" fill="#8b949e">—</text>
-<rect x="38" y="1836" width="1484" height="47" rx="6" fill="rgba(255,255,255,0.025)"/>
-<text x="54" y="1867" font-size="15" fill="#e6edf3">Built-in audit / self-check</text>
-<text x="524" y="1867" font-size="15" fill="#3fb950">auditDrawing + CLI</text>
+<text x="774" y="1625" font-size="15" fill="#8b949e">—</text>
+<text x="1024" y="1625" font-size="15" fill="#8b949e">—</text>
+<text x="1274" y="1625" font-size="15" fill="#3fb950">yes</text>
+<text x="54" y="1672" font-size="15" fill="#e6edf3">ACIS SAB to SAT</text>
+<text x="524" y="1672" font-size="15" fill="#3fb950">yes</text>
+<text x="774" y="1672" font-size="15" fill="#3fb950">yes</text>
+<text x="1024" y="1672" font-size="15" fill="#d29922">partial</text>
+<text x="1274" y="1672" font-size="15" fill="#d29922">reads SAB, writes SAT</text>
+<line x1="54" y1="1694" x2="1506" y2="1694" stroke="#30363d"/>
+<text x="54" y="1731" font-size="15" fill="#e6edf3">Sealed passthrough of unknown</text>
+<text x="54" y="1752" font-size="15" fill="#e6edf3">objects (bit-exact, incl. proxies)</text>
+<text x="524" y="1731" font-size="15" fill="#3fb950">yes — entities,</text>
+<text x="524" y="1752" font-size="15" fill="#3fb950">objects, failed decodes</text>
+<text x="774" y="1731" font-size="15" fill="#d29922">same-version rewrite only</text>
+<text x="1024" y="1731" font-size="15" fill="#8b949e">—</text>
+<text x="1274" y="1731" font-size="15" fill="#d29922">DXF tags only</text>
+<rect x="38" y="1768" width="1484" height="68" rx="6" fill="rgba(255,255,255,0.025)"/>
+<text x="54" y="1799" font-size="15" fill="#e6edf3">Unknown data across versions</text>
+<text x="54" y="1820" font-size="15" fill="#e6edf3">(A→B→A wrap + unwrap)</text>
+<text x="524" y="1799" font-size="15" fill="#3fb950">yes</text>
+<text x="774" y="1799" font-size="15" fill="#d29922">degrades to placeholders</text>
+<text x="1024" y="1799" font-size="15" fill="#8b949e">—</text>
+<text x="1274" y="1799" font-size="15" fill="#8b949e">—</text>
+<text x="54" y="1867" font-size="15" fill="#e6edf3">Handle-stable rewrite</text>
+<text x="524" y="1867" font-size="15" fill="#3fb950">preserveHandles</text>
 <text x="774" y="1867" font-size="15" fill="#8b949e">—</text>
 <text x="1024" y="1867" font-size="15" fill="#8b949e">—</text>
-<text x="1274" y="1867" font-size="15" fill="#3fb950">ezdxf.audit</text>
-<text x="54" y="1914" font-size="15" fill="#e6edf3">SHX shape-font text rendering</text>
-<text x="524" y="1914" font-size="15" fill="#3fb950">full bytecode engine</text>
+<text x="1274" y="1867" font-size="15" fill="#8b949e">—</text>
+<rect x="38" y="1883" width="1484" height="47" rx="6" fill="rgba(255,255,255,0.025)"/>
+<text x="54" y="1914" font-size="15" fill="#e6edf3">Built-in audit / self-check</text>
+<text x="524" y="1914" font-size="15" fill="#3fb950">auditDrawing + CLI</text>
 <text x="774" y="1914" font-size="15" fill="#8b949e">—</text>
 <text x="1024" y="1914" font-size="15" fill="#8b949e">—</text>
-<text x="1274" y="1914" font-size="15" fill="#3fb950">yes (v1.1+)</text>
-<rect x="38" y="1930" width="1484" height="68" rx="6" fill="rgba(255,255,255,0.025)"/>
-<text x="54" y="1961" font-size="15" fill="#e6edf3">External validation vs AutoCAD</text>
-<text x="524" y="1961" font-size="15" fill="#3fb950">7 releases open in AutoCAD 2027,</text>
-<text x="524" y="1982" font-size="15" fill="#3fb950">all at AUDIT 0 errors (gated)</text>
+<text x="1274" y="1914" font-size="15" fill="#3fb950">ezdxf.audit</text>
+<text x="54" y="1961" font-size="15" fill="#e6edf3">SHX shape-font text rendering</text>
+<text x="524" y="1961" font-size="15" fill="#3fb950">full bytecode engine</text>
 <text x="774" y="1961" font-size="15" fill="#8b949e">—</text>
 <text x="1024" y="1961" font-size="15" fill="#8b949e">—</text>
-<text x="1274" y="1961" font-size="15" fill="#8b949e">n/a (no DWG)</text>
-<line x1="54" y1="2004" x2="1506" y2="2004" stroke="#30363d"/>
-<text x="54" y="2041" font-size="15" fill="#e6edf3">Test fixtures</text>
-<text x="524" y="2041" font-size="15" fill="#3fb950">generated at run time,</text>
-<text x="524" y="2062" font-size="15" fill="#3fb950">nothing shipped</text>
-<text x="774" y="2041" font-size="15" fill="#e6edf3">shipped drawings</text>
-<text x="1024" y="2041" font-size="15" fill="#e6edf3">shipped drawings</text>
-<text x="1274" y="2041" font-size="15" fill="#e6edf3">shipped drawings</text>
-<text x="54" y="2104" font-size="13" fill="#9198a1">Green = does it natively&#160;&#160;&#160;Amber = partial or with caveats&#160;&#160;&#160;Grey / — = not supported, not documented, or not verified by us</text>
+<text x="1274" y="1961" font-size="15" fill="#3fb950">yes (v1.1+)</text>
+<rect x="38" y="1977" width="1484" height="68" rx="6" fill="rgba(255,255,255,0.025)"/>
+<text x="54" y="2008" font-size="15" fill="#e6edf3">External validation vs AutoCAD</text>
+<text x="524" y="2008" font-size="15" fill="#3fb950">7 releases open in AutoCAD 2027,</text>
+<text x="524" y="2029" font-size="15" fill="#3fb950">all at AUDIT 0 errors (gated)</text>
+<text x="774" y="2008" font-size="15" fill="#8b949e">—</text>
+<text x="1024" y="2008" font-size="15" fill="#8b949e">—</text>
+<text x="1274" y="2008" font-size="15" fill="#8b949e">n/a (no DWG)</text>
+<line x1="54" y1="2051" x2="1506" y2="2051" stroke="#30363d"/>
+<text x="54" y="2088" font-size="15" fill="#e6edf3">Test fixtures</text>
+<text x="524" y="2088" font-size="15" fill="#3fb950">generated at run time,</text>
+<text x="524" y="2109" font-size="15" fill="#3fb950">nothing shipped</text>
+<text x="774" y="2088" font-size="15" fill="#e6edf3">shipped drawings</text>
+<text x="1024" y="2088" font-size="15" fill="#e6edf3">shipped drawings</text>
+<text x="1274" y="2088" font-size="15" fill="#e6edf3">shipped drawings</text>
+<text x="54" y="2151" font-size="13" fill="#9198a1">Green = does it natively&#160;&#160;&#160;Amber = partial or with caveats&#160;&#160;&#160;Grey / — = not supported, not documented, or not verified by us</text>
 </svg>

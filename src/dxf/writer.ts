@@ -18,6 +18,12 @@ import { pairsToBinaryDxf } from './binary.js';
 
 const TAU = Math.PI * 2;
 const DEG = 180 / Math.PI;
+/** Radians to degrees, folded into 0..360 the way AutoCAD stores an angle
+ *  in a table record (a -45 degree twist goes out as 315). */
+const twistDeg = (rad: number): number => {
+  const d = ((rad * DEG) % 360 + 360) % 360;
+  return Object.is(d, -0) ? 0 : d;
+};
 const RAD = Math.PI / 180;
 
 const isNum = (v: unknown): v is number => typeof v === 'number' && isFinite(v);
@@ -356,6 +362,19 @@ export const writeDxf = (drawing: Drawing): string => {
   w(9, '$LIMCHECK'); w(70, 0);      /* limits frame the view, never gate input */
   w(9, '$VIEWCTR'); w(10, fmt(ctrX)); w(20, fmt(ctrY));
   w(9, '$VIEWSIZE'); w(40, fmt(viewH));
+  /* The current UCS. A drawing laid out at an angle carries its rotation
+     here, and writing the world default instead does not read as missing
+     data — it reads as "this drawing is not rotated", which is worse. */
+  if (hdr.ucs) {
+    w(9, '$UCSORG'); w(10, fmt(hdr.ucs.origin.x)); w(20, fmt(hdr.ucs.origin.y)); w(30, fmt(hdr.ucs.origin.z));
+    w(9, '$UCSXDIR'); w(10, fmt(hdr.ucs.xAxis.x)); w(20, fmt(hdr.ucs.xAxis.y)); w(30, fmt(hdr.ucs.xAxis.z));
+    w(9, '$UCSYDIR'); w(10, fmt(hdr.ucs.yAxis.x)); w(20, fmt(hdr.ucs.yAxis.y)); w(30, fmt(hdr.ucs.yAxis.z));
+  }
+  if (hdr.pUcs) {
+    w(9, '$PUCSORG'); w(10, fmt(hdr.pUcs.origin.x)); w(20, fmt(hdr.pUcs.origin.y)); w(30, fmt(hdr.pUcs.origin.z));
+    w(9, '$PUCSXDIR'); w(10, fmt(hdr.pUcs.xAxis.x)); w(20, fmt(hdr.pUcs.xAxis.y)); w(30, fmt(hdr.pUcs.xAxis.z));
+    w(9, '$PUCSYDIR'); w(10, fmt(hdr.pUcs.yAxis.x)); w(20, fmt(hdr.pUcs.yAxis.y)); w(30, fmt(hdr.pUcs.yAxis.z));
+  }
   w(9, '$HANDSEED'); w(5, 'FFFF');
   w(0, 'ENDSEC');
 
@@ -398,20 +417,71 @@ export const writeDxf = (drawing: Drawing): string => {
   w(0, 'VPORT'); w(5, handle());
   w(100, 'AcDbSymbolTableRecord'); w(100, 'AcDbViewportTableRecord');
   w(2, '*Active'); w(70, 0);
-  w(10, 0); w(20, 0);
-  w(11, 1); w(21, 1);
-  w(12, fmt(ctrX)); w(22, fmt(ctrY));
-  w(13, 0); w(23, 0);
-  w(14, 10); w(24, 10);
-  w(15, 10); w(25, 10);
-  w(16, 0); w(26, 0); w(36, 1);
-  w(17, 0); w(27, 0); w(37, 0);
-  w(40, fmt(viewH));
-  w(41, fmt(VIEW_ASPECT));
-  w(42, 50); w(43, 0); w(44, 0);
-  w(50, 0); w(51, 0);
-  w(71, 0); w(72, 100); w(73, 1); w(74, 3); w(75, 0);
-  w(76, 0); w(77, 0); w(78, 0);
+  /* When the drawing carries the view it was saved with, that view goes
+     out — twist included. Only a drawing that has none gets the synthetic
+     frame below, which is what the exporter has always written. */
+  const src = (drawing.vports ?? []).find((p) => /^\*active$/i.test(p.name));
+  if (src) {
+    w(10, fmt(src.lowerLeft.x)); w(20, fmt(src.lowerLeft.y));
+    w(11, fmt(src.upperRight.x)); w(21, fmt(src.upperRight.y));
+    w(12, fmt(src.center.x)); w(22, fmt(src.center.y));
+    w(13, fmt(src.snapBase?.x ?? 0)); w(23, fmt(src.snapBase?.y ?? 0));
+    w(14, fmt(src.snapSpacing?.x ?? 10)); w(24, fmt(src.snapSpacing?.y ?? 10));
+    w(15, fmt(src.gridSpacing?.x ?? 10)); w(25, fmt(src.gridSpacing?.y ?? 10));
+    const dir = src.direction ?? { x: 0, y: 0, z: 1 };
+    const tgt = src.target ?? { x: 0, y: 0, z: 0 };
+    w(16, fmt(dir.x)); w(26, fmt(dir.y)); w(36, fmt(dir.z));
+    w(17, fmt(tgt.x)); w(27, fmt(tgt.y)); w(37, fmt(tgt.z));
+    w(40, fmt(src.height));
+    w(41, fmt(src.aspectRatio && src.aspectRatio > 0 ? src.aspectRatio : VIEW_ASPECT));
+    w(42, fmt(src.lensLength ?? 50));
+    w(43, fmt(src.frontClip ?? 0)); w(44, fmt(src.backClip ?? 0));
+    w(50, fmt(twistDeg(src.snapAngle ?? 0)));
+    /* group 51: the view twist, in degrees. AutoCAD normalizes it into
+       0..360, and a consumer that ignores it draws the model turned. */
+    w(51, fmt(twistDeg(src.twist ?? 0)));
+    /* AutoCAD folds UCSFOLLOW into the view-mode flags as bit 8 */
+    w(71, (src.viewMode ?? 0) | (src.ucsFollow ? 8 : 0));
+    w(72, src.circleSides ?? 100);
+    w(73, src.fastZoom === false ? 0 : 1);
+    w(74, src.ucsIcon ?? 3);
+    w(75, src.snapOn ? 1 : 0);
+    w(76, src.gridOn ? 1 : 0);
+    w(77, src.snapStyle ?? 0);
+    w(78, src.snapIsoPair ?? 0);
+    if (src.renderMode !== undefined) w(281, src.renderMode);
+    if (src.ucsPerViewport !== undefined) w(65, src.ucsPerViewport ? 1 : 0);
+    const ucs = src.ucsOrigin
+      ? { origin: src.ucsOrigin, xAxis: src.ucsXAxis, yAxis: src.ucsYAxis }
+      : hdr.ucs;
+    if (ucs?.xAxis && ucs.yAxis) {
+      w(110, fmt(ucs.origin.x)); w(120, fmt(ucs.origin.y)); w(130, fmt(ucs.origin.z));
+      w(111, fmt(ucs.xAxis.x)); w(121, fmt(ucs.xAxis.y)); w(131, fmt(ucs.xAxis.z));
+      w(112, fmt(ucs.yAxis.x)); w(122, fmt(ucs.yAxis.y)); w(132, fmt(ucs.yAxis.z));
+    }
+    if (src.ucsOrthoType !== undefined) w(79, src.ucsOrthoType);
+    if (src.ucsElevation !== undefined) w(146, fmt(src.ucsElevation));
+  } else {
+    w(10, 0); w(20, 0);
+    w(11, 1); w(21, 1);
+    w(12, fmt(ctrX)); w(22, fmt(ctrY));
+    w(13, 0); w(23, 0);
+    w(14, 10); w(24, 10);
+    w(15, 10); w(25, 10);
+    w(16, 0); w(26, 0); w(36, 1);
+    w(17, 0); w(27, 0); w(37, 0);
+    w(40, fmt(viewH));
+    w(41, fmt(VIEW_ASPECT));
+    w(42, 50); w(43, 0); w(44, 0);
+    w(50, 0); w(51, 0);
+    w(71, 0); w(72, 100); w(73, 1); w(74, 3); w(75, 0);
+    w(76, 0); w(77, 0); w(78, 0);
+    if (hdr.ucs) {
+      w(110, fmt(hdr.ucs.origin.x)); w(120, fmt(hdr.ucs.origin.y)); w(130, fmt(hdr.ucs.origin.z));
+      w(111, fmt(hdr.ucs.xAxis.x)); w(121, fmt(hdr.ucs.xAxis.y)); w(131, fmt(hdr.ucs.xAxis.z));
+      w(112, fmt(hdr.ucs.yAxis.x)); w(122, fmt(hdr.ucs.yAxis.y)); w(132, fmt(hdr.ucs.yAxis.z));
+    }
+  }
   w(0, 'ENDTAB');
 
   const linetypes = drawing.linetypes.some((lt) => /^continuous$/i.test(lt.name))

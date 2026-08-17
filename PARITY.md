@@ -190,6 +190,8 @@ the entity is retained with its source type name — verified per version.
 | IMAGEDEF (file path, resolved onto images) | ✅ |
 | DICTIONARY / LAYOUT / GROUP / MLINESTYLE | ✅ layouts (name, tab order, block, limits, extents), groups (members), mline styles (elements) |
 | APPID / DIMSTYLE / VPORT / VIEW / UCS | ✅ names + geometry; APPID resolves xdata owners, DIMSTYLE resolves dimension.style |
+| Saved view: VIEWTWIST + the viewport UCS | ✅ the whole VPORT record — twist, target/direction, lens, clipping, view mode, circle sides, UCSICON, snap and grid, and the R2000+ per-viewport UCS — read, written and carried through DXF. Graded field for field against AutoCAD's own DXFOUT: **36 of 36 on nine drawings** across R14/R2000/R2007/R2018, including three saved with UCSICON 3, 1 and 0 and one with DVIEW front clipping. A drawing laid out at an angle draws square only if VIEWTWIST survives, and `viewTwistTransform` hands a consumer the 2D transform that squares it |
+| Header UCS (UCSORG / UCSXDIR / UCSYDIR) | ✅ captured into `header.ucs` (and `header.pUcs`), written back by every DWG writer and by the DXF writer as $UCSORG/$UCSXDIR/$UCSYDIR; `ucsTransform` turns it into a basis. Before R2000 this is the only place a rotated layout is recorded |
 | XRECORD retention (typed values, dictionary names) | ✅ DWG + DXF both ways |
 | Dynamic-block visibility (states + members) | ✅ | blocks flagged dynamic; every state named in definition order with the entities it shows — 48 states verified |
 | Dynamic-block parameters + actions | ✅ linear/rotation/flip/alignment/base-point parameters with names, labels, descriptions, points and value sets ("Door Size" [24,28,32,36,40] decodes from the fixture), plus the action kinds (move/stretch/scale/flip/rotate/…) |
@@ -330,6 +332,7 @@ The axes a DWG/DXF library is judged on, and where this one stands:
 | Underlays (PDF/DGN/DWF) | ✅ all three kinds, read and write, DWG and DXF |
 | Dynamic-block parameters + actions | ✅ visibility states and nine parameter kinds with their labels and value sets |
 | OCS / arbitrary-axis handling | ✅ extrusion retained, round-tripped, and resolved in bounds and every export (`toWcs`) |
+| Rotated layouts (VIEWTWIST + header UCS) | ✅ read, written, DXF both ways, and `viewTwistTransform` / `ucsTransform` for consumers |
 | Adversarial-file corpus | ✅ 18 regression cases covering the structural quirks real-world producers emit |
 | Validate-by-round-trip tooling | ✅ `convert --verify` |
 

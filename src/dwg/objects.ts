@@ -22,7 +22,7 @@ import type {
   FileVersion, GeoData, HatchBoundary, HatchDefLine, HatchEdge, HatchGradient,
   MeshEntity, MLineVertex, Point2, Point3, PolylineVertex, ProxyObject,
   TableCell,
-  TextHAlign, TextVAlign, UnknownObject, ViewportEntity, XdataGroup,
+  TextHAlign, TextVAlign, UnknownObject, ViewportEntity, VPort, XdataGroup,
   XdataValue
 } from '../core/model.js';
 import type { DwgClassInfo } from './classes.js';
@@ -3266,27 +3266,97 @@ const decodeObjectSpecific = (x: Ctx, typeName: string, raw: RawObject): void =>
     }
 
     case 'VPORT': {
+      /* The record in its true order, pinned bit for bit against a real
+       * AC1014 drawing whose every value AutoCAD's own DXFOUT reports:
+       * the height's double sits at a known bit, and walking
+       * BD height, BD aspect, 2RD centre, 3BD target, 3BD dir, BD twist,
+       * BD lens, BD front, BD back, 4BITS view mode, 2RD lower left,
+       * 2RD upper right, B, BS, B, BB, B, 2RD grid, B, B, BS, BD,
+       * 2RD snap base lands on the snap spacing's double exactly.
+       *
+       * The earlier walk read the target into `direction` and the
+       * direction into `target`, never read VIEWTWIST at all, and so
+       * drifted one BD from there on — which is why snapBase and
+       * gridSpacing used to come back as 6e-294 and 1e-314. A drawing
+       * laid out at an angle needs the twist: without it the model draws
+       * rotated, and DXF group 51 goes out a confident zero. */
       const name = x.tableFlags();
       const height = r.bd();
       const aspectRatio = r.bd();
       const cx = r.rd(), cy = r.rd();
+      const [tx, ty, tz] = r.bd3();       /* target comes BEFORE direction */
       const [dx2, dy2, dz2] = r.bd3();
-      const [tx, ty, tz] = r.bd3();
-      r.bd();                             /* lens length */
-      r.bd(); r.bd();                     /* front/back clip */
-      r.bd();                             /* snap angle */
-      r.rd(); r.rd();                     /* view twist / ... */
-      const sbx = r.rd(), sby = r.rd();
+      const twist = r.bd();
+      const lensLength = r.bd();
+      const frontClip = r.bd();
+      const backClip = r.bd();
+      /* The mode field is four bits, and only the first three of them are
+       * VIEWMODE — low bit first: perspective (DXF 1), front clip (2),
+       * back clip (4). Graded against AutoCAD's own DXFOUT: a drawing
+       * with DVIEW front clipping on reads 0,1,0 here and AutoCAD writes
+       * 71 = 2, while six otherwise-identical files read 0,0,0 and get
+       * 71 = 0. The fourth bit is 1 in every genuine file measured and is
+       * NOT view mode — turning front clipping on does not make AutoCAD
+       * report bit 16, in either DXF flavour. UCSFOLLOW is not in here
+       * either; it is the separate flag below, which AutoCAD folds into
+       * group 71 as bit 8 on export. */
+      const viewMode = r.b() | (r.b() << 1) | (r.b() << 2);
+      r.b();                              /* the fourth bit: always 1 */
+      const renderMode = v >= 2000 ? r.rc() : undefined;
+      if (v >= 2007) {
+        r.b();                            /* use default lights */
+        r.rc();                           /* default lighting type */
+        r.bd(); r.bd();                   /* brightness, contrast */
+        x.cmc();                          /* ambient colour */
+      }
+      const llx = r.rd(), lly = r.rd();
+      const urx = r.rd(), ury = r.rd();
+      const ucsFollow = r.b() === 1;
+      const circleSides = r.bs();
+      const fastZoom = r.b() === 1;
+      /* two flags, low bit first: icon on, then icon at origin. Graded on
+         three drawings saved with UCSICON 3, 1 and 0 — read the other way
+         round the middle two swap. */
+      const ucsIcon = r.b() | (r.b() << 1);
+      const gridOn = r.b() === 1;
       const gsx = r.rd(), gsy = r.rd();
-      raw.table = { kind: 'vport', name };
-      raw.vport = {
+      const snapOn = r.b() === 1;
+      const snapStyle = r.b();
+      const snapIsoPair = r.bs();
+      const snapAngle = r.bd();
+      const sbx = r.rd(), sby = r.rd();
+      const ssx = r.rd(), ssy = r.rd();
+      const vport: VPort = {
         name,
-        lowerLeft: { x: 0, y: 0 }, upperRight: { x: 1, y: 1 },
+        lowerLeft: { x: llx, y: lly }, upperRight: { x: urx, y: ury },
         center: { x: cx, y: cy },
         height, aspectRatio,
         direction: pt3(dx2, dy2, dz2), target: pt3(tx, ty, tz),
-        snapBase: { x: sbx, y: sby }, gridSpacing: { x: gsx, y: gsy }
+        twist, lensLength, frontClip, backClip, viewMode,
+        circleSides, fastZoom, ucsIcon, ucsFollow, gridOn,
+        snapOn, snapStyle, snapIsoPair, snapAngle,
+        snapBase: { x: sbx, y: sby }, snapSpacing: { x: ssx, y: ssy },
+        gridSpacing: { x: gsx, y: gsy }
       };
+      if (renderMode !== undefined) vport.renderMode = renderMode;
+      if (v >= 2000) {
+        /* R2000 gave every viewport its own UCS. The flag ahead of it is
+           UCSICON's third bit: AutoCAD reports group 74 as 5 rather than 1
+           when it is set, which is how it was told apart from the
+           "unknown" it had been read as. */
+        vport.ucsIcon = ucsIcon | (r.b() << 2);
+        vport.ucsPerViewport = r.b() === 1;
+        const [ox, oy, oz] = r.bd3();
+        const [uxx, uxy, uxz] = r.bd3();
+        const [uyx, uyy, uyz] = r.bd3();
+        vport.ucsOrigin = pt3(ox, oy, oz);
+        vport.ucsXAxis = pt3(uxx, uxy, uxz);
+        vport.ucsYAxis = pt3(uyx, uyy, uyz);
+        vport.ucsElevation = r.bd();
+        vport.ucsOrthoType = r.bs();
+      }
+      raw.table = { kind: 'vport', name };
+      raw.vport = vport;
       return;
     }
 

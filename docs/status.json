@@ -1,12 +1,22 @@
 {
-  "updated": "2026-08-17 15:20 EDT",
-  "tests": "646 passing · gate exit 0 · pack clean",
-  "headline": "R2007 write solved: all seven writable releases now open in AutoCAD at AUDIT 0",
+  "updated": "2026-08-17 16:30 EDT",
+  "tests": "655 passing · gate exit 0 · pack clean",
+  "headline": "Rotated layouts now survive: VIEWTWIST and the header UCS are read, written and exported",
   "verdicts": [
     {
       "label": "R12 · R13 · R14 · R2000 · R2004 · R2007 · R2018",
       "state": "pass",
       "note": "all OPEN + AUDIT 0 errors in AutoCAD 2027 (gated)"
+    },
+    {
+      "label": "Saved view: VIEWTWIST + VPORT record",
+      "state": "pass",
+      "note": "36 of 36 fields agree with AutoCAD DXFOUT on nine drawings across R14/R2000/R2007/R2018 — the twist was never decoded before and the walk drifted one BD from there on"
+    },
+    {
+      "label": "Header UCS",
+      "state": "pass",
+      "note": "UCSORG/UCSXDIR/UCSYDIR were read and thrown away; captured now, written back, and carried through DXF as $UCSORG/$UCSXDIR/$UCSYDIR"
     },
     {
       "label": "R2007: empty CLASSES payload",
@@ -79,10 +89,10 @@
       "note": "genuine files fully recompressed and re-encoded by us: AUDIT 0 errors (180 KB file, 2600 objects)"
     }
   ],
-  "inflight": "R2007 was never blocked by the header field four campaigns had pinned on. Making AutoCAD mint the evidence settled it: five different drawings saved to R2007 from five separate accoreconsole launches carry the IDENTICAL random_seed, prologue key, check-data word and crc_seed_encoded — one draw of a per-process RNG, carrying no information about the file, and zero is accepted. The real defects were three, all in shipped code and all invisible to a self round trip: an empty CLASSES payload (refused at AC1021 exactly as at AC1032), an inline ACIS payload written a bit-alignment off, and the cached wireframe block that has to follow it. The one entity still short is ACAD_TABLE, which the writer now reports instead of emitting a drawing AutoCAD refuses whole.",
+  "inflight": "A real drawing found the next defect: an AC1014 site plan laid out at 45 degrees drew turned, because the whole rotation lives in two fields the library dropped. VIEWTWIST was never decoded at all — and because the walk skipped it, every field after it drifted one BD, which is why snapBase and gridSpacing used to come back as 6e-294 and 1e-314, and why the view direction and target came back swapped. The header UCS was read and discarded outright. Worst of the three, the DXF writer then put a hard zero in group 51: not missing data a consumer could handle, but a confident \"this drawing is not rotated\". The record layout was pinned bit for bit with AutoCAD DXFOUT as the oracle, and now grades 36 of 36 fields on nine drawings.",
   "recentlyLanded": [
-    "R2007 write solved and gated — the seventh release now opens at AUDIT 0 errors with the full corpus",
-    "random_seed retired as a blocker by an experiment, not an argument: same value from five separate AutoCAD launches",
-    "Page slack identified as one MT19937 init array per file, and proven free — an earlier ledger called it uninitialised memory"
+    "VIEWTWIST, the viewport UCS and the whole VPORT record read, written and round-tripped — graded 36/36 against AutoCAD",
+    "Header UCS captured instead of discarded, and written back by every DWG writer and the DXF writer",
+    "viewTwistTransform and ucsTransform: the transform that squares a rotated drawing, measured rather than assumed"
   ]
 }

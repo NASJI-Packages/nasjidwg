@@ -84,6 +84,51 @@ export const ocsTransform = (extrusion?: Point3): Transform3 | null => {
   return { xAxis, yAxis: cross(n, xAxis), zAxis: n };
 };
 
+/** The rotation a saved view applies, as a 2D transform from world
+ *  coordinates into the view's own frame. A drawing laid out at an angle
+ *  is stored that way in model space and only reads square because the
+ *  viewport carries VIEWTWIST; a renderer that draws model coordinates
+ *  straight to the canvas shows it turned. The twist turns about the view
+ *  TARGET, and pan and zoom compose on top of it.
+ *
+ *  The sense is the one that squares the drawing, measured rather than
+ *  assumed: an AC1014 site plan whose line lengths pile up at 44 and 134
+ *  degrees comes out at 0 and 88 under this transform, and stays skewed
+ *  under its inverse.
+ *
+ *  Returns null for an untwisted view, so callers can skip the work. */
+export const viewTwistTransform = (vport: {
+  twist?: number; target?: Point3
+}): Transform2 | null => {
+  const twist = vport.twist ?? 0;
+  if (!twist || !isFinite(twist)) return null;
+  const t = vport.target ?? { x: 0, y: 0, z: 0 };
+  return compose(
+    compose(translation(t.x, t.y), rotationT(twist)),
+    translation(-t.x, -t.y)
+  );
+};
+
+/** The basis a UCS defines, ready for `ocsToWcs`. A drawing whose header
+ *  carries a turned UCS keeps its rotation there and nowhere else before
+ *  R2000, so this is the other half of reading such a file straight.
+ *  Returns null when the UCS is the world one. */
+export const ucsTransform = (ucs?: {
+  xAxis: Point3; yAxis: Point3
+}): Transform3 | null => {
+  if (!ucs) return null;
+  const { xAxis, yAxis } = ucs;
+  const world = xAxis.x === 1 && xAxis.y === 0 && xAxis.z === 0
+    && yAxis.x === 0 && yAxis.y === 1 && yAxis.z === 0;
+  if (world) return null;
+  const zAxis = {
+    x: xAxis.y * yAxis.z - xAxis.z * yAxis.y,
+    y: xAxis.z * yAxis.x - xAxis.x * yAxis.z,
+    z: xAxis.x * yAxis.y - xAxis.y * yAxis.x
+  };
+  return { xAxis, yAxis, zAxis };
+};
+
 /** Map one point out of an OCS plane into world coordinates. */
 export const ocsToWcs = (m: Transform3, p: Point3): Point3 => {
   const z = p.z ?? 0;

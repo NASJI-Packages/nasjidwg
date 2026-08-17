@@ -54,6 +54,14 @@ dropped: ACAD_TABLE, whose AC1021 record is still unsolved, and an
 ASM-dialect ACIS payload, which that container's kernel cannot read
 inline. See [PARITY.md](PARITY.md).
 
+**A drawing that is laid out at an angle stays that way.** Site plans are
+routinely drawn turned — the model sits at 45°, and it reads square only
+because the file carries VIEWTWIST in its saved view and a rotated UCS in
+its header. Both survive read, write and the DXF trip in every release,
+and `viewTwistTransform` / `ucsTransform` hand a renderer the transform
+that squares the model. The VPORT record is graded field for field
+against AutoCAD's own DXFOUT: 36 of 36, on nine drawings.
+
 **Arabic is not an add-on.** Shaping into presentation forms, bidi
 resolution, MTEXT inline codes, MIF and \\U+ escapes, and every codepage
 the format can name — all of it is in the read and write paths, in every
