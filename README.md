@@ -103,9 +103,11 @@ writers, the DWG and DXF codecs cross-check each other, and
 AutoCAD and fails if any of them regresses. Defects found by those
 mechanisms — a Reed-Solomon parity bug that made every R2007 data page
 invalid, an inline ACIS payload written one bit-alignment off, a CLASSES
-section AutoCAD refuses when empty, and a one-byte dictionary shift that
-had blocked R13 for four campaigns — were found because the mechanisms
-exist, not because the model was careful.
+section AutoCAD refuses when empty, an AC1021 table cell written as a bare
+string where the format keeps a whole typed value, a view twist that was
+never decoded and drifted every field behind it, and a one-byte dictionary
+shift that had blocked R13 for four campaigns — were found because the
+mechanisms exist, not because the model was careful.
 
 ---
 

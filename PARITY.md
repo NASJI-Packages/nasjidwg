@@ -118,8 +118,9 @@ drawing in this repository:
 2. **Codec cross-check** — the DWG and DXF paths encode the same document
    model independently and must agree with each other.
 3. **AutoCAD 2027 as the external oracle** — `tools/validate-external.mjs`
-   opens and AUDITs our output in the Core Console; six releases are
-   regression-gated on it, all six at zero AUDIT errors.
+   opens and AUDITs our output in the Core Console; all seven writable
+   release families are regression-gated on it, every one at zero AUDIT
+   errors.
 4. **A 317-file real-world corpus** (139 MB, 1982→2027: AutoCAD's sample
    libraries, field drawings from real producers, vintage files) read as
    an external oracle during development — no test depends on them.
