@@ -4,13 +4,10 @@
  * re-run `node tools/gen-comparison.mjs`. Nothing is drawn by hand and
  * the asset can never drift from what this file states.
  *
- * A PNG copy (for places that cannot show SVG) renders through any
- * installed Chromium at 2x, faithful fonts and all:
- *
- *   chrome --headless=new --disable-gpu --hide-scrollbars \
- *     --force-device-scale-factor=2 --window-size=1560,1335 \
- *     --screenshot=docs/comparison.png \
- *     "data:text/html,<style>html,body{margin:0;background:%230a0c10}img{display:block}</style><img src='file:///.../docs/comparison.svg' width=1560 height=1335>"
+ * A PNG copy renders through any installed Chromium, faithful fonts and
+ * all: `node tools/gen-comparison.mjs --png`, or `--png --scale=2` for an
+ * oversampled one. The PNG is what the README shows, because GitHub will
+ * not render an SVG referenced from a repository path.
  *
  * Facts about the other projects are checked against each project's own
  * source and documentation, and the claims about THIS library are held to
@@ -248,15 +245,20 @@ if (process.argv.includes('--png')) {
       `<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;padding:0;background:${BG}}img{display:block}</style></head>`
       + `<body><img src="${fileUrl}" width="${W}" height="${H}"></body></html>`);
     const pngPath = join(here, '..', 'docs', 'comparison.png');
+    /* GitHub lays a README image out at about 900 px wide, so 1560 is
+       already ample; the old 2x render was 3120 px and 800 kB for no
+       visible gain. `--png --scale=2` still gets the oversampled one. */
+    const scaleArg = process.argv.find((a) => a.startsWith('--scale='));
+    const scale = scaleArg ? Number(scaleArg.slice(8)) : 1;
     const res = spawnSync(browsers[0], [
       '--headless=new', '--disable-gpu', '--hide-scrollbars', '--no-first-run',
       `--user-data-dir=${join(tmpdir(), 'nasjidwg-chr-prof')}`,
-      '--force-device-scale-factor=2',
+      `--force-device-scale-factor=${scale}`,
       `--window-size=${W},${H}`,
       `--screenshot=${pngPath}`,
       'file:///' + wrap.replace(/\\/g, '/')
     ], { timeout: 120000 });
-    if (existsSync(pngPath)) console.log(`docs/comparison.png rendered (${W * 2}×${H * 2})`);
+    if (existsSync(pngPath)) console.log(`docs/comparison.png rendered (${W * scale}×${H * scale})`);
     else console.error('png: render failed', res.stderr?.toString().slice(-200));
   }
 }

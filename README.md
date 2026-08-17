@@ -24,10 +24,12 @@ writeFileSync('plan.svg', writeSvg(drawing));   // or as a picture
 
 ## How it compares
 
-![nasjidwg compared with the other open DWG/DXF libraries](docs/comparison.svg)
+![nasjidwg compared with the other open DWG/DXF libraries](docs/comparison.png)
 
-(The table is generated from data — `node tools/gen-comparison.mjs` —
-so it cannot drift from what the repository actually does.)
+(The table is generated from data — `node tools/gen-comparison.mjs` — so it
+cannot drift from what the repository actually does. The PNG above is the
+render GitHub will show; [docs/comparison.svg](docs/comparison.svg) is the
+vector original beside it.)
 
 Three things worth pulling out of it:
 
