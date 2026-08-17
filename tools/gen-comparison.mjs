@@ -100,6 +100,20 @@ const FONT = 'Segoe UI, -apple-system, Roboto, Helvetica, Arial, sans-serif';
 const esc = (s) => s
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
+/** Greedy word wrap to at most `max` characters a line. SVG text does not
+ *  wrap, so anything longer than its column is silently clipped at the
+ *  card edge — which is exactly how a true note turns into a false one. */
+const wrapText = (text, max) => {
+  const out = [];
+  let line = '';
+  for (const word of String(text).split(' ')) {
+    if (line && (line + ' ' + word).length > max) { out.push(line); line = word; }
+    else line = line ? line + ' ' + word : word;
+  }
+  if (line) out.push(line);
+  return out;
+};
+
 /* ---- live status band (docs/status.json, optional) ----------------
  * When the campaign status file exists, a board renders under the
  * subtitle: per-milestone verdict chips, what is in flight, and what
@@ -125,25 +139,28 @@ if (status) {
     y += 24;
     parts.push(`<text x="${CAP_X + 8}" y="${y}" font-size="14" fill="${chip[v.state] ?? GREY}">`
       + `${mark[v.state] ?? '•'}  ${esc(v.label)}</text>`);
-    parts.push(`<text x="${CAP_X + 430}" y="${y}" font-size="14" fill="${chip[v.state] ?? GREY}">`
-      + `${esc(v.note)}</text>`);
+    /* the note column runs from CAP_X+430 to the card edge — about 145
+       characters at this size, so a longer note continues underneath
+       rather than running off the picture */
+    wrapText(v.note, 145).forEach((line, i) => {
+      parts.push(`<text x="${CAP_X + 430}" y="${y + i * 18}" font-size="14" `
+        + `fill="${chip[v.state] ?? GREY}">${esc(line)}</text>`);
+      if (i > 0) y += 18;
+    });
   }
   if (status.inflight) {
     y += 26;
-    const words = String(status.inflight).split(' ');
-    let line = '';
-    for (const wd of words) {
-      if ((line + ' ' + wd).length > 130) {
-        parts.push(`<text x="${CAP_X + 8}" y="${y}" font-size="13" fill="${DIM}">${esc(line)}</text>`);
-        y += 19;
-        line = wd;
-      } else line = line ? line + ' ' + wd : wd;
-    }
-    parts.push(`<text x="${CAP_X + 8}" y="${y}" font-size="13" fill="${DIM}">${esc(line)}</text>`);
+    wrapText(status.inflight, 130).forEach((line, i) => {
+      if (i > 0) y += 19;
+      parts.push(`<text x="${CAP_X + 8}" y="${y}" font-size="13" fill="${DIM}">${esc(line)}</text>`);
+    });
   }
   for (const r of status.recentlyLanded ?? []) {
     y += 21;
-    parts.push(`<text x="${CAP_X + 8}" y="${y}" font-size="13" fill="${TEXT}">+ ${esc(r)}</text>`);
+    wrapText('+ ' + r, 150).forEach((line, i) => {
+      if (i > 0) y += 19;
+      parts.push(`<text x="${CAP_X + 8}" y="${y}" font-size="13" fill="${TEXT}">${esc(line)}</text>`);
+    });
   }
   y += 18;
   parts.push(`<line x1="${CAP_X}" y1="${y}" x2="${W - CAP_X}" y2="${y}" stroke="${RULE}"/>`);
