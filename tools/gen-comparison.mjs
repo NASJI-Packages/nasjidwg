@@ -53,11 +53,11 @@ const ROWS = [
   { cap: ['Reads DWG'], cells: [g('R1.4 – R2018'), g('R1.4 – R2018'), g('R13 – R2018'), n('no')] },
   {
     cap: ['Writes DWG'],
-    cells: [g('R2.6 – R2018 except R2007', 'pages LZ77-compressed'), a('R13 – R2018', '(no native R2007)'), g('R13 – R2018'), n('no')]
+    cells: [g('R2.6 – R2018, every release', 'pages LZ77-compressed'), a('R13 – R2018', '(no native R2007)'), g('R13 – R2018'), n('no')]
   },
   {
     cap: ['Native AC1021 (R2007) write'],
-    cells: [a('no — container done,', '3 header fields unsolved'), n('falls back to R2010'), a('AC1021 header writer', 'is a stub (source read)'), n('n/a')]
+    cells: [g('yes — opens at AUDIT 0,', 'gated (ACAD_TABLE reported)'), n('falls back to R2010'), a('AC1021 header writer', 'is a stub (source read)'), n('n/a')]
   },
   { cap: ['Reads / writes DXF'], cells: [g('ASCII + binary'), g('ASCII + binary'), g('ASCII + binary'), g('ASCII + binary')] },
   null,
@@ -82,7 +82,7 @@ const ROWS = [
   { cap: ['SHX shape-font text rendering'], cells: [g('full bytecode engine'), n('—'), n('—'), g('yes (v1.1+)')] },
   {
     cap: ['External validation vs AutoCAD'],
-    cells: [g('6 releases open in AutoCAD 2027,', 'all at AUDIT 0 errors (gated)'), n('—'), n('—'), n('n/a (no DWG)')]
+    cells: [g('7 releases open in AutoCAD 2027,', 'all at AUDIT 0 errors (gated)'), n('—'), n('—'), n('n/a (no DWG)')]
   },
   null,
   {

@@ -768,164 +768,98 @@ export const assemble2007 = (sections: readonly Section2007[]): Uint8Array => {
          source) because the drawing's editing time and history grow
          between saves, so no two files ever share a record.
 
-     WHAT STILL BLOCKS R2007 (campaign 9). One field, and it is in this
-     envelope, not in the section content: `random_seed` at record 0x100.
+     R2007 WRITE IS SOLVED (campaign 13), and `node tools/validate-external.mjs`
+     now gates it alongside the other six releases at AUDIT 0 errors. Three
+     defects stood between the container and an opening file, none of them
+     in this envelope:
 
-     The bisection that pinned it. A CHIMERA — every logical section of a
-     genuine AC1021 file, read out with `readSections2007` and re-emitted
-     through `assemble2007` — is refused with the same ErrorStatus=53 our
-     own R2007 files get, so the container, not the content, is the
-     suspect. Against that, an IDENTITY re-encode of a genuine file (its
-     record decompressed, recompressed with our compressor, all three
-     prologue CRCs recomputed, all three copies and both header blocks
-     rewritten) AUDITs clean with 0 errors, so the pipeline is sound and
-     single-field edits are a clean oracle. Under that oracle:
+       - an EMPTY CLASSES payload is refused at AC1021 exactly as it is at
+         AC1032. The writer already emitted a benign stub record for 2018;
+         it now does so from 2007 on (src/dwg/writer.ts, `clsBytes`).
+       - the inline ACIS payload starts on the very BIT after its version
+         field, not on the next byte boundary, and is followed by one flag
+         bit and the cached wireframe block AutoCAD writes on every save.
+         Both were measured on genuine AC1021 records: the kernel magic
+         lands at bit 114, 452 and 534 of three of them — each exactly ten
+         bits, one BS(2), past the version — and fitting a field sequence
+         to what follows the payload's end marker leaves
+         `B B 3BD BL B BL BL B BL` reading [1, 1, basepoint, 4, 1, 0, 0,
+         1, 0] and landing exactly on the string-stream flag.
+       - an ASM-dialect kernel stream cannot travel inline in an AC1021
+         file at all. A genuine "ACIS BinaryFile" blob written by this
+         library into an AC1021 file opens at AUDIT 0; the same file
+         carrying an "ASM BinaryFile" stream is refused. ASM payloads now
+         leave an R2007 target as SAT, or are reported.
 
-       - zero pagesmap_crc_seed (0x20)   -> AUDIT 0 errors
-       - zero secmap_crc_seed   (0xE0)   -> AUDIT 0 errors
-       - zero crc_seed_encoded  (0xF8)   -> AUDIT 0 errors
-       - zero random_seed       (0x100)  -> ErrorStatus=53
-       - random_seed = 1                 -> ErrorStatus=53
-       - random_seed = another genuine file's value -> ErrorStatus=53
-       - random_seed ^ 1 (one bit)       -> ErrorStatus=53
+     Our own reader hid the first two: it probes 64 bit offsets for the
+     kernel magic instead of trusting the framing, and it stops at the
+     payload's end marker without consuming the cache block. Symmetric
+     beliefs no self-round-trip can catch — which is what the external
+     loop exists for.
 
-     The compressed record is 156 bytes in both the passing 0xF8 probe and
-     the failing 0x100 probe, so no length or copy-count artefact is in
-     play. The field is compared EXACTLY and is FILE-SPECIFIC, which is
-     why nothing we can pick is accepted and why every R2007 file this
-     writer produces is refused.
+     WHAT `random_seed` AT RECORD 0x100 ACTUALLY IS (campaign 13). Not a
+     checksum, and not a function of the file: it is one draw of AutoCAD's
+     own per-process RNG, and nothing in a file we assemble depends on it.
+     Zero is accepted, which is what this writer emits.
 
-     What random_seed is NOT (all measured over 103 genuine AC1021 files,
-     no hypothesis surviving):
+     That was settled by making AutoCAD mint the files. Five drawings with
+     different content, saved to R2007 from five SEPARATE accoreconsole
+     launches, carry the IDENTICAL random_seed (0xa71b3da4394728ff), the
+     identical prologue key, the identical check-data r1 and the identical
+     crc_seed_encoded; a second save inside one session moves all four
+     together. So the whole family is drawn from one deterministic stream
+     seeded at process start, indexed by how much the session has drawn —
+     which is why 102 genuine files hold 102 distinct values while five of
+     ours hold one. Campaigns 9-12 spent 9100 64-bit and 4550 32-bit
+     digest combinations looking for the content that produces it. There
+     is none. Nobody should look again.
 
-       - not a function of the rest of the record: the file stays clean
-         with 0x20, 0xE0 and 0xF8 zeroed and random_seed untouched.
-       - not paired with the masked-seed family: zeroing all three record
-         seeds AND the fifth check-data word, with a donor random_seed,
-         is still refused.
-       - not tied to the check-data random words: replacing r1/r2 with our
-         own and keeping random_seed AUDITs clean.
-       - not the seed of the header page's padding. That "padding" is not
-         generated at all: in every genuine file the inter-copy gap bytes
-         are byte-identical to the first bytes of the tail past the last
-         copy, i.e. AutoCAD memcpy's one buffer of record + trailing heap
-         garbage N times. No MSVC-LCG picker matches it either.
-       - not a CRC: swept as mirrored-Jones and forward-ECMA-182, walked
-         and raw, inverted and not, seeded by seed1/seed2 of the length,
-         0, ~0, the prologue key and ~key, over every record prefix, the
-         record with every subset of seed fields masked, every slice pair
-         of the 0x80 prologue, every slice of the check-data block, the
-         page map and section map (compressed and uncompressed), the file
-         body, the whole file, and the AppInfo/SummaryInfo/Header/
-         AppInfoHistory/RevHistory/Template/ObjFreeSpace sections.
-       - not stored anywhere else: its eight bytes appear nowhere in the
-         file, raw or in any decompressed section, little- or big-endian.
-       - not an LCG self-certification (hi32 = LCG(lo32) and six variants),
-         not a member of the check-data rotation chains, not an LCG image
-         of the key, r1, r2 or the masked seeds, and no PRNG chain from
-         random_seed reaches any of them.
+     The measured structure still holds and is worth keeping: with mt[] the
+     MT19937 init_genrand array of a 32-bit seed S,
 
-     Its only measured structure is TWO GF(2) relations, satisfied by all
-     103 files (rank 63 of 65 counting the affine column):
+         mt[0] = S;  mt[i] = 0x6C078965 * (mt[i-1] ^ (mt[i-1] >> 30)) + i
+
+     the field is exactly (mt[128] << 32) | mt[129] on 102 of 102 genuine
+     files. The multiplier and addend were RECOVERED, not assumed: an
+     exhaustive bitwise (Hensel) fit of lo = M*g(hi) + C over all 102 files
+     at once, for a catalogue of ~130 pre-transforms g, leaves a UNIQUE
+     surviving (M, C) = (0x6C078965, 0x81) at full 32-bit depth for
+     g(x) = x ^ (x >> 30) and dies at bit 0 or 2 for every other g. That
+     multiply-add is also the mechanical explanation of the only two GF(2)
+     relations a linear scan of the field can ever see (it is affine in
+     bits 0 and 1 and goes nonlinear from bit 2 up through its carries):
 
          bit1 ^ bit32 ^ bit33 ^ bit62 ^ bit63 == 0
          bit0 ^ bit32 ^ bit62 == 1
 
-     Both are satisfied by random_seed = 1, which AutoCAD still refuses, so
-     they are necessary conditions at best.
+     PATCHING a genuine file's random_seed is still refused, and that is a
+     property of patched genuine files, not a gate on new ones. The
+     experiment is airtight in both directions: recompressing a genuine
+     record with our compressor and changing nothing AUDITs clean at the
+     same compressed length; writing the SAME eight bytes into 0xF8
+     AUDITs clean while writing them into 0x100 is refused; swapping the
+     two fields' values is refused one way and clean the other. Whatever
+     AutoCAD does with the field on a file it recognises, `assemble2007`
+     output with zero there opens.
 
-     THE GENERATOR IS SOLVED (campaign 11). random_seed is not a digest at
-     all: it is two adjacent words of a MERSENNE TWISTER seeding array.
-     With mt[] the MT19937 init_genrand state of a 32-bit seed S,
+     THE PAGE SLACK IS A GENERATED STREAM, and it is free. Every slack
+     region of a genuine AC1021 file — the tail of the file-header page,
+     the gaps between its record copies, the page-map and section-map
+     system pages, and every data page's slack from round8(comp) to the
+     end of its RS data area — is filled from ONE per-file buffer, and
+     that buffer is the same MT19937 init array read out as
+     mt[1], mt[2], ... (byte-identical page to page: 860 of 860 bytes on
+     the first file measured, and the recurrence recovers a consecutive
+     index run on every one of the 102). The seven "random" envelope
+     fields are words of that same array — the prologue key sits at index
+     173..208 across the corpus. An earlier entry here called the padding
+     "uninitialised memory, not a generated stream"; that was wrong.
 
-         mt[0] = S;  mt[i] = 0x6C078965 * (mt[i-1] ^ (mt[i-1] >> 30)) + i
-
-     the field is exactly
-
-         random_seed = (mt[128] << 32) | mt[129]
-
-     — high half mt[128], low half mt[129]. It holds on 102 of 102 genuine
-     files. The multiplier and the addend were RECOVERED, not assumed: an
-     exhaustive bitwise (Hensel) fit of `lo = M*g(hi) + C mod 2^32` over all
-     102 files at once, run for a catalogue of ~130 pre-transforms g, leaves
-     a UNIQUE surviving (M, C) = (0x6C078965, 0x81) at full 32-bit depth for
-     g(x) = x ^ (x >> 30) and dies at bit 0 or 2 for every other g. That is
-     also the mechanical explanation of the two GF(2) relations recorded
-     above: a multiply-add is affine in bits 0 and 1 and goes nonlinear from
-     bit 2 up through its carries, so a linear scan of the field can only
-     ever see exactly two relations, no matter how much data it is given.
-
-     The same shape recurs elsewhere in the envelope: the prologue KEY is
-     also a consecutive (mt[i-1], mt[i]) pair, at a per-file index in
-     174..182. So AutoCAD mints its 64-bit "random" fields by reading two
-     adjacent words out of an MT19937 seeding array — which is why several
-     of them look structured without being derived from the file.
-
-     S itself is uniformly random: 102 distinct values spread over the whole
-     32-bit range (0x035B1AB5 .. 0xFC632D3F), no bit bias, not a time stamp,
-     not a counter, not the file size, not either half of the key.
-
-     THE STRUCTURE IS NECESSARY BUT NOT SUFFICIENT. Two structurally perfect
-     self-generated values were graded on Sheet1.dwg through the rebuild
-     oracle (only random_seed changed, both header blocks and all three
-     copies patched):
-
-       - hi = 0xDEADBEEF, so rnd = 0xDEADBEEF9E2C9F9D  -> ErrorStatus=53
-       - the pair for S(genuine)+1, rnd = 0x54313092E26BD580 -> ErrorStatus=53
-
-     So AutoCAD pins S itself, to the bit, and the MT expansion is only the
-     packaging. Since a file carries no copy of S (see below), whatever
-     pins it must be recomputed by AutoCAD from the file.
-
-     What campaign 11 swept and missed, so no one repeats it:
-
-       - STORED COPIES. 140 images of random_seed (identity, complement,
-         negation, half-swap, both LCG images, all 63 rotations, each
-         little- and big-endian) searched at EVERY byte offset of all 14
-         decompressed sections of all 102 files, plus a per-offset algebra
-         sweep (word ^ rnd, word +- rnd, and both 32-bit halves) anchored at
-         each section's start AND end: no hit. The same search for S, for
-         mt[1], mt[2], mt[127], mt[130], mt[623] and for the first eight
-         tempered outputs of the generator: no hit. Neither the value nor
-         its pre-image is written down anywhere.
-       - 64-BIT DIGESTS over the object and handle streams. 14 non-CRC
-         families (FNV-1, FNV-1a, djb2, djb2-xor, sdbm, Murmur64A, xxHash64,
-         Fletcher-64, Adler-64, sum64, xor64, both MSVC-LCG folds and a
-         multiply-fold accumulator) x 65 buffers x 10 seed forms (0, ~0,
-         length, seed1(len), seed2(len), 0x110, file size, the xxHash prime,
-         the key and ~key) = 9100 combinations, graded as exact, XOR-const
-         and ADD-const: NO HIT. The buffers included AcDb:AcDbObjects and
-         AcDb:Handles whole, both concatenations, the decoded object map as
-         (handle, offset) pairs, the handle list alone, the offset list
-         alone, handle range/count/sum summaries, every other decompressed
-         section, the eight-section stream-order concatenation, the record
-         and its variants, the 0x80 prologue, both maps compressed and
-         uncompressed, the RS payload, the compressed record, the whole
-         file, the body 0x480..header2, the tail, a page-geometry vector,
-         and the word-order permutation of every buffer under 4 KiB.
-       - 32-BIT DIGESTS against S, which is the right target now that the
-         expansion is known: CRC-32 (inverted and raw), Adler-32, FNV-1a-32,
-         Murmur3-32 and this container's own `cksum32R2007` (with its
-         length-derived seed and with every other seed form) over the same
-         65 buffers = 4550 combinations: NO HIT.
-       - LAYOUT. Sheet1/Sheet2/Sheet3.dwg of the SheetSetVBA sample are
-         genuine near-twins — identical file size, identical page ids,
-         offsets and disk sizes, identical section data sizes — with three
-         completely unrelated random_seeds. The field is not a function of
-         the layout or of the record.
-
-     A REUSABLE CONTENT ORACLE is worth rebuilding for that: because those
-     twins share a layout, one section's disk pages can be transplanted
-     from donor to base, that page's record (compressed size, Adler, CRC)
-     copied into the section map, the section-map system page rebuilt
-     inside its existing allocation, the 0x110 record's secmap sizes, CRCs
-     and correction factor rewritten and both header blocks re-emitted —
-     changing drawing CONTENT while keeping the base's genuine random_seed.
-     The version that existed (.tmp-acad/zz-r11-splice.mjs) had the
-     block-count bug described below, and its no-op control passed only by
-     luck of the base file it was run on, so treat every verdict it
-     produced as unproven. Any rebuild of that kind must derive the
-     geometry the way the paragraph after next sets out.
+     Its CONTENT is nevertheless free: zeroing every slack region of a
+     genuine file and re-encoding the RS parity so the codewords stay
+     valid AUDITs clean. The older note that zeroing the padding is
+     refused was measuring the broken codeword, not the bytes. This writer
+     leaves the slack zero.
 
      WITHDRAWN (campaign 12): "a second blocker in `compressR2007`". A
      previous entry here recorded that rebuilding a genuine file's
@@ -1003,8 +937,11 @@ export const assemble2007 = (sections: readonly Section2007[]): Uint8Array => {
      random_seed into one of OUR files does not help (53), as expected of a
      file-specific value.
 
-     Until that lands, R2007 cannot open, and PASS_BASELINE in
-     tools/validate-external.mjs must stay at six releases. */
+     Writing a genuine file's random_seed into one of OUR files does not
+     help either (53) — which was read at the time as "the value is
+     file-specific" and is now known to mean nothing of the sort: those
+     files were refused for the three defects named at the top of this
+     ledger, every one of which the same harness would have hidden. */
   const stride = round8(unit.length);
   const headerPayload = new Uint8Array(3 * 239);
   for (let c = 0; c * stride + unit.length <= headerPayload.length; c++) {

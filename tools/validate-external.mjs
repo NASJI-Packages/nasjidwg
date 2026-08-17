@@ -40,13 +40,22 @@ const VERSIONS = ['R12', 'R13', 'R14', 'R2000', 'R2004', 'R2007', 'R2018'];
  * corpus SAB payload became a minimal ASM-format stream riding the AcDs
  * section, and R2007+ symbol names travel as raw UTF-16 (a literal
  * \U+XXXX escape in a name is flagged "un-normalized" and renamed).
+ * R2007 joined in round 9, once three AC1021-only defects were found and
+ * fixed: an empty CLASSES payload is refused exactly as it is at R2018
+ * (the stub record it already wrote there now goes out from R2007 on);
+ * the inline ACIS payload begins on the very BIT after its version field,
+ * not on the next byte boundary, and is followed by a flag and the cached
+ * wireframe block AutoCAD writes on every save; and an ASM-dialect kernel
+ * stream cannot travel inline in an AC1021 file at all, so it leaves as
+ * SAT or is reported. The one entity R2007 still cannot carry is
+ * ACAD_TABLE, which the writer reports in `skipped`.
  * R13 joined in round 8, once a vintage AC1012 reference showed the four
  * places we had been writing the R14 spelling under an AC1012 signature:
  * the DICTIONARY hard-owner byte (R13c3 and later only — this one alone
  * cost ErrorStatus 53 before AUDIT ever ran), NUL-terminated strings,
  * the missing 53-byte ObjFreeSpace section, and the four trailing shorts
  * that close the header-variable section. See test/external.test.ts. */
-const PASS_BASELINE = ['R12', 'R13', 'R14', 'R2000', 'R2004', 'R2018'];
+const PASS_BASELINE = ['R12', 'R13', 'R14', 'R2000', 'R2004', 'R2007', 'R2018'];
 
 /* ------------------------------------------------------------------ */
 

@@ -20,13 +20,19 @@ const line = (over: Partial<Entity & { type: 'line' }> = {}): Entity => ({
 } as Entity);
 
 describe('real-world reader pins (campaign 5)', () => {
-  it('R2007 ACAD_TABLE: the 2007-only per-cell extras round-trip', () => {
+  it('R2007 ACAD_TABLE is reported, not written', () => {
     /* AutoCAD-2027-minted 2007 tables carry a BD (1.0) after each cell's
        rotation and close each cell with three BLs (3,0,0) — solved by
        brute force against 2x4 and 3x4 real grids until every cell decoded
        with the title-row merge pattern and the stream landed exactly on
-       the four tail bits. The writer emits the same spelling at 2007, and
-       the reader's strict pass must accept it. */
+       the four tail bits. That grammar is still what the READER expects,
+       and it is not the whole record: AutoCAD 2027 refuses an AC1021
+       drawing carrying the inline grid every other pre-R2010 container
+       takes (R2000 and R2004 are externally gated on the same spelling),
+       with cell text and without it alike, and its own AC1021 table read
+       back through this reader decodes with empty cell text. Until that
+       record is solved the R2007 writer reports the entity instead of
+       writing a drawing AutoCAD refuses whole. */
     const d: Drawing = emptyDrawing();
     d.entities.push({
       type: 'table', layer: '0', color: { kind: 'byLayer' },
@@ -39,8 +45,30 @@ describe('real-world reader pins (campaign 5)', () => {
         { text: 'C1' }, {}
       ]
     } as Entity);
-    const bytes = writeDwg2007(d).data;
-    const back = readDwg(bytes);
+    const res = writeDwg2007(d);
+    expect(res.skipped).toContain('table (R2007 record unsolved)');
+    const back = readDwg(res.data);
+    expect(back.entities.some((e) => e.type === 'table')).toBe(false);
+    expect(back.warnings).toEqual([]);
+  });
+
+  it('the inline ACAD_TABLE grid round-trips in the containers that take it', () => {
+    /* The same grid at R2000, where AutoCAD 2027 opens our output at
+       AUDIT 0 — so the cell walk, the span pattern and the four
+       override-presence tail bits are pinned on both sides. */
+    const d: Drawing = emptyDrawing();
+    d.entities.push({
+      type: 'table', layer: '0', color: { kind: 'byLayer' },
+      position: { x: 1, y: 2, z: 0 }, direction: { x: 1, y: 0, z: 0 },
+      numRows: 3, numColumns: 2,
+      rowHeights: [0.5, 0.4, 0.4], columnWidths: [2.5, 2.5],
+      cells: [
+        { text: 'Title', spanColumns: 2 }, {},
+        { text: 'A' }, { text: 'B' },
+        { text: 'C1' }, {}
+      ]
+    } as Entity);
+    const back = readDwg(writeDwg2000(d).data);
     const t = back.entities.find((e) => e.type === 'table');
     expect(t?.type).toBe('table');
     if (t?.type !== 'table') return;

@@ -42,16 +42,17 @@ unwraps back to native on return** (verified through a
 is the same preservation contract AutoCAD itself offers for objects it
 has no enabler for.
 
-**AutoCAD itself signs off on the output.** Six releases — R12, R13,
-R14, R2000, R2004 and R2018 — open in AutoCAD 2027 with **zero AUDIT
-errors**, and a harness in the repository re-checks all six so a
-regression fails loudly. Getting there took seven campaigns against
-AutoCAD as the oracle and turned up defects no self-consistent test
-could ever have found, because a reader and a writer can share the same
-wrong belief and still round-trip perfectly. (R2007 write is the one
-gap: everything but three undocumented header checksums is in place,
-and what is known about them is written down in
-[PARITY.md](PARITY.md).)
+**AutoCAD itself signs off on the output.** All seven writable release
+families — R12, R13, R14, R2000, R2004, R2007 and R2018 — open in
+AutoCAD 2027 with **zero AUDIT errors**, and a harness in the repository
+re-checks every one so a regression fails loudly. Getting there took nine
+campaigns against AutoCAD as the oracle and turned up defects no
+self-consistent test could ever have found, because a reader and a writer
+can share the same wrong belief and still round-trip perfectly. R2007
+carries two documented limits, both reported to the caller rather than
+dropped: ACAD_TABLE, whose AC1021 record is still unsolved, and an
+ASM-dialect ACIS payload, which that container's kernel cannot read
+inline. See [PARITY.md](PARITY.md).
 
 **Arabic is not an add-on.** Shaping into presentation forms, bidi
 resolution, MTEXT inline codes, MIF and \\U+ escapes, and every codepage
@@ -89,12 +90,13 @@ What the workflow does not give you for free is correctness, so nothing
 here rests on it. Every claim in this README is backed by something that
 runs: `npm test` regenerates the whole corpus with the library's own
 writers, the DWG and DXF codecs cross-check each other, and
-`node tools/validate-external.mjs` re-opens six releases in AutoCAD and
-fails if any of them regresses. Defects found by those mechanisms —
-including a Reed-Solomon parity bug that made every R2007 data page
-invalid, and a one-byte dictionary shift that had blocked R13 for four
-campaigns — were found because the mechanisms exist, not because the
-model was careful.
+`node tools/validate-external.mjs` re-opens all seven writable releases in
+AutoCAD and fails if any of them regresses. Defects found by those
+mechanisms — a Reed-Solomon parity bug that made every R2007 data page
+invalid, an inline ACIS payload written one bit-alignment off, a CLASSES
+section AutoCAD refuses when empty, and a one-byte dictionary shift that
+had blocked R13 for four campaigns — were found because the mechanisms
+exist, not because the model was careful.
 
 ---
 
@@ -158,16 +160,16 @@ worker or store.
 | **DWG R13 / R14** (AC1012, AC1014) | ✅ | ✅ |
 | **DWG R2000** (AC1015) | ✅ | ✅ |
 | **DWG R2004** (AC1018) | ✅ | ✅ compressed pages |
-| **DWG R2007** (AC1021) | ✅ | 🚧 container + checksums accepted; one header field still refuses — **not usable** |
+| **DWG R2007** (AC1021) | ✅ | ✅ Reed-Solomon pages; ACAD_TABLE and ASM-dialect ACIS reported |
 | **DWG R2010 / R2013 / R2018** (AC1024/27/32) | ✅ | ✅ compressed pages |
 | **DXF ASCII** | ✅ | ✅ |
 | **DXF binary** (both group-code widths) | ✅ | ✅ |
 
 Reading covers every published DWG signature from 1982 on. Writing covers
-every release from R2.6 (1987) on except R2007 — only the R1.x line is
-read-only. Each writer is verified by a number-for-number round trip
-through the reader, and the six releases marked above are additionally
-verified by AutoCAD itself.
+every release from R2.6 (1987) on — only the R1.x line is read-only. Each
+writer is verified by a number-for-number round trip through the reader,
+and the seven modern releases are additionally verified by AutoCAD
+itself.
 
 ## What survives a round trip
 

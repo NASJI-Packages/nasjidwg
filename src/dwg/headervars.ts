@@ -109,7 +109,13 @@ const readHeaderVarsWith = (
       if (method === 0xc3) return rgb & 0xff;
       return index;
     };
-    const timebll = (): number => { const d = r.bl(); r.bl(); return d; };
+    /** A date field: the Julian day and the milliseconds into it, kept as
+     *  the two raw halves — the day number alone floors to midnight, and
+     *  the millisecond half is what tells two saves of one drawing apart. */
+    const timebll = (name: string): void => {
+      out.vars[name] = r.bl();
+      out.vars[name + '_MS'] = r.bl();
+    };
     const p3 = (): Point3 => { const [x, y, z] = r.bd3(); return { x, y, z }; };
     const p2 = (): Point2 => ({ x: r.rd(), y: r.rd() });
 
@@ -162,10 +168,10 @@ const readHeaderVarsWith = (
     for (let i = 0; i < 4; i++) r.bd();   /* CHAMFER */
     r.bd(); r.bd(); r.bd();               /* FACETRES, CMLSCALE, CELTSCALE */
     text();                               /* MENU (string stream in R2007+) */
-    out.vars.TDCREATE = timebll();        /* TDUCREATE days */
-    out.vars.TDUPDATE = timebll();
+    timebll('TDCREATE');                  /* TDUCREATE days + ms */
+    timebll('TDUPDATE');
     if (v >= 2004) { r.bl(); r.bl(); r.bl(); }
-    timebll(); timebll();                 /* TDINDWG, TDUSRTIMER */
+    timebll('TDINDWG'); timebll('TDUSRTIMER');
     out.celColorIndex = cmc();            /* CECOLOR */
     out.handseed = r.h().value;           /* HANDSEED lives in the data stream */
     out.clayerHandle = H();
@@ -265,7 +271,8 @@ const readHeaderVarsWith = (
       out.insUnits = r.bs();
       const cepsntype = r.bs();
       if (cepsntype === 3) H();
-      text(); text();                     /* FINGERPRINT/VERSION guids */
+      out.vars.FINGERPRINTGUID = text();
+      out.vars.VERSIONGUID = text();
     }
     if (v >= 2004) {
       out.vars.SORTENTS = r.rc();

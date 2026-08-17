@@ -1,12 +1,37 @@
 {
-  "updated": "2026-08-17 12:59 EDT",
-  "tests": "623 passing · gate exit 0 · pack clean",
-  "headline": "Real shipped bug found: every R2007 data page carried invalid RS parity",
+  "updated": "2026-08-17 15:20 EDT",
+  "tests": "646 passing · gate exit 0 · pack clean",
+  "headline": "R2007 write solved: all seven writable releases now open in AutoCAD at AUDIT 0",
   "verdicts": [
     {
-      "label": "R12 · R13 · R14 · R2000 · R2004 · R2018",
+      "label": "R12 · R13 · R14 · R2000 · R2004 · R2007 · R2018",
       "state": "pass",
       "note": "all OPEN + AUDIT 0 errors in AutoCAD 2027 (gated)"
+    },
+    {
+      "label": "R2007: empty CLASSES payload",
+      "state": "pass",
+      "note": "AC1021 refuses it exactly as AC1032 does — the stub record now goes out from R2007 on"
+    },
+    {
+      "label": "R2007: inline ACIS framing",
+      "state": "pass",
+      "note": "the payload starts on the BIT after its version field, then a flag and the cached wireframe block — measured on genuine records, both hidden by a reader that probes for the magic"
+    },
+    {
+      "label": "R2007: kernel dialect",
+      "state": "pass",
+      "note": "AC1021 reads only the pre-ASM binary form inline; an ASM stream now leaves as SAT or is reported"
+    },
+    {
+      "label": "random_seed at record 0x100",
+      "state": "pass",
+      "note": "retired as a blocker: five drawings saved from five separate AutoCAD launches carry the identical value — it is a per-process RNG draw, not a function of the file"
+    },
+    {
+      "label": "Page slack is a generated stream",
+      "state": "pass",
+      "note": "one MT19937 init array per file feeds every slack region and the seven envelope fields; its content is free (zeroed + re-parity'd audits clean)"
     },
     {
       "label": "Provenance: AcDs section",
@@ -34,9 +59,9 @@
       "note": "zero throws, CRCs on"
     },
     {
-      "label": "R2007 write",
+      "label": "R2007 ACAD_TABLE record",
       "state": "todo",
-      "note": "blocker confirmed, not artefact: the same 64-bit value is free at 0xF8 and refused at 0x100, at identical compressed length"
+      "note": "the one entity AC1021 output cannot carry: the inline grid every other pre-R2010 container takes is refused there, with cell text and without it — reported in skipped, never dropped silently"
     },
     {
       "label": "Licence + provenance audit",
@@ -54,10 +79,10 @@
       "note": "genuine files fully recompressed and re-encoded by us: AUDIT 0 errors (180 KB file, 2600 objects)"
     }
   ],
-  "inflight": "A second real blocker surfaced in SHIPPED code, not in a probe: R2007 uses two different Reed-Solomon codes — RS(255,239) for the header and system pages, RS(255,251) for data pages — over two DIFFERENT fields, and our encoder used the header generator for both, writing twelve parity bytes off the end of the array. Our own reader ignores parity, so it round-tripped perfectly and nothing caught it. Both generators are now derived rather than transcribed, and whole genuine files recompressed end to end by us audit clean in AutoCAD.",
+  "inflight": "R2007 was never blocked by the header field four campaigns had pinned on. Making AutoCAD mint the evidence settled it: five different drawings saved to R2007 from five separate accoreconsole launches carry the IDENTICAL random_seed, prologue key, check-data word and crc_seed_encoded — one draw of a per-process RNG, carrying no information about the file, and zero is accepted. The real defects were three, all in shipped code and all invisible to a self round trip: an empty CLASSES payload (refused at AC1021 exactly as at AC1032), an inline ACIS payload written a bit-alignment off, and the cached wireframe block that has to follow it. The one entity still short is ACAD_TABLE, which the writer now reports instead of emitting a drawing AutoCAD refuses whole.",
   "recentlyLanded": [
-    "RS parity bug fixed: derived both generators from first principles, verified byte-exact on 55189 blocks",
-    "Comparison table audited for truth — our own R2007 write claim was false and is corrected",
-    "Provenance clean and documented; six gated releases at AUDIT 0/0"
+    "R2007 write solved and gated — the seventh release now opens at AUDIT 0 errors with the full corpus",
+    "random_seed retired as a blocker by an experiment, not an argument: same value from five separate AutoCAD launches",
+    "Page slack identified as one MT19937 init array per file, and proven free — an earlier ledger called it uninitialised memory"
   ]
 }

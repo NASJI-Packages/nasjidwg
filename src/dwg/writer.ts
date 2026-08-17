@@ -926,17 +926,36 @@ const writeDwgImpl = (
           skipped.push('acis(surface)');  /* needs its own class record */
           return false;
         }
-        /* pre-2007 containers have no binary kernel form; a SAB payload
-           leaves through its SAT text conversion instead — but only a
-           pre-ASM one. An ASM-kernel stream (2010+, "ASM BinaryFile"
-           magic) has no faithful text form in those containers: its
-           asmheader record and kernel version postdate them, so it is
-           skipped rather than written as anachronistic SAT. */
-        if (!e.sat && !(e.sab && (V >= 2007
-          || (!isAsmSab(e.sab) && sabToSat(e.sab) !== null)))) {
+        /* A binary kernel payload travels inline only where the
+           container's kernel speaks its dialect: the pre-ASM
+           "ACIS BinaryFile" form from R2007 on, the ASM form only from
+           R2013. AutoCAD 2027 refuses an ASM stream inside an AC1021
+           file (externally proven — the same drawing carrying a genuine
+           ACIS-dialect blob opens at AUDIT 0), so an ASM payload leaves
+           an R2007 target through its SAT text conversion, and is
+           reported when it has no faithful text form: its asmheader
+           record and kernel version postdate those containers. */
+        const asm = !!e.sab && isAsmSab(e.sab);
+        const sabTravels = !!e.sab && (asm ? V >= 2013 : V >= 2007);
+        if (!e.sat && !sabTravels
+          && !(e.sab && !asm && sabToSat(e.sab) !== null)) {
           skipped.push('acis(sab)');
           return false;
         }
+      }
+
+      /* AC1021 is the one container whose ACAD_TABLE record we cannot
+         spell yet. The inline grid every other pre-R2010 container takes
+         (R2000 and R2004 are externally gated on it) is refused at R2007
+         with ErrorStatus 53 — with cell text and without it alike, and
+         under every variant of the two R2007-only cell fields — and the
+         same record read back out of an AutoCAD-minted AC1021 table
+         decodes with empty cell text, so our belief about that record is
+         incomplete on the read side too. Reported rather than written:
+         one skipped entity beats a drawing AutoCAD refuses whole. */
+      if (V === 2007 && e.type === 'table') {
+        skipped.push('table (R2007 record unsolved)');
+        return false;
       }
 
       /* ACAD_TABLE, MULTILEADER, LIGHT and the underlays are application
@@ -1515,7 +1534,9 @@ const writeDwgImpl = (
         const isMinsert = (e.columnCount ?? 1) > 1 || (e.rowCount ?? 1) > 1;
         makeEntity(isMinsert ? 8 : 7, handle, e, ctx, (w) => {
           w.bd3(e.position.x, e.position.y, e.position.z ?? 0);
-          const sx = e.scale.x || 1, sy = e.scale.y || 1, sz = e.scale.z || 1;
+          /* a hand-built insert may leave the scale off entirely */
+          const sc = e.scale ?? { x: 1, y: 1, z: 1 };
+          const sx = sc.x || 1, sy = sc.y || 1, sz = sc.z || 1;
           if (V <= 14) { w.bd(sx); w.bd(sy); w.bd(sz); }
           /* R2000 added a two-bit selector that elides the common cases */
           else if (sx === 1 && sy === 1 && sz === 1) w.bb(3);
@@ -2335,17 +2356,51 @@ const writeDwgImpl = (
            Any solid the AcDs branch cannot take falls through to the
            inline SAB below: it round-trips through this library and other
            readers losslessly, which beats discarding the payload. */
+        /* the same dialect rule the filter above applies: a payload the
+           target's kernel cannot read inline leaves as SAT text */
+        const sabInline = !!e.sab && (isAsmSab(e.sab) ? V >= 2013 : V >= 2007);
         const sat = e.sat
-          ?? (e.sab && V < 2007 ? sabToSat(e.sab) ?? undefined : undefined);
+          ?? (e.sab && !sabInline ? sabToSat(e.sab) ?? undefined : undefined);
+        /** What follows the kernel payload from R2007 on: the cached
+         *  wireframe block AutoCAD writes on every save. Our reader stops
+         *  at the payload's end marker and never consumed it, so the
+         *  writer never emitted it — and AutoCAD refuses the record
+         *  without it, exactly as it refuses the R2018 inline form. Same
+         *  fields the AcDs branch above writes, minus the R2013 revision
+         *  block. */
+        const acisTail = (w: BitWriter, afterPayload: boolean): void => {
+          if (V < 2007) return;
+          /* one flag closes the kernel payload before the cache block —
+             recovered by fitting the field sequence to genuine AC1021
+             records: every one of them reads B B 3BD BL B BL BL B BL from
+             the payload's end marker and lands exactly on the string flag,
+             with the values [1, 1, basepoint, 4, 1, 0, 0, 1, 0]. */
+          if (afterPayload) w.b(1);
+          w.b(1);                         /* wireframe data present */
+          w.bd3(0, 0, 0);                 /* cached base point: origin */
+          w.bl(4);                        /* isolines: the ISOLINES default */
+          w.b(1);                         /* isoline data present */
+          w.bl(0);                        /* no cached wires */
+          w.bl(0);                        /* no cached silhouettes */
+          w.b(1);                         /* set in every AutoCAD save */
+          w.bl(0);                        /* no per-face materials */
+        };
         makeEntity(typeNum, handle, e, ctx, (w) => {
           if (!sat) {
-            if (!e.sab) { w.b(1); return; }         /* empty */
+            if (!e.sab) { w.b(1); acisTail(w, false); return; }  /* empty */
             /* R2007 introduced the binary kernel form; the blob already
-               carries its own end marker, which is what bounds it */
+               carries its own end marker, which is what bounds it.
+               It starts on the very next BIT after the version field —
+               not on a byte boundary. Measured on genuine AC1021 records
+               (the magic lands at bit 114, 452 and 534 of three records,
+               each exactly ten bits — one BS(2) — past the version), and
+               AutoCAD 2027 refuses the byte-aligned spelling. Our own
+               reader hid this: it probes 64 bit offsets for the magic
+               rather than trusting the framing. */
             w.b(0); w.b(0);
             w.bs(2);
-            w.align();
             for (const byte of fromBase64(e.sab)) w.rc(byte);
+            acisTail(w, true);
             return;
           }
           w.b(0);                         /* not empty */
@@ -2359,6 +2414,7 @@ const writeDwgImpl = (
           w.bl(ciphered.length);
           for (const c of ciphered) w.rc(c);
           w.bl(0);                        /* terminator */
+          acisTail(w, false);
         });
         return;
       }
@@ -3856,7 +3912,7 @@ const writeDwgImpl = (
        (externally proven: the same minimal drawing opens once a single
        benign record is registered). Older versions accept the wrapped
        empty payload. */
-    if (noClasses && V < 2018) return clsW.bytes();
+    if (noClasses && V < 2007) return clsW.bytes();
     /* R2007+ prefixes the records with their bit length and moves the
        class names into a trailing string stream. */
     let sizePos = -1;
