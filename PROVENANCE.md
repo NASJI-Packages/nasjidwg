@@ -47,7 +47,7 @@ own decoder neither copies nor distributes it. What was learned from
 them — that a length field is stored here, that a flag arrived in that
 release — is factual information about an interchange format, which
 copyright does not reach. This library therefore carries no GPL
-obligations, and it ships under Apache-2.0 on its own terms.
+obligations, and it ships under the MIT License on its own terms.
 
 The line that matters is the one between *facts* and *expression*, and
 it was held: the vintage drawings were decoded, not transcribed, and the

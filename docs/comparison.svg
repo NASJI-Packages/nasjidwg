@@ -93,32 +93,32 @@
 <line x1="54" y1="1108" x2="1506" y2="1108" stroke="#30363d"/>
 <text x="54" y="1145" font-size="15" fill="#e6edf3">Arabic shaping + RTL</text>
 <text x="524" y="1145" font-size="15" fill="#3fb950">built in</text>
-<text x="774" y="1145" font-size="15" fill="#8b949e">no</text>
-<text x="1024" y="1145" font-size="15" fill="#8b949e">no</text>
-<text x="1274" y="1145" font-size="15" fill="#8b949e">no</text>
+<text x="774" y="1145" font-size="15" fill="#8b949e">—</text>
+<text x="1024" y="1145" font-size="15" fill="#8b949e">—</text>
+<text x="1274" y="1145" font-size="15" fill="#8b949e">not RTL-designed (docs)</text>
 <rect x="38" y="1161" width="1484" height="68" rx="6" fill="rgba(255,255,255,0.025)"/>
 <text x="54" y="1192" font-size="15" fill="#e6edf3">MTEXT inline codes, MIF,</text>
 <text x="54" y="1213" font-size="15" fill="#e6edf3">\U+ escapes</text>
 <text x="524" y="1192" font-size="15" fill="#3fb950">full</text>
-<text x="774" y="1192" font-size="15" fill="#d29922">partial</text>
-<text x="1024" y="1192" font-size="15" fill="#d29922">partial</text>
-<text x="1274" y="1192" font-size="15" fill="#d29922">partial</text>
+<text x="774" y="1192" font-size="15" fill="#8b949e">—</text>
+<text x="1024" y="1192" font-size="15" fill="#8b949e">—</text>
+<text x="1274" y="1192" font-size="15" fill="#d29922">full parser; no MIF</text>
 <text x="54" y="1260" font-size="15" fill="#e6edf3">Every DWG codepage</text>
 <text x="524" y="1260" font-size="15" fill="#3fb950">yes</text>
 <text x="774" y="1260" font-size="15" fill="#3fb950">yes</text>
-<text x="1024" y="1260" font-size="15" fill="#d29922">partial</text>
-<text x="1274" y="1260" font-size="15" fill="#d29922">partial</text>
+<text x="1024" y="1260" font-size="15" fill="#8b949e">—</text>
+<text x="1274" y="1260" font-size="15" fill="#8b949e">—</text>
 <line x1="54" y1="1282" x2="1506" y2="1282" stroke="#30363d"/>
 <text x="54" y="1319" font-size="15" fill="#e6edf3">SVG / PDF / GeoJSON export</text>
 <text x="524" y="1319" font-size="15" fill="#3fb950">all three, built in</text>
 <text x="774" y="1319" font-size="15" fill="#d29922">GeoJSON only</text>
 <text x="1024" y="1319" font-size="15" fill="#d29922">SVG only</text>
-<text x="1274" y="1319" font-size="15" fill="#d29922">SVG + PDF add-ons</text>
+<text x="1274" y="1319" font-size="15" fill="#3fb950">all three, via add-ons</text>
 <rect x="38" y="1335" width="1484" height="47" rx="6" fill="rgba(255,255,255,0.025)"/>
 <text x="54" y="1366" font-size="15" fill="#e6edf3">Hatch pattern explosion</text>
 <text x="524" y="1366" font-size="15" fill="#3fb950">yes</text>
-<text x="774" y="1366" font-size="15" fill="#8b949e">no</text>
-<text x="1024" y="1366" font-size="15" fill="#8b949e">no</text>
+<text x="774" y="1366" font-size="15" fill="#8b949e">—</text>
+<text x="1024" y="1366" font-size="15" fill="#8b949e">—</text>
 <text x="1274" y="1366" font-size="15" fill="#3fb950">yes</text>
 <text x="54" y="1413" font-size="15" fill="#e6edf3">ACIS SAB to SAT</text>
 <text x="524" y="1413" font-size="15" fill="#3fb950">yes</text>

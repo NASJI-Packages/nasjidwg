@@ -4,7 +4,7 @@
   "description": "Pure-TypeScript DWG/DXF library with first-class Arabic and RTL text support. Runs in the browser, Node, and Electron with zero native dependencies. Written files validated externally in AutoCAD 2027 (opens clean, AUDIT 0 errors).",
   "type": "module",
   "sideEffects": false,
-  "license": "Apache-2.0",
+  "license": "MIT",
   "author": "Ahmed Elhagar",
   "homepage": "https://github.com/NASJI-Packages/nasjidwg#readme",
   "repository": {

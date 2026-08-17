@@ -60,31 +60,41 @@ release from R1.4 to R2018. No other DWG library does this at all.
 
 ---
 
-## How it was built
+## How it was built — and why that means bugs get fixed fast
 
-nasjidwg was written with an LLM, start to finish — vibe-coded rather
-than typed out by hand.
+nasjidwg was built by an agentic workflow driven by Claude Fable 5, over
+**three days**. Not typed by hand, and not a demo: the format work in it
+is real reverse engineering, and it was held to an external standard the
+whole way — AutoCAD 2027 itself opens and AUDITs the output, and six
+releases are gated on it in this repository.
 
-That is worth stating plainly, because it explains the shape of the
-thing. DWG is a closed binary format that changed every few years for
-four decades; a faithful implementation has to hold seven container
-layouts, three bit-stream dialects, two compression schemes,
-Reed-Solomon coding, a hundred-odd object types and every codepage
-AutoCAD ever spoke — all at once, all consistent with each other. That
-is a volume of exacting, interlocking detail that is punishing to carry
-in a human head across the months it would take to write by hand, and it
-is exactly the kind of work a language model is good at: no fatigue on
-the four-hundredth field of the header block, no drift in convention
-between the reader and the writer written a week apart.
+That is worth stating plainly for one practical reason. **If you hit a
+bug, please report it — it will very likely be fixed the same day.** The
+same workflow that wrote the library can be pointed at a failing drawing,
+and the machinery it left behind is built for exactly that: a validation
+harness that grades output against AutoCAD, a reader certified on 317
+real drawings, 639 tests that regenerate every fixture from scratch, and
+a written ledger of what is known about the format, including what is
+still unknown.
 
-What the model does not give you for free is correctness. Every claim in
-this README is backed by a test that runs on `npm test`, and the suite
-generates its own fixtures with the library's own writers, so a decode
-that quietly disagrees with the encode fails loudly instead of passing.
-Two real defects in the R2004+ writer — a colour field written in the
-wrong encoding, and a two-bit width mismatch in the table-record header —
-were found by exactly that mechanism and fixed. Neither was reachable by
-reading files alone.
+**[Open an issue](https://github.com/NASJI-Packages/nasjidwg/issues)**
+with the smallest drawing that reproduces it, if you can share one — a
+version, an entity type and what went wrong is already enough to start.
+Reports about files this library reads *wrongly* are the most valuable
+kind: three of the worst defects found so far were cases where the reader
+and the writer shared the same wrong belief and agreed with each other
+perfectly, which no self-consistent test can ever catch.
+
+What the workflow does not give you for free is correctness, so nothing
+here rests on it. Every claim in this README is backed by something that
+runs: `npm test` regenerates the whole corpus with the library's own
+writers, the DWG and DXF codecs cross-check each other, and
+`node tools/validate-external.mjs` re-opens six releases in AutoCAD and
+fails if any of them regresses. Defects found by those mechanisms —
+including a Reed-Solomon parity bug that made every R2007 data page
+invalid, and a one-byte dictionary shift that had blocked R13 for four
+campaigns — were found because the mechanisms exist, not because the
+model was careful.
 
 ---
 
@@ -435,4 +445,8 @@ a full decode measured about 82 ms.
 
 ## License
 
-Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+MIT — see [LICENSE](LICENSE). Use it commercially, fork it, ship it inside
+a closed-source product: there are no conditions beyond keeping the
+copyright line. [NOTICE](NOTICE) credits the Unicode mapping data the
+codepage tables are generated from, and [PROVENANCE.md](PROVENANCE.md)
+records how the format support was reverse-engineered.
