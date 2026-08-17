@@ -1,0 +1,63 @@
+{
+  "updated": "2026-08-17 12:59 EDT",
+  "tests": "623 passing · gate exit 0 · pack clean",
+  "headline": "Real shipped bug found: every R2007 data page carried invalid RS parity",
+  "verdicts": [
+    {
+      "label": "R12 · R13 · R14 · R2000 · R2004 · R2018",
+      "state": "pass",
+      "note": "all OPEN + AUDIT 0 errors in AutoCAD 2027 (gated)"
+    },
+    {
+      "label": "Provenance: AcDs section",
+      "state": "pass",
+      "note": "4429 lifted bytes replaced by a hand-written emitter — still AUDIT 0/0, no thumbnail bytes"
+    },
+    {
+      "label": "Provenance: header keystream run",
+      "state": "pass",
+      "note": "20 copied bytes now generated from the LCG (stream index = file offset)"
+    },
+    {
+      "label": "Provenance: 3DSOLID bit tail",
+      "state": "pass",
+      "note": "decoded field by field (the GUID was a plain UUIDv4) — 163 bits, all computed, AUDIT 0/0"
+    },
+    {
+      "label": "Byte-preserving rewrite",
+      "state": "pass",
+      "note": "verbatimRecords shipped"
+    },
+    {
+      "label": "Reader: 317 real files",
+      "state": "pass",
+      "note": "zero throws, CRCs on"
+    },
+    {
+      "label": "R2007 write",
+      "state": "todo",
+      "note": "blocker confirmed, not artefact: the same 64-bit value is free at 0xF8 and refused at 0x100, at identical compressed length"
+    },
+    {
+      "label": "Licence + provenance audit",
+      "state": "pass",
+      "note": "no third-party file or code in the tree (hash-verified); PROVENANCE.md + NOTICE state the method"
+    },
+    {
+      "label": "R2007 Reed-Solomon parity",
+      "state": "pass",
+      "note": "rsEncode used one generator for both codes — fixed, now byte-exact on 102 headers + 1231 pages + 55189 blocks"
+    },
+    {
+      "label": "Whole-file recompression",
+      "state": "pass",
+      "note": "genuine files fully recompressed and re-encoded by us: AUDIT 0 errors (180 KB file, 2600 objects)"
+    }
+  ],
+  "inflight": "A second real blocker surfaced in SHIPPED code, not in a probe: R2007 uses two different Reed-Solomon codes — RS(255,239) for the header and system pages, RS(255,251) for data pages — over two DIFFERENT fields, and our encoder used the header generator for both, writing twelve parity bytes off the end of the array. Our own reader ignores parity, so it round-tripped perfectly and nothing caught it. Both generators are now derived rather than transcribed, and whole genuine files recompressed end to end by us audit clean in AutoCAD.",
+  "recentlyLanded": [
+    "RS parity bug fixed: derived both generators from first principles, verified byte-exact on 55189 blocks",
+    "Comparison table audited for truth — our own R2007 write claim was false and is corrected",
+    "Provenance clean and documented; six gated releases at AUDIT 0/0"
+  ]
+}

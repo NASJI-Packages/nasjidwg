@@ -1,0 +1,18 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# The optional real-world corpus: other people's files, fetched on demand
+# by `npm run corpus` and never redistributed. See test/corpus.manifest.json.
+test/corpus-external/
+
+# staging area for the removed third-party fixtures — delete when ready
+test/.data-removed/
+
+# Campaign scratch: AutoCAD-minted references and probe output.
+# Never redistributed; not in the npm package (see package.json "files").
+.tmp-acad/
+
+# AutoCAD campaign leftovers
+ErrorReports/
+*.scr

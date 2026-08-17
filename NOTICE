@@ -1,0 +1,75 @@
+nasjidwg
+Copyright 2026 Ahmed Elhagar
+
+This product includes software developed by Ahmed Elhagar.
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+--------------------------------------------------------------------------
+Third-party data included in this distribution
+--------------------------------------------------------------------------
+
+src/text/codepages.ts
+src/text/dbcs.ts
+
+  These two modules are generated from the character-mapping tables
+  published by Unicode, Inc. at https://www.unicode.org/Public/MAPPINGS/.
+  The mapping data is used under the Unicode License:
+
+    Copyright (c) 1991-2024 Unicode, Inc. All rights reserved.
+
+    Permission is hereby granted, free of charge, to any person obtaining
+    a copy of the Unicode data files and any associated documentation (the
+    "Data Files") to deal in the Data Files without restriction, including
+    without limitation the rights to use, copy, modify, merge, publish,
+    distribute, and/or sell copies of the Data Files, and to permit persons
+    to whom the Data Files are furnished to do so, provided that either (a)
+    this copyright and permission notice appear with all copies of the Data
+    Files, or (b) this copyright and permission notice appear in associated
+    Documentation.
+
+    THE DATA FILES ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+    EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+    MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT
+    OF THIRD PARTY RIGHTS. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
+    HOLDERS INCLUDED IN THIS NOTICE BE LIABLE FOR ANY CLAIM, OR ANY SPECIAL
+    INDIRECT OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES WHATSOEVER RESULTING
+    FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT,
+    NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION
+    WITH THE USE OR PERFORMANCE OF THE DATA FILES.
+
+  The tables are transformed, not copied verbatim: tools/gen-dbcs.mjs packs
+  them into delta-encoded strings so the browser bundle stays small.
+
+--------------------------------------------------------------------------
+Nothing else in this distribution is third-party.
+--------------------------------------------------------------------------
+
+How the format support was developed
+--------------------------------------------------------------------------
+
+DWG is undocumented by its vendor, so this library was written against
+drawings rather than a specification: files were opened, decoded, and the
+result compared against what the producing program accepts. Those files
+were oracles, never sources — no drawing produced by another program, and
+no source code from another implementation, is present in this
+distribution or in the repository it is built from. Test fixtures are
+generated at test time by this library's own writers.
+
+Some of the drawings used that way came from projects under other
+licences, notably the LibreDWG test corpus (GPL-3.0), whose vintage files
+are the only surviving samples of several 1980s releases. Reading a file
+to learn how a format is laid out neither copies nor distributes it, and
+the field names and layouts learned that way are facts about an
+interchange format rather than protected expression. This distribution
+therefore carries no obligations from those projects' licences.
+
+PROVENANCE.md in the repository records the full audit trail, including
+three places where bytes from a produced file had been embedded during
+development and were subsequently re-derived from first principles.
+
+DWG and DXF are file formats created by Autodesk, Inc. AutoCAD and Autodesk
+are trademarks of Autodesk, Inc. nasjidwg is not affiliated with, endorsed
+by, or sponsored by Autodesk. Format names, entity names, group codes and
+header-variable names appear here as the factual vocabulary a reader and
+writer of those formats must use.
+

@@ -1,0 +1,493 @@
+<!doctype html>
+<!--
+  nasjidwg — browser viewer demo.
+
+  This page imports the built library from ../dist/index.js as an ES module,
+  so two steps are required before opening it:
+
+    1. npm run build
+    2. serve the repository root with any static server, e.g.
+         npx serve .            (then open http://localhost:3000/examples/viewer.html)
+       or
+         python -m http.server 8801
+                                (then open http://localhost:8801/examples/viewer.html)
+
+  Opening the file directly via file:// will NOT work — browsers refuse to
+  load ES modules from the file scheme.
+
+  Append ?demo=1 to the URL to auto-load examples/sample.dwg (a generated
+  corpus drawing; regenerate it any time with a small vitest probe that
+  imports sampleDrawing() from test/corpus.ts and writes writeDwg2018 output).
+
+  Everything on this page is hand-written: no frameworks, no CDN, no network
+  calls beyond the optional same-origin demo fetch above.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nasjidwg — viewer</title>
+<style>
+  :root {
+    --bg: #0a0c10;
+    --card: #161b22;
+    --edge: #2d333b;
+    --accent: #58a6ff;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --warn: #d29922;
+    --bad: #f85149;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.45 ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+    display: flex;
+  }
+  /* ---------- sidebar ---------- */
+  #side {
+    width: 300px;
+    min-width: 300px;
+    height: 100%;
+    overflow-y: auto;
+    padding: 14px;
+    border-inline-end: 1px solid var(--edge);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  h1 {
+    font-size: 16px;
+    margin: 0;
+    letter-spacing: 0.02em;
+  }
+  h1 b { color: var(--accent); font-weight: 600; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--edge);
+    border-radius: 8px;
+    padding: 10px 12px;
+  }
+  .card h2 {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    margin: 0 0 8px;
+  }
+  dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; }
+  dt { color: var(--muted); }
+  dd { margin: 0; text-align: end; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  #pick {
+    display: block;
+    width: 100%;
+    padding: 8px;
+    background: transparent;
+    border: 1px dashed var(--edge);
+    border-radius: 8px;
+    color: var(--accent);
+    cursor: pointer;
+    font: inherit;
+  }
+  #pick:hover { border-color: var(--accent); }
+  input[type="file"] { display: none; }
+  /* layers */
+  #layers { display: flex; flex-direction: column; gap: 2px; max-height: 300px; overflow-y: auto; }
+  .layer {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 3px 2px;
+    cursor: pointer;
+    border-radius: 4px;
+  }
+  .layer:hover { background: rgba(88, 166, 255, 0.08); }
+  .layer input { accent-color: var(--accent); margin: 0; flex: none; }
+  .swatch {
+    width: 10px; height: 10px; border-radius: 2px; flex: none;
+    border: 1px solid rgba(255, 255, 255, 0.25);
+  }
+  .lname {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    unicode-bidi: plaintext; /* Arabic layer names render RTL, correctly */
+  }
+  .lcount { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  /* warnings */
+  #warnings { margin: 0; padding-inline-start: 16px; color: var(--warn); font-size: 12px; }
+  #warnings li { margin: 2px 0; overflow-wrap: anywhere; unicode-bidi: plaintext; }
+  /* exports */
+  #exports { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  #exports button {
+    padding: 6px 0;
+    background: transparent;
+    border: 1px solid var(--edge);
+    border-radius: 6px;
+    color: var(--accent);
+    cursor: pointer;
+    font: inherit;
+  }
+  #exports button:hover:enabled { border-color: var(--accent); }
+  #exports button:disabled { color: var(--muted); cursor: default; opacity: 0.5; }
+  /* ---------- canvas ---------- */
+  #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #status {
+    padding: 6px 14px;
+    border-bottom: 1px solid var(--edge);
+    color: var(--muted);
+    font-size: 12px;
+    min-height: 28px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  #status.error { color: var(--bad); }
+  #resetView {
+    margin-inline-start: auto;
+    background: none;
+    border: none;
+    color: var(--accent);
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+    display: none;
+  }
+  #canvas {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  #canvas svg { width: 100%; height: 100%; display: block; cursor: grab; }
+  #canvas svg.panning { cursor: grabbing; }
+  #hint {
+    max-width: 420px;
+    text-align: center;
+    color: var(--muted);
+    border: 1px dashed var(--edge);
+    border-radius: 12px;
+    padding: 40px 32px;
+    margin: 16px;
+  }
+  #hint b { color: var(--text); }
+  body.drag #hint, body.drag #canvas { outline: 2px dashed var(--accent); outline-offset: -8px; }
+</style>
+</head>
+<body>
+
+<aside id="side">
+  <h1><b>nasjidwg</b> viewer</h1>
+
+  <button id="pick" type="button">Open a .dwg / .dxf file…</button>
+  <input id="file" type="file" accept=".dwg,.dxf">
+
+  <div class="card" id="infoCard" hidden>
+    <h2>File</h2>
+    <dl>
+      <dt>Name</dt><dd id="iName">—</dd>
+      <dt>Version</dt><dd id="iVersion">—</dd>
+      <dt>Entities</dt><dd id="iEntities">—</dd>
+      <dt>Layers</dt><dd id="iLayers">—</dd>
+    </dl>
+  </div>
+
+  <div class="card" id="layerCard" hidden>
+    <h2>Layers</h2>
+    <div id="layers"></div>
+  </div>
+
+  <div class="card" id="warnCard" hidden>
+    <h2>Warnings</h2>
+    <ul id="warnings"></ul>
+  </div>
+
+  <div class="card">
+    <h2>Export</h2>
+    <div id="exports">
+      <button id="exSvg"  disabled>SVG</button>
+      <button id="exPdf"  disabled>PDF</button>
+      <button id="exDxf"  disabled>DXF</button>
+      <button id="exJson" disabled>JSON</button>
+    </div>
+  </div>
+</aside>
+
+<main id="main">
+  <div id="status"><span id="statusText">Drop a DWG or DXF anywhere on the page.</span>
+    <button id="resetView" type="button">reset view</button>
+  </div>
+  <div id="canvas">
+    <div id="hint">
+      <p><b>Drag a .dwg or .dxf here</b>, or use the button on the left.</p>
+      <p>The file is parsed entirely in this tab — nothing is uploaded.
+         Wheel to zoom, drag to pan. Layer checkboxes re-render the view.</p>
+    </div>
+  </div>
+</main>
+
+<script type="module">
+import {
+  readDwg, readDxf, writeSvg, writePdf, writeDxf, writeJson, colorToRgb
+} from '../dist/index.js';
+
+const $ = (id) => document.getElementById(id);
+const statusEl = $('status'), statusText = $('statusText');
+
+const setStatus = (msg, isError = false) => {
+  statusText.textContent = msg;
+  statusEl.classList.toggle('error', isError);
+};
+window.addEventListener('error', (e) => setStatus('Page error: ' + e.message, true));
+window.addEventListener('unhandledrejection',
+  (e) => setStatus('Page error: ' + (e.reason?.message ?? e.reason), true));
+
+/* ------------------------------------------------------------------ *
+ * State
+ * ------------------------------------------------------------------ */
+let drawing = null;          // the full parsed Drawing — never mutated
+let fileName = '';
+let hidden = new Set();      // layer names currently unchecked
+let baseViewBox = '';        // the SVG's own viewBox, for "reset view"
+
+/* The view is a shallow clone with entities filtered per layer; the
+ * loaded drawing itself is never touched. */
+const visibleDrawing = () => ({
+  ...drawing,
+  entities: drawing.entities.filter((e) => !hidden.has(e.layer ?? '0')),
+});
+
+/* ------------------------------------------------------------------ *
+ * Loading
+ * ------------------------------------------------------------------ */
+const parse = (name, bytes) => {
+  const lower = name.toLowerCase();
+  if (lower.endsWith('.dwg')) return readDwg(bytes);
+  if (lower.endsWith('.dxf')) return readDxf(bytes);
+  // no extension to go on: DWG files start with "AC"
+  return (bytes[0] === 0x41 && bytes[1] === 0x43) ? readDwg(bytes) : readDxf(bytes);
+};
+
+const loadFile = (name, buffer) => {
+  try {
+    const d = parse(name, new Uint8Array(buffer));
+    drawing = d;
+    fileName = name;
+    hidden = new Set(d.layers.filter((l) => !l.on || l.frozen).map((l) => l.name));
+    buildSidebar();
+    render(true);
+    setStatus(`Loaded ${name} — ${d.header.version ?? 'unknown version'}, ` +
+              `${d.entities.length} entities. Wheel to zoom, drag to pan.`);
+  } catch (err) {
+    setStatus(`Could not read ${name}: ${err?.message ?? err}`, true);
+  }
+};
+
+$('pick').addEventListener('click', () => $('file').click());
+$('file').addEventListener('change', async (e) => {
+  const f = e.target.files[0];
+  if (f) loadFile(f.name, await f.arrayBuffer());
+  e.target.value = '';
+});
+document.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  document.body.classList.add('drag');
+});
+document.addEventListener('dragleave', () => document.body.classList.remove('drag'));
+document.addEventListener('drop', async (e) => {
+  e.preventDefault();
+  document.body.classList.remove('drag');
+  const f = e.dataTransfer?.files?.[0];
+  if (f) loadFile(f.name, await f.arrayBuffer());
+});
+
+/* ------------------------------------------------------------------ *
+ * Sidebar
+ * ------------------------------------------------------------------ */
+const buildSidebar = () => {
+  $('infoCard').hidden = false;
+  $('iName').textContent = fileName;
+  $('iVersion').textContent = drawing.header.version ?? 'unknown';
+  const paper = drawing.paperSpace?.length ?? 0;
+  $('iEntities').textContent =
+    String(drawing.entities.length) + (paper ? ` (+${paper} paper)` : '');
+  $('iLayers').textContent = String(drawing.layers.length);
+
+  // layer list — table layers first, then any layer only entities mention
+  const counts = new Map();
+  for (const e of drawing.entities) {
+    const n = e.layer ?? '0';
+    counts.set(n, (counts.get(n) ?? 0) + 1);
+  }
+  const names = drawing.layers.map((l) => l.name);
+  for (const n of counts.keys()) if (!names.includes(n)) names.push(n);
+
+  const list = $('layers');
+  list.textContent = '';
+  for (const name of names) {
+    const layer = drawing.layers.find((l) => l.name === name);
+    const row = document.createElement('label');
+    row.className = 'layer';
+
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.checked = !hidden.has(name);
+    box.addEventListener('change', () => {
+      box.checked ? hidden.delete(name) : hidden.add(name);
+      render(false);
+    });
+
+    const swatch = document.createElement('span');
+    swatch.className = 'swatch';
+    const rgb = layer ? colorToRgb(layer.color, 0xe6edf3) : 0xe6edf3;
+    swatch.style.background = '#' + rgb.toString(16).padStart(6, '0');
+
+    const label = document.createElement('span');
+    label.className = 'lname';
+    label.dir = 'auto';                     // Arabic names stay RTL
+    label.textContent = name;
+    label.title = name;
+
+    const count = document.createElement('span');
+    count.className = 'lcount';
+    count.textContent = String(counts.get(name) ?? 0);
+
+    row.append(box, swatch, label, count);
+    list.append(row);
+  }
+  $('layerCard').hidden = names.length === 0;
+
+  // warnings
+  const warnList = $('warnings');
+  warnList.textContent = '';
+  for (const w of drawing.warnings ?? []) {
+    const li = document.createElement('li');
+    li.textContent = w;
+    warnList.append(li);
+  }
+  $('warnCard').hidden = !(drawing.warnings?.length);
+
+  for (const id of ['exSvg', 'exPdf', 'exDxf', 'exJson']) $(id).disabled = false;
+};
+
+/* ------------------------------------------------------------------ *
+ * Rendering + zoom/pan (a hand-rolled viewBox controller)
+ * ------------------------------------------------------------------ */
+const canvas = $('canvas');
+
+const render = (resetView) => {
+  const keep = !resetView && canvas.querySelector('svg')?.getAttribute('viewBox');
+  canvas.textContent = '';
+  canvas.insertAdjacentHTML('beforeend',
+    writeSvg(visibleDrawing(), { stroke: '#e6edf3' }));
+  const svg = canvas.querySelector('svg');
+  if (!svg) return;
+  svg.removeAttribute('width');
+  svg.removeAttribute('height');
+  baseViewBox = svg.getAttribute('viewBox');
+  if (keep) svg.setAttribute('viewBox', keep);
+  attachPanZoom(svg);
+  $('resetView').style.display = 'inline';
+};
+
+$('resetView').addEventListener('click', () => {
+  canvas.querySelector('svg')?.setAttribute('viewBox', baseViewBox);
+});
+
+const attachPanZoom = (svg) => {
+  const vb = () => svg.getAttribute('viewBox').split(/\s+/).map(Number);
+  const setVb = (x, y, w, h) => svg.setAttribute('viewBox', `${x} ${y} ${w} ${h}`);
+
+  /* px→viewBox scale under preserveAspectRatio="xMidYMid meet" */
+  const mapping = () => {
+    const r = svg.getBoundingClientRect();
+    const [x, y, w, h] = vb();
+    const s = Math.min(r.width / w, r.height / h);
+    return {
+      s,
+      toX: (px) => x + (px - r.left - (r.width - w * s) / 2) / s,
+      toY: (py) => y + (py - r.top - (r.height - h * s) / 2) / s,
+    };
+  };
+
+  svg.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const [x, y, w, h] = vb();
+    const m = mapping();
+    const k = e.deltaY < 0 ? 1 / 1.15 : 1.15;   // zoom in on wheel-up
+    const cx = m.toX(e.clientX), cy = m.toY(e.clientY);
+    setVb(cx - (cx - x) * k, cy - (cy - y) * k, w * k, h * k);
+  }, { passive: false });
+
+  let drag = null;
+  svg.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    drag = { px: e.clientX, py: e.clientY };
+    svg.classList.add('panning');
+    svg.setPointerCapture(e.pointerId);
+  });
+  svg.addEventListener('pointermove', (e) => {
+    if (!drag) return;
+    const [x, y, w, h] = vb();
+    const { s } = mapping();
+    setVb(x - (e.clientX - drag.px) / s, y - (e.clientY - drag.py) / s, w, h);
+    drag = { px: e.clientX, py: e.clientY };
+  });
+  const end = (e) => {
+    drag = null;
+    svg.classList.remove('panning');
+    if (e.pointerId !== undefined && svg.hasPointerCapture(e.pointerId)) {
+      svg.releasePointerCapture(e.pointerId);
+    }
+  };
+  svg.addEventListener('pointerup', end);
+  svg.addEventListener('pointercancel', end);
+};
+
+/* ------------------------------------------------------------------ *
+ * Exports
+ * ------------------------------------------------------------------ */
+const download = (data, name, type) => {
+  const url = URL.createObjectURL(new Blob([data], { type }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+};
+const stem = () => fileName.replace(/\.[^.]+$/, '') || 'drawing';
+
+// SVG and PDF export the current view (layer toggles apply);
+// DXF and JSON export the full drawing as loaded.
+$('exSvg').addEventListener('click', () =>
+  download(writeSvg(visibleDrawing()), stem() + '.svg', 'image/svg+xml'));
+$('exPdf').addEventListener('click', () =>
+  download(writePdf(visibleDrawing()).data, stem() + '.pdf', 'application/pdf'));
+$('exDxf').addEventListener('click', () =>
+  download(writeDxf(drawing), stem() + '.dxf', 'application/octet-stream'));
+$('exJson').addEventListener('click', () =>
+  download(writeJson(drawing, true), stem() + '.json', 'application/json'));
+
+/* ------------------------------------------------------------------ *
+ * ?demo=1 — auto-load the bundled sample (same-origin, generated file)
+ * ------------------------------------------------------------------ */
+if (new URLSearchParams(location.search).get('demo') === '1') {
+  try {
+    const res = await fetch('./sample.dwg');
+    if (!res.ok) throw new Error(`HTTP ${res.status} for sample.dwg`);
+    loadFile('sample.dwg', await res.arrayBuffer());
+  } catch (err) {
+    setStatus('Demo load failed: ' + (err?.message ?? err), true);
+  }
+}
+</script>
+</body>
+</html>
