@@ -60,7 +60,7 @@
 <text x="1274" y="840" font-size="15" fill="#e6edf3">Python</text>
 <rect x="38" y="877" width="1484" height="47" rx="6" fill="rgba(255,255,255,0.025)"/>
 <text x="54" y="908" font-size="15" fill="#e6edf3">Licence</text>
-<text x="524" y="908" font-size="15" fill="#3fb950">Apache-2.0</text>
+<text x="524" y="908" font-size="15" fill="#3fb950">MIT</text>
 <text x="774" y="908" font-size="15" fill="#d29922">GPL-3.0</text>
 <text x="1024" y="908" font-size="15" fill="#3fb950">MIT</text>
 <text x="1274" y="908" font-size="15" fill="#3fb950">MIT</text>

@@ -46,7 +46,7 @@ const t = (...lines) => ({ tone: TEXT, lines });
 /** null = group separator. */
 const ROWS = [
   { cap: ['Language / runtime'], cells: [g('TypeScript', 'browser + Node'), t('C'), t('C#  .NET'), t('Python')] },
-  { cap: ['Licence'], cells: [g('Apache-2.0'), a('GPL-3.0'), g('MIT'), g('MIT')] },
+  { cap: ['Licence'], cells: [g('MIT'), a('GPL-3.0'), g('MIT'), g('MIT')] },
   { cap: ['Native dependencies'], cells: [g('none'), a('libc toolchain'), a('.NET runtime'), a('CPython')] },
   { cap: ['Runs in the browser'], cells: [g('yes'), a('via WASM port'), n('no'), n('no')] },
   null,
