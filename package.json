@@ -52,7 +52,7 @@
     "browser"
   ],
   "bin": {
-    "nasjidwg": "./dist/cli.js"
+    "nasjidwg": "dist/cli.js"
   },
   "engines": {
     "node": ">=18"
