@@ -1089,6 +1089,34 @@ const writeDwgImpl = (
     (nm) => drawing.blocks[nm]?.visibilityStates?.length);
   const usesDynBlocks = dynBlocks.length > 0 && V >= 2000;
   const CLS_BLOCKVIS = usesDynBlocks ? clsNext++ : 0;
+  /* Draw order. A default write needs nothing: fresh handles ascend in
+     array order, and array order IS the draw order. Under preserveHandles
+     a space whose array order differs from its ascending handle order
+     would read back reordered, so each such space gets a native
+     SORTENTSTABLE (under an ACAD_SORTENTS entry in the block record's
+     extension dictionary). R13/R14 cannot name the class and lose the
+     ordering honestly, through `skipped`. */
+  const outOfOrder = (hs: number[]): boolean =>
+    hs.some((h2, i) => i > 0 && h2 < hs[i - 1]);
+  const sortSpaces: { block: number; hs: number[] }[] = [];
+  if (preserve) {
+    const spaces: [number, number[]][] = [
+      [msBH, msEntH], [psBH, psEntH],
+      ...userBlocks.map((nm): [number, number[]] =>
+        [blockH.get(nm)!, blockEntH.get(nm)!])
+    ];
+    for (const [block, hs] of spaces) {
+      if (!outOfOrder(hs)) continue;
+      if (V <= 14) {
+        skipped.push('draw order (SORTENTSTABLE needs R2000 or later)');
+        continue;
+      }
+      sortSpaces.push({ block, hs });
+    }
+  }
+  const CLS_SORTENTS = sortSpaces.length ? clsNext++ : 0;
+  const sortentsFor = new Map<number, { dict: number; table: number }>();
+  for (const s of sortSpaces) sortentsFor.set(s.block, { dict: H(), table: H() });
   const underlayDefH = new Map<string, number>();
   function modelEntsAll(): Entity[] { return drawing.entities; }
   function paperEntsAll(): Entity[] { return drawing.paperSpace ?? []; }
@@ -1170,11 +1198,14 @@ const writeDwgImpl = (
     });
   };
 
-  /** Wrap one object: type + bitsize + body builder + handle builder. */
+  /** Wrap one object: type + bitsize + body builder + handle builder.
+   *  `xdictH` marks an extension dictionary as present — the handle
+   *  itself is the caller's to write in its handle stream. */
   const makeObject = (
     type: number, handle: number,
     data: (w: BitWriter) => void,
-    handles: (w: BitWriter) => void
+    handles: (w: BitWriter) => void,
+    xdictH = 0
   ): void => {
     const w = new BitWriter();
     let sizePos = objectPrologue(w, type);
@@ -1183,7 +1214,7 @@ const writeDwgImpl = (
     w.bs(0);                              /* EED end */
     if (V <= 14) { sizePos = w.pos; w.rl(0); }  /* handle-stream position */
     w.bl(0);                              /* reactor count */
-    if (V >= 2004) w.b(1);                /* xdict missing */
+    if (V >= 2004) w.b(xdictH ? 0 : 1);   /* xdict missing */
     if (V >= 2018) w.b(0);                /* has_ds_data (2013+) */
     data(w);
     const bitsize = closeData(w, sw);
@@ -1291,6 +1322,7 @@ const writeDwgImpl = (
   };
 
   /* ---- entity-specific encoders (mirror of the decoders) ---- */
+  let attdefSeq = 0;                      /* invented ATTDEF tags */
   const encodeEntity = (
     e: Entity, handle: number, ctx: EntCtx
   ): void => {
@@ -1415,7 +1447,22 @@ const writeDwgImpl = (
         return;
       }
       case 'text': {
-        makeEntity(1, handle, e, ctx, (w) => {
+        const attdef = e.attribute === 'attdef';
+        /* ATTDEF closes the TEXT body with its definition fields; the
+           reader takes the flags back into invisible/constant, so a
+           hidden attribute stays hidden across a rewrite. */
+        const attdefTail = (w: BitWriter): void => {
+          if (!attdef) return;
+          const tag = 'ATTD' + ++attdefSeq;   /* model keeps no tag */
+          if (V >= 2018) { w.rc(0); w.rc(1); }  /* class version, single-line */
+          w.t(V <= 14 ? outText(r14Str(tag)) : tag);
+          w.bs(0);                          /* field length */
+          w.rc((e.invisible ? 1 : 0) | (e.constant ? 2 : 0));
+          if (V >= 2007) w.b(0);            /* lock-position flag */
+          if (V >= 2018) w.rc(0);           /* attdef class version */
+          w.t('');                          /* prompt */
+        };
+        makeEntity(attdef ? 3 : 1, handle, e, ctx, (w) => {
           const ha = { left: 0, center: 1, right: 2, aligned: 3, middle: 4, fit: 5 }[e.halign ?? 'left'] ?? 0;
           const va = { baseline: 0, bottom: 1, middle: 2, top: 3 }[e.valign ?? 'baseline'] ?? 0;
           const elev = e.position.z ?? 0;
@@ -1436,6 +1483,7 @@ const writeDwgImpl = (
             w.t(outText(e.text));
             w.bs(0);                        /* generation */
             w.bs(ha); w.bs(va);
+            attdefTail(w);
             return;
           }
           let df = 0;
@@ -1461,6 +1509,7 @@ const writeDwgImpl = (
           w.t(outText(e.text));
           if (!(df & 0x40)) w.bs(ha);
           if (!(df & 0x80)) w.bs(va);
+          attdefTail(w);
         }, (w) => {
           w.h(5, styleH.get(e.style ?? '') ?? styleH.get('Standard') ?? [...styleH.values()][0]);
         });
@@ -1590,7 +1639,7 @@ const writeDwgImpl = (
                  text exists only in ATTDEF */
               w.t(outText(r14Str('ATTR' + (i + 1))));   /* tag */
               w.bs(0);                      /* field length */
-              w.rc(a.invisible ? 1 : 0);    /* flags */
+              w.rc((a.invisible ? 1 : 0) | (a.constant ? 2 : 0));
               return;
             }
             let df = 0x20 | 0x40 | 0x80;  /* default gen/halign/valign */
@@ -1619,7 +1668,7 @@ const writeDwgImpl = (
             }
             w.t('ATTR' + (i + 1));        /* tag */
             w.bs(0);                      /* field length */
-            w.rc(a.invisible ? 1 : 0);    /* flags */
+            w.rc((a.invisible ? 1 : 0) | (a.constant ? 2 : 0));
             if (V >= 2007) w.b(0);        /* lock-position flag */
           }, (w) => {
             w.h(5, styleH.get(a.style ?? '') ?? [...styleH.values()][0]);
@@ -2524,7 +2573,7 @@ const writeDwgImpl = (
           w.rc(e.brightness ?? 50);
           w.rc(e.contrast ?? 50);
           w.rc(e.fade ?? 0);
-          if (V >= 2018) w.b(0);          /* clip mode (2010+) */
+          if (V >= 2018) w.b(e.clipInverted ? 1 : 0);   /* clip mode (2010+) */
           const clip = e.clip?.length ? e.clip
             : [{ x: -0.5, y: -0.5 }, { x: e.widthPx - 0.5, y: e.heightPx - 0.5 }];
           w.bs(clip.length === 2 ? 1 : 2);
@@ -3036,7 +3085,8 @@ const writeDwgImpl = (
 
   const makeBlockHeader = (
     h: number, name: string, blockEnt: number, endblkEnt: number,
-    ownedEnts: number[], base = { x: 0, y: 0, z: 0 }, layoutHandle = 0
+    ownedEnts: number[], base = { x: 0, y: 0, z: 0 }, layoutHandle = 0,
+    xdictH = 0, hasAttdefs = false
   ): void => {
     makeObject(49, h, (w) => {
       tableFlags(w, name);
@@ -3044,7 +3094,7 @@ const writeDwgImpl = (
          AutoCAD's audit flags them when marked so */
       w.b(name.startsWith('*')
         && !/^\*(model_space|paper_space)/i.test(name) ? 1 : 0);
-      w.b(0);                             /* has attdefs */
+      w.b(hasAttdefs ? 1 : 0);            /* has attdefs */
       w.b(0);                             /* xref */
       w.b(0);                             /* overlaid */
       if (V >= 2000) w.b(0);              /* loaded (R2000+) */
@@ -3065,7 +3115,7 @@ const writeDwgImpl = (
       if (V >= 2007) { w.bs(0); w.b(1); w.rc(0); }
     }, (w) => {
       w.h(4, blockControl);
-      if (V < 2004) w.h(3, 0);            /* xdict */
+      if (V < 2004 || xdictH) w.h(3, xdictH);   /* xdict */
       w.h(5, 0);                          /* xref */
       w.h(3, blockEnt);                   /* block begin entity */
       if (V < 2004) {
@@ -3076,7 +3126,7 @@ const writeDwgImpl = (
       }
       w.h(3, endblkEnt);                  /* endblk */
       if (V >= 2000) w.h(5, layoutHandle);   /* layout (R2000+) */
-    });
+    }, xdictH);
   };
 
   /** BLOCK / ENDBLK structural entities (entmode 0, owned by their BH). */
@@ -3500,14 +3550,17 @@ const writeDwgImpl = (
   makeMlineStandard();
 
   makeBlockHeader(msBH, '*MODEL_SPACE', msBlockEnt, msEndblk, msEntH,
-    undefined, V >= 2000 ? layoutModelH : 0);
+    undefined, V >= 2000 ? layoutModelH : 0, sortentsFor.get(msBH)?.dict);
   makeBlockHeader(psBH, '*PAPER_SPACE', psBlockEnt, psEndblk, psEntH,
-    undefined, V >= 2000 ? layoutPaperH : 0);
+    undefined, V >= 2000 ? layoutPaperH : 0, sortentsFor.get(psBH)?.dict);
   for (const nm of userBlocks) {
-    makeBlockHeader(blockH.get(nm)!, nm,
+    const bh = blockH.get(nm)!;
+    makeBlockHeader(bh, nm,
       blockBeginH.get(nm)!, blockEndH.get(nm)!,
       blockEntH.get(nm)!,
-      drawing.blocks[nm].basePoint);
+      drawing.blocks[nm].basePoint, 0, sortentsFor.get(bh)?.dict,
+      blockEnts.get(nm)!.some(
+        (e) => e.type === 'text' && e.attribute === 'attdef'));
   }
 
   makeBlockEnt(msBlockEnt, msBH, '*MODEL_SPACE');
@@ -3581,6 +3634,29 @@ const writeDwgImpl = (
       for (const st of states) {
         for (const h2 of st.visible) w.h(5, h2);
       }
+    });
+  }
+
+  /* ---- draw order: one SORTENTSTABLE per space whose array order is
+     not its ascending handle order (preserveHandles only — a default
+     write's fresh handles already ascend in array order). The sort keys
+     reuse the space's own entity handles: the i-th array entity sorts
+     under the i-th smallest handle, so ascending keys replay the array
+     exactly — no fresh numbers, no collisions. Each table hangs off an
+     ACAD_SORTENTS entry in its block record's extension dictionary,
+     which is where AutoCAD looks for it. ---- */
+  for (const { block, hs } of sortSpaces) {
+    const { dict, table } = sortentsFor.get(block)!;
+    makeDictionary(dict, block, [['ACAD_SORTENTS', table]]);
+    const sorted = [...hs].sort((a, b) => a - b);
+    makeObject(CLS_SORTENTS, table, (w) => {
+      w.bl(hs.length);
+      for (const s of sorted) w.h(0, s);  /* sort keys, in entry order */
+    }, (w) => {
+      w.h(4, dict);                       /* owner: the extension dict */
+      if (V < 2004) w.h(3, 0);
+      w.h(4, block);                      /* the block record governed */
+      for (const h2 of hs) w.h(4, h2);    /* entities, in entry order */
     });
   }
 
@@ -3963,7 +4039,7 @@ const writeDwgImpl = (
     const clsW = new BitWriter();
     const noClasses = !usesImages && !usesLights && !usesTables
         && !usesMLeaders && !underlayKinds.length && !geoData
-        && !proxyClsH.size && !usesDynBlocks;
+        && !proxyClsH.size && !usesDynBlocks && !sortSpaces.length;
     /* AutoCAD 2027 refuses an AC1032 drawing whose CLASSES section is
        empty — the R2018 'tight' wrap has no accepted empty form
        (externally proven: the same minimal drawing opens once a single
@@ -4028,6 +4104,10 @@ const writeDwgImpl = (
     if (usesDynBlocks) {
       cls(CLS_BLOCKVIS, 'BLOCKVISIBILITYPARAMETER',
         'AcDbBlockVisibilityParameter', false, 'ObjectDBX Classes');
+    }
+    if (sortSpaces.length) {
+      cls(CLS_SORTENTS, 'SORTENTSTABLE', 'AcDbSortentsTable', false,
+        'ObjectDBX Classes');
     }
     if (noClasses) {
       /* the benign stub record that keeps the 2018 section non-empty */

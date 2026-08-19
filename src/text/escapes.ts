@@ -86,7 +86,7 @@ export const stripMtextCodes = (s: string): string => {
     .replace(/\\P/gi, '\n')
     .replace(/\\~/g, ' ')
     .replace(/\\[LOKlok]/g, '')
-    .replace(/\\[ACHQTWFfpx][^;]*;/g, '')
+    .replace(/\\[ACcHQTWFfpx][^;]*;/g, '')
     .replace(/[{}]/g, '')
     .replace(new RegExp(BSL, 'g'), '\\');
 };

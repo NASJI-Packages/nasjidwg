@@ -228,6 +228,9 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
   /* Which name each DICTIONARY lists a handle under: how a proxy object
      gets its dictionary name back after the OBJECTS section is parsed. */
   const dictEntryName = new Map<string, string>();
+  /* SORTENTSTABLE draw-order tables, applied once the entity runs are
+     placed (OBJECTS may precede ENTITIES). */
+  const sortTables: { ents: string[]; sorts: string[] }[] = [];
 
   const ensureLayer = (name: string): Layer => {
     /* names travel as \U+XXXX escapes — decode so an Arabic layer name
@@ -689,7 +692,9 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
       if (st) e.style = st;
     };
 
-    const attribText = (g: Group[]): TextEntity => {
+    const attribText = (
+      g: Group[], kind: 'attrib' | 'attdef'
+    ): TextEntity => {
       const q = G(g);
       const h = q.num(40, 5);
       const e: TextEntity = {
@@ -702,7 +707,10 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
       };
       /* ATTRIB vertical justification is group 74 (not 73) */
       textJust(e, q.int(72, 0), q.int(74, 0), q);
-      if ((q.int(70, 0) & 1) === 1) e.invisible = true;
+      e.attribute = kind;
+      const flags = q.int(70, 0);
+      if ((flags & 1) === 1) e.invisible = true;
+      if ((flags & 2) === 2) e.constant = true;
       return e;
     };
 
@@ -1069,8 +1077,16 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
           if (fa != null && fa !== 0) e.fade = fa;
           const cx = q.nums(14), cy = q.nums(24);
           if (cx.length >= 2 && cx.length === cy.length) {
-            e.clip = cx.map((x, k) => ({ x, y: cy[k] }));
+            const clip = cx.map((x, k) => ({ x, y: cy[k] }));
+            /* DXF closes a polygonal boundary by repeating the first
+               vertex; the DWG record stores the ring open. Drop the
+               duplicate so both readers hand back the same ring (the
+               DXF writer re-closes on output). */
+            const a = clip[0], b = clip[clip.length - 1];
+            if (clip.length > 2 && a.x === b.x && a.y === b.y) clip.pop();
+            e.clip = clip;
           }
+          if (q.int(290, 0) === 1) e.clipInverted = true;
           return e;
         }
 
@@ -1211,8 +1227,8 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
 
         case 'ATTRIB':
         case 'ATTDEF':
-          /* stray ATTRIB / ATTDEF template — still a text */
-          return attribText(g);
+          /* stray ATTRIB / ATTDEF template — still a text, marked */
+          return attribText(g, type === 'ATTDEF' ? 'attdef' : 'attrib');
 
         case 'SEQEND':
           return null;                       /* skip silently */
@@ -1312,7 +1328,7 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
           let k = rec.next;
           while (k < end && pairs[k][0] === 0 && val(k) === 'ATTRIB') {
             const ar = collectGroups(k, end);
-            attrs.push(attribText(ar.g));
+            attrs.push(attribText(ar.g, 'attrib'));
             k = ar.next;
           }
           if (k < end && pairs[k][0] === 0 && val(k) === 'SEQEND') {
@@ -1684,6 +1700,27 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
           if (sa != null) m.startAngle = sa * RAD;
           if (ea != null) m.endAngle = ea * RAD;
           (drawing.mlineStyles ??= []).push(m);
+        } else if (type === 'SORTENTSTABLE') {
+          /* Draw order: 331 names an entity, the 5 that follows it the
+             sort key. THE TRAP: the object's own handle is a group 5 too,
+             and it sits BEFORE the 100 AcDbSortentsTable marker — only
+             pairs after the marker are entries. Consumed here (the array
+             order the sort produces IS the model), never sealed. */
+          let inBody = false;
+          let pendingEnt: string | null = null;
+          const ents: string[] = [];
+          const sorts: string[] = [];
+          for (const [c, v] of rec.g) {
+            if (c === 100) { inBody = /AcDbSortentsTable/i.test(v); continue; }
+            if (!inBody) continue;
+            if (c === 331) pendingEnt = v.trim().toUpperCase();
+            else if (c === 5 && pendingEnt) {
+              ents.push(pendingEnt);
+              sorts.push(v.trim().toUpperCase());
+              pendingEnt = null;
+            }
+          }
+          if (ents.length) sortTables.push({ ents, sorts });
         } else {
           /* an object record the semantic layer does not model: retained
              sealed as raw tags, exactly as tokenized, and named later
@@ -1751,6 +1788,34 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
         }
         if (paperSet.has(ent)) (drawing.paperSpace ??= []).push(ent);
         else drawing.entities.push(ent);
+      }
+    }
+
+    /* ---- draw order: each SORTENTSTABLE governs exactly one entity
+       list, found through any entity it names; the list reorders in
+       place by ascending sort key, an entity no entry names sorting
+       under its own handle — the same rule the DWG reader applies. */
+    if (sortTables.length) {
+      const listOf = new Map<string, Entity[]>();
+      const lists = [
+        drawing.entities, drawing.paperSpace ?? [],
+        ...Object.values(drawing.blocks).map((b) => b.entities)
+      ];
+      for (const list of lists) {
+        for (const e of list) if (e.handle) listOf.set(e.handle, list);
+      }
+      for (const t of sortTables) {
+        let list: Entity[] | undefined;
+        for (const h of t.ents) { list = listOf.get(h); if (list) break; }
+        if (!list || list.length < 2) continue;
+        const key = new Map<number, number>();
+        t.ents.forEach((h, i) => key.set(parseInt(h, 16), parseInt(t.sorts[i], 16)));
+        const keyed = list.map((e, i) => {
+          const h = e.handle ? parseInt(e.handle, 16) : NaN;
+          return { e, i, k: key.get(h) ?? (Number.isFinite(h) ? h : i) };
+        });
+        keyed.sort((a, b) => (a.k - b.k) || (a.i - b.i));
+        for (let i = 0; i < keyed.length; i++) list[i] = keyed[i].e;
       }
     }
 

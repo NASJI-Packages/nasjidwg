@@ -623,6 +623,33 @@ export const readDwg = (
     drawing.blocks[name] = def;
   }
 
+  /* ---- draw order: SORTENTSTABLE. Each table governs one space's (or
+     block's) entity list; entry i pairs an entity with its sort key, the
+     list reorders by ascending key, and an entity no entry names sorts
+     under its own handle. The reorder is in place, so the array a
+     consumer draws IS the draw order — the object itself is consumed
+     here, never sealed and never re-emitted stale. ---- */
+  for (const raw of order) {
+    const se = raw.sortents;
+    if (!se || !se.ents.length) continue;
+    let list: Entity[] | undefined;
+    if (se.blockOwner === modelSpaceHandle) list = drawing.entities;
+    else if (se.blockOwner === paperSpaceHandle) list = drawing.paperSpace;
+    else {
+      const nm = blockHeaderByHandle.get(se.blockOwner)?.table?.name;
+      list = nm !== undefined ? drawing.blocks[nm]?.entities : undefined;
+    }
+    if (!list || list.length < 2) continue;
+    const key = new Map<number, number>();
+    for (let i = 0; i < se.ents.length; i++) key.set(se.ents[i], se.sorts[i]);
+    const keyed = list.map((e, i) => {
+      const h = e.handle ? parseInt(e.handle, 16) : NaN;
+      return { e, i, k: key.get(h) ?? (Number.isFinite(h) ? h : i) };
+    });
+    keyed.sort((a, b) => (a.k - b.k) || (a.i - b.i));
+    for (let i = 0; i < keyed.length; i++) list[i] = keyed[i].e;
+  }
+
   /* ---- dynamic blocks: parameters and actions bind to the block their
      owner chain climbs to (parameter -> evaluation graph -> extension
      dictionary -> block header). ---- */

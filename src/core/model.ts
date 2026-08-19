@@ -176,6 +176,15 @@ export interface TextEntity extends EntityCommon {
   style?: string;
   halign?: TextHAlign;
   valign?: TextVAlign;
+  /** Present when the record was an attribute rather than a plain TEXT:
+   *  'attdef' is the definition inside a block (DXF ATTDEF), 'attrib' a
+   *  value carried by an insert (DXF ATTRIB). An invisible attribute
+   *  (flags bit 1) also sets `invisible`, so a consumer that honours
+   *  EntityCommon.invisible already skips it. */
+  attribute?: 'attdef' | 'attrib';
+  /** Attribute flags bit 2: a constant attribute — every insert shows
+   *  the definition's own value unchanged. */
+  constant?: boolean;
 }
 
 export interface MTextEntity extends EntityCommon {
@@ -436,8 +445,17 @@ export interface ImageEntity extends EntityCommon {
   heightPx: number;
   /** Image file path, resolved from IMAGEDEF when available. */
   path?: string;
-  /** Clip boundary in image pixel space (2 pts = rectangle). */
+  /** Clip boundary in image pixel space (2 pts = rectangle), stored as an
+   *  open ring — the closing duplicate vertex DXF carries is dropped on
+   *  read and restored on write. Pixel space is y-down: a clip vertex
+   *  (cx, cy) sits at WCS
+   *  `position + uVector*(cx+0.5) + vVector*(heightPx-0.5-cy)`.
+   *  Wipeouts have widthPx = heightPx = 1, which makes their boundary a
+   *  centered -0.5..+0.5 frame in that formula. */
   clip?: Point2[];
+  /** R2010+ clip mode (DXF 290): the clip is inverted — the boundary
+   *  hides what it encloses instead of revealing it. */
+  clipInverted?: boolean;
   brightness?: number;
   contrast?: number;
   fade?: number;

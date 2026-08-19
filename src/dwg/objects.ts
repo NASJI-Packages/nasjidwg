@@ -192,6 +192,9 @@ export interface RawObject {
   xdata?: XdataGroup[];
   /** XRECORD payload (typed group values). */
   xrecord?: { values: XdataValue[] };
+  /** SORTENTSTABLE payload: entry i pairs ents[i] with sort key sorts[i];
+   *  the assembler reorders blockOwner's entity list by ascending key. */
+  sortents?: { blockOwner: number; ents: number[]; sorts: number[] };
   /** R2013+: heavy data lives in the AcDs section, not in the record. */
   hasDsData?: boolean;
   /** MULTILEADER: block content + style handles. */
@@ -685,8 +688,37 @@ class Ctx {
 const H_ALIGN: TextHAlign[] = ['left', 'center', 'right', 'aligned', 'middle', 'fit'];
 const V_ALIGN: TextVAlign[] = ['baseline', 'bottom', 'middle', 'top'];
 
-const decodeTextLike = (x: Ctx, withTag: boolean): Entity => {
-  const { r } = x;
+const decodeTextLike = (
+  x: Ctx, kind: 'text' | 'attrib' | 'attdef'
+): Entity => {
+  const { r, v } = x;
+  /** ATTRIB/ATTDEF close with tag + field length + flags (bit 1 invisible,
+   *  bit 2 constant); R2010 fronts the tag with a class-version byte and
+   *  R2018 with the attribute type, whose multiline forms (2/4) embed an
+   *  MTEXT body this decoder does not walk — their flags stay unread.
+   *  Bounded record, so a malformed tail costs the flags, never the text. */
+  const attribFlags = (): number => {
+    let single = true;
+    try {
+      if (v >= 2010) r.rc();              /* class version */
+      if (v >= 2018) single = r.rc() <= 1;
+    } catch { single = false; }
+    x.text();                             /* tag */
+    if (!single) return 0;
+    try {
+      r.bs();                             /* field length */
+      return r.rc();
+    } catch { return 0; }
+  };
+  const finish = (ent: Entity): Entity => {
+    if (kind === 'text') return ent;
+    const t = ent as Extract<Entity, { type: 'text' }>;
+    t.attribute = kind;
+    const flags = attribFlags();
+    if (flags & 1) t.invisible = true;
+    if (flags & 2) t.constant = true;
+    return t;
+  };
   if (x.v <= 14) {
     /* R13/R14: all fields explicit, no dataflags */
     const elevation = r.bd();
@@ -702,12 +734,7 @@ const decodeTextLike = (x: Ctx, withTag: boolean): Entity => {
     r.bs();                               /* generation */
     const ha = r.bs();
     const va = r.bs();
-    /* ATTRIB: tag + field length + flags (ATTDEF alone adds a prompt);
-       the record is bounded, so stopping at the tag stays tolerant of
-       both shapes */
-    if (withTag) x.text();                /* tag */
-    x.hr.h();                             /* style handle */
-    return {
+    const ent = finish({
       type: 'text', layer: '0', color: { kind: 'byLayer' },
       position: pt3(ix, iy, elevation),
       alignmentPoint: (ha || va) ? pt3(ax, ay, elevation) : undefined,
@@ -716,7 +743,9 @@ const decodeTextLike = (x: Ctx, withTag: boolean): Entity => {
       oblique: oblique || undefined,
       halign: H_ALIGN[ha] ?? 'left',
       valign: V_ALIGN[va] ?? 'baseline'
-    };
+    });
+    x.hr.h();                             /* style handle */
+    return ent;
   }
   const df = r.rc();                      /* dataflags: bits mark ABSENT fields */
   const elevation = (df & 0x01) ? 0 : r.rd();
@@ -733,9 +762,7 @@ const decodeTextLike = (x: Ctx, withTag: boolean): Entity => {
   if (!(df & 0x20)) r.bs();               /* generation */
   const ha = (df & 0x40) ? 0 : r.bs();
   const va = (df & 0x80) ? 0 : r.bs();
-  if (withTag) x.text();                  /* ATTRIB/ATTDEF tag; rest skipped */
-  x.hr.h();                               /* style handle */
-  return {
+  const ent = finish({
     type: 'text', layer: '0', color: { kind: 'byLayer' },
     position: pt3(ix, iy, elevation),
     alignmentPoint: (ha || va) ? pt3(ax, ay, elevation) : undefined,
@@ -745,7 +772,9 @@ const decodeTextLike = (x: Ctx, withTag: boolean): Entity => {
     halign: H_ALIGN[ha] ?? 'left',
     valign: V_ALIGN[va] ?? 'baseline',
     ...(textExt ? { extrusion: textExt } : {})
-  };
+  });
+  x.hr.h();                               /* style handle */
+  return ent;
 };
 
 /** Capture the opaque half of a proxy record: the rest of the data area
@@ -808,9 +837,9 @@ const decodeEntitySpecific = (
 ): Entity | null => {
   const { r, v } = x;
   switch (typeName) {
-    case 'TEXT': return decodeTextLike(x, false);
-    case 'ATTRIB':
-    case 'ATTDEF': return decodeTextLike(x, true);
+    case 'TEXT': return decodeTextLike(x, 'text');
+    case 'ATTRIB': return decodeTextLike(x, 'attrib');
+    case 'ATTDEF': return decodeTextLike(x, 'attdef');
 
     case 'LINE': {
       if (v >= 2000) {
@@ -1729,7 +1758,7 @@ const decodeEntitySpecific = (
       const clipping = r.b() === 1;
       const brightness = r.rc(), contrast = r.rc(), fade = r.rc();
       x.hr.h();                           /* imagedef reactor */
-      if (v >= 2010) r.b();               /* clip mode */
+      const clipInverted = v >= 2010 ? r.b() === 1 : false;
       const clipType = r.bs();
       let clip: Point2[] | undefined;
       const nClip = clipType === 1 ? 2 : r.bl();
@@ -1744,6 +1773,7 @@ const decodeEntitySpecific = (
         uVector: pt3(ux, uy, uz), vVector: pt3(wx, wy, wz),
         widthPx, heightPx,
         clip: clipping ? clip : undefined,
+        clipInverted: clipInverted || undefined,
         brightness: brightness !== 50 ? brightness : undefined,
         contrast: contrast !== 50 ? contrast : undefined,
         fade: fade || undefined
@@ -3478,6 +3508,25 @@ const decodeObjectSpecific = (x: Ctx, typeName: string, raw: RawObject): void =>
       return;
     }
 
+    case 'SORTENTSTABLE': {
+      /* Draw order. DATA: BL count, then count sort handles inline (plain
+         absolute refs); HANDLE stream (after the common owner/reactors/
+         xdict run): the owning BLOCK_RECORD, then count entity handles.
+         Entry i pairs ents[i] with sort key sorts[i]; drawing order is
+         ascending key, and an entity no entry names sorts under its own
+         handle. Verified pair-for-pair against AutoCAD's own DXF export
+         of a 193,382-entry table. */
+      const num = r.bl();
+      if (num < 0 || num > 5000000) throw new RangeError('sortents count');
+      const sorts: number[] = [];
+      for (let i = 0; i < num; i++) sorts.push(r.hValue());
+      const blockOwner = x.hr.hAbs(raw.handle);
+      const ents: number[] = [];
+      for (let i = 0; i < num; i++) ents.push(x.hr.hAbs(raw.handle));
+      raw.sortents = { blockOwner, ents, sorts };
+      return;
+    }
+
     default:
       return;                             /* other objects: identity only */
   }
@@ -3611,7 +3660,8 @@ export const decodeObjectBody = (
   const modeled = raw.dictionary || raw.layout || raw.group || raw.xrecord
     || raw.imageDef || raw.underlayDef || raw.visibility || raw.blockParam
     || raw.blockAction || raw.tableContent || raw.geoData || raw.mlineStyle
-    || raw.table || raw.proxyObject || raw.ucs || raw.view || raw.vport;
+    || raw.table || raw.proxyObject || raw.ucs || raw.view || raw.vport
+    || raw.sortents;
   if ((failed && !modeled) || (cls && !modeled && !isControl)) {
     r.pos = dpos;
     x.hr.pos = hpos;

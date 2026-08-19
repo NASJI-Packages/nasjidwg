@@ -917,7 +917,31 @@ export const writeDxf = (drawing: Drawing): string => {
     }
     w(100, 'AcDbAttribute');
     w(2, 'ATTR' + (index + 1));              /* model keeps no tag — invent one */
-    w(70, a.invisible ? 1 : 0);
+    w(70, (a.invisible ? 1 : 0) | (a.constant ? 2 : 0));
+    if (va) w(74, va);
+  };
+
+  /** A block's attribute definition: the TEXT body closed by the
+   *  AcDbAttributeDefinition subclass, whose 70 flags carry the
+   *  invisible/constant bits back to the reader. */
+  let attdefSeq = 0;
+  const writeAttdef = (a: TextEntity): void => {
+    entStart('ATTDEF', a, 'AcDbText');
+    w(10, fmt(a.position.x)); w(20, fmt(a.position.y)); w(30, fmt(a.position.z ?? 0));
+    w(40, fmt(isNum(a.height) && a.height > 0 ? a.height : 5));
+    w(1, encodeCadSymbols(a.text).replace(/[\r\n]+/g, ' '));
+    w(50, fmt((a.rotation || 0) * DEG));
+    const ha = H_IDX[a.halign ?? 'left'] ?? 0;
+    const va = V_IDX[a.valign ?? 'baseline'] ?? 0;
+    if (ha) w(72, ha);
+    if (ha || va) {
+      const ap = a.alignmentPoint ?? a.position;
+      w(11, fmt(ap.x)); w(21, fmt(ap.y)); w(31, fmt(ap.z ?? 0));
+    }
+    w(100, 'AcDbAttributeDefinition');
+    w(3, '');                                /* prompt */
+    w(2, 'ATTD' + ++attdefSeq);              /* model keeps no tag — invent one */
+    w(70, (a.invisible ? 1 : 0) | (a.constant ? 2 : 0));
     if (va) w(74, va);
   };
 
@@ -1094,6 +1118,7 @@ export const writeDxf = (drawing: Drawing): string => {
         return;
 
       case 'text': {
+        if (ent.attribute === 'attdef') { writeAttdef(ent); return; }
         /* ANY complex-script text exports as a real MTEXT (see mtextBody) */
         if (hasComplexScript(ent.text)) { writeAsMtext(ent); return; }
         const ha = H_IDX[ent.halign ?? 'left'] ?? 0;
@@ -1333,6 +1358,7 @@ export const writeDxf = (drawing: Drawing): string => {
         w(71, clip.length === 2 ? 1 : 2);
         w(91, ring.length);
         for (const p of ring) { w(14, fmt(p.x)); w(24, fmt(p.y)); }
+        if (ent.clipInverted) w(290, 1);     /* inverted clip (2010+) */
         return;
       }
 
