@@ -10,7 +10,7 @@ import type {
   AcisEntity, BlockDefinition, Color, DimensionEntity, DimensionKind,
   Drawing, Entity,
   Face3DEntity, FileVersion, GeoData, HatchBoundary, HatchDefLine, HatchEdge,
-  HatchEntity, HatchGradient, ImageEntity, Layer, LeaderEntity, Linetype,
+  HatchEntity, HatchGradient, HatchLoopFlags, ImageEntity, Layer, LeaderEntity, Linetype,
   Group as EntityGroup, Layout, MeshEntity, MLineEntity, MLineStyle,
   MLineStyleElement, MLineVertex, MTextEntity, Point2, Point3,
   PolylineEntity, PolylineVertex, ProxyEntity, ProxyObject, ShapeEntity,
@@ -511,9 +511,18 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
           const count = int(i); i++;
           for (let k = 0; k < count && i < n; k++) {
             const dl: HatchDefLine = { angle: 0, base: { x: 0, y: 0 }, offset: { x: 0, y: 0 }, dashes: [] };
+            /* each line opens with its 53 — a second 53 is the NEXT
+               line, not another angle. Folding it in collapsed every
+               multi-line pattern into one line plus zero-offset husks,
+               which AutoCAD's audit erases as unrepairable hatches. */
+            let seen53 = false;
             for (; i < n; i++) {
               const cc = code(i);
-              if (cc === 53) dl.angle = num(i);
+              if (cc === 53) {
+                if (seen53) break;
+                seen53 = true;
+                dl.angle = num(i);
+              }
               else if (cc === 43) dl.base.x = num(i);
               else if (cc === 44) dl.base.y = num(i);
               else if (cc === 45) dl.offset.x = num(i);
@@ -566,6 +575,10 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
 
         /* ---- one boundary loop ---- */
         const flag = int(i); i++;
+        const lf: HatchLoopFlags = {};
+        if (flag & 1) lf.external = true;
+        if (flag & 4) lf.derived = true;
+        if (flag & 16) lf.outermost = true;
         if (flag & 2) {
           /* polyline path: 72 hasBulge, 73 closed, 93 n, 10/20 (+42) */
           const verts: PolylineVertex[] = [];
@@ -580,7 +593,7 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
             else if (cc === 42 && cur) { const b = num(i); if (b) cur.bulge = b; }
             else if (cc === 97) { for (i++; i < n && code(i) === 330; i++); break; }
           }
-          if (verts.length >= 2) loops.push({ kind: 'polyline', vertices: verts, closed });
+          if (verts.length >= 2) loops.push({ kind: 'polyline', vertices: verts, closed, ...lf });
           continue;
         }
         /* edge path: 93 numEdges, per edge 72 type + positional data */
@@ -655,7 +668,7 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
             done = true;
           }
         }
-        if (edges.length) loops.push(simplify(edges));
+        if (edges.length) loops.push(Object.assign(simplify(edges), lf));
       }
 
       const rawName = q.str(2, '');
@@ -676,6 +689,8 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
       if (definitionLines.length) e.definitionLines = definitionLines;
       if (seeds.length) e.seeds = seeds;
       if (gradient) e.gradient = gradient;
+      const ps = q.numOr(47);
+      if (ps != null) e.pixelSize = ps;
       return e;
     };
 

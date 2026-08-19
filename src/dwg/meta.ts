@@ -233,9 +233,11 @@ export const readSummaryInfo = (
  * with the segment tallies cleared opens but leaves the solid unbound
  * ("could not be repaired"), which is how those fields were found.
  *
- * Limit (deliberate, ledgered): one solid per drawing gets AcDs data,
- * because the caller hands us one blob. The container itself would
- * take any number of records.
+ * Any number of solids ride one section: the record directory, the
+ * data index and the search table all carry one entry per solid, in
+ * the multi-record spelling AutoCAD's own two-solid save uses (the
+ * cells packed back to back, directory entries 20 bytes apart, and
+ * the search keys sorted by handle).
  * ------------------------------------------------------------------ */
 
 /* Structural constants of the container. */
@@ -278,7 +280,15 @@ const DS_NEXT_ID = 8;
 const DS_TALLY_SCHDAT = 14;               /* the five standard schemas */
 const DS_TALLY_SCHASM = 9;                /* the payload schema alone */
 const DS_TALLY_SCHIDX = 15;               /* the catalogue itself */
-const DS_TALLY_DATA = 4;                  /* plus one per record */
+/** The _data_ segment's record tally is `4 + N + floor((N-1)/4)`: the
+ *  four attribute cells, one per record, and one more per full group of
+ *  four records past the first. The closed form was fitted to AutoCAD's
+ *  own saves (N=1,3,6,31 across four files) and then confirmed
+ *  externally at N=5,8,9,13,68 by patching the single field until 2027
+ *  accepted the drawing — the value is exact: one below OR above is
+ *  refused with ErrorStatus 53. */
+const DS_TALLY_DATA = 4;
+const dsDataTally = (n: number): number => DS_TALLY_DATA + n + ((n - 1) >> 2);
 
 /** Little-endian byte sink for the AcDs structures. */
 interface DsSink {
@@ -342,11 +352,13 @@ const dsDataSchema = (w: DsSink, cell: number, blobName: number): void => {
   dsProp(w, 0, blobName, DS_TYPE_BLOB, []);
 };
 
-/** Build the AcDb:AcDsPrototype_1b section carrying one solid's SAB. */
+/** Build the AcDb:AcDsPrototype_1b section carrying the drawing's
+ *  solids' SAB payloads, one data record per solid. */
 export const buildAcDs = (
-  solidHandle: number, sab: Uint8Array
+  solids: { handle: number; sab: Uint8Array }[]
 ): Uint8Array | null => {
-  if (sab.length === 0) return null;
+  const recs = solids.filter((s) => s.sab.length > 0);
+  if (recs.length === 0) return null;
 
   /* --- schdat #1: the thumbnail slot and the attribute schemas ---- */
   const schdat = dsSink();
@@ -399,27 +411,41 @@ export const buildAcDs = (
 
   /* --- _data_: the record directory, then the payload cells ------ */
   const data = dsSink();
-  data.u32(DS_REC_HDR);                   /* directory entry size */
-  data.u32(1);                            /* one data cell in it */
-  data.u64(solidHandle);                  /* the solid this belongs to */
-  data.u32(0);                            /* cell offset: the first */
+  const cellOffs: number[] = [];
+  {
+    let off = 0;
+    for (const s of recs) { cellOffs.push(off); off += 4 + s.sab.length; }
+  }
+  recs.forEach((s, i) => {
+    data.u32(DS_REC_HDR);                 /* directory entry size */
+    data.u32(1);                          /* one data cell in it */
+    data.u64(s.handle);                   /* the solid this belongs to */
+    data.u32(cellOffs[i]);                /* cell offset, cells packed */
+  });
   data.align(16);
-  data.u32(sab.length);
-  data.bytes(sab);
+  for (const s of recs) { data.u32(s.sab.length); data.bytes(s.sab); }
 
-  /* --- datidx: which record carries the schema's data ------------ */
+  /* --- datidx: which records carry the schema's data ------------- */
   const datidx = dsSink();
-  datidx.u64(1);
-  datidx.u32(DS_DATA); datidx.u32(0); datidx.u32(DS_ASM_SCHEMA);
+  datidx.u64(recs.length);
+  recs.forEach((_, i) => {
+    datidx.u32(DS_DATA); datidx.u32(i * DS_REC_HDR); datidx.u32(DS_ASM_SCHEMA);
+  });
 
   /* --- search: handle -> record, one table per schema ------------ */
   const search = dsSink();
   search.u32(1);                          /* one table */
   search.u32(DS_ASM_SCHEMA);
-  search.u64(1); search.u64(0);           /* the records it holds: #0 */
-  search.u64(1); search.u32(1);           /* one handle key… */
-  search.u64(solidHandle);
-  search.u64(1); search.u64(0);           /* …naming record #0 */
+  search.u64(recs.length);                /* the records it holds */
+  recs.forEach((_, i) => search.u64(i));
+  search.u64(1);
+  search.u32(recs.length);                /* the handle keys, sorted */
+  const byHandle = recs.map((s, i) => ({ h: s.handle, i }))
+    .sort((a, b) => a.h - b.h);
+  for (const k of byHandle) {
+    search.u64(k.h);
+    search.u64(1); search.u64(k.i);       /* …naming its record */
+  }
 
   /* --- lay the segments out on 0x80 boundaries ------------------- */
   const grow = (payload: number): number =>
@@ -439,7 +465,7 @@ export const buildAcDs = (
   place('schdat', DS_SCHDAT, schdat.b, DS_TALLY_SCHDAT);
   place('schdat', DS_SCHASM, schasm.b, DS_TALLY_SCHASM);
   place('schidx', DS_SCHIDX, schidx.b, DS_TALLY_SCHIDX);
-  place('_data_', DS_DATA, data.b, DS_TALLY_DATA + 1);
+  place('_data_', DS_DATA, data.b, dsDataTally(recs.length));
   place('search', DS_SEARCH, search.b, 0);
   const total = at;
 

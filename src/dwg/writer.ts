@@ -19,6 +19,7 @@ import { SEAL_MAGIC, encodingGroup } from './objects.js';
 import { assemble2007 } from './container2007.js';
 import { buildAcDs } from './meta.js';
 import { sabToSat } from '../acis/sab.js';
+import { nearestAci } from '../core/color.js';
 import type {
   DimStyle, Drawing, Entity, Layer, Linetype, Point2, Point3, TextStyle
 } from '../core/model.js';
@@ -915,8 +916,10 @@ const writeDwgImpl = (
   const CLASS_ONLY = new Set(['table', 'mleader', 'light', 'underlay']);
 
   const downgraded: string[] = [];
-  /** R2018: the AcDs section carrying the first solid's SAB payload. */
-  let acdsSection: Uint8Array | undefined;
+  /** R2018: the solids whose SAB payloads ride the AcDs data section,
+   *  collected during entity emission and built into the section once
+   *  every record is out (one section carries any number of them). */
+  const acdsSolids: { handle: number; sab: Uint8Array }[] = [];
   const filterEnts = (list: Entity[]): Entity[] =>
     list.filter((e) => {
       if (e.type === 'acis') {
@@ -1072,8 +1075,55 @@ const writeDwgImpl = (
   }
   const proxyObjH = proxyObjs.map((p) => keepH(p.handle));
   /* sealed unknown objects: same discipline, same dictionary anchor */
+  /** Handles a preserveHandles rewrite keeps alive — everything that
+   *  carries its source number through keepH. A sealed record's HARD
+   *  references (owner/pointer codes 3 and 5) must land inside this
+   *  set: AutoCAD resolves them while opening and refuses the whole
+   *  drawing over one dangler (ErrorStatus 53, externally proven — the
+   *  field corpus was refused for its plot-style dictionary, whose
+   *  default names an ACDBPLACEHOLDER this library does not retain). */
+  const keptRefs = new Set<string>(['0']);
+  if (preserve) {
+    const addRef = (h?: string): void => { if (h) keptRefs.add(h.toUpperCase()); };
+    const scanRefs = (list?: Entity[]): void => {
+      for (const e of list ?? []) addRef(e.handle);
+    };
+    scanRefs(drawing.entities); scanRefs(drawing.paperSpace);
+    for (const b of Object.values(drawing.blocks)) {
+      addRef(b.handle); scanRefs(b.entities);
+    }
+    for (const u of drawing.unknownObjects ?? []) addRef(u.handle);
+    for (const x of drawing.xrecords ?? []) addRef(x.handle);
+    for (const p of drawing.proxyObjects ?? []) addRef(p.handle);
+    for (const ly of drawing.layers) addRef(ly.handle);
+    for (const lt of drawing.linetypes) addRef(lt.handle);
+    for (const st of drawing.textStyles) addRef(st.handle);
+  }
   const unknownObjs = (drawing.unknownObjects ?? [])
-    .filter((p) => p.data || p.typeCode !== undefined);
+    .filter((p) => p.data || p.typeCode !== undefined)
+    .filter((p) => {
+      if (preserve) {
+        /* the record's own spelling survives, so only danglers go */
+        const ok = (p.refs ?? []).every((r) =>
+          (r.code !== 3 && r.code !== 5)
+          || r.value === '0' || keptRefs.has(r.value.toUpperCase()));
+        if (!ok) skipped.push(p.sourceType ?? 'sealed object');
+        return ok;
+      }
+      /* The AcDbAssoc* framework — constraint/array actions with their
+         dependency graph — names specific entity handles inside bits a
+         renumbering rewrite cannot update. AutoCAD resolves that graph
+         while opening and refuses the whole drawing over one stale
+         network (ErrorStatus 53, externally proven: the field corpus
+         opened the moment its two ACDBASSOCNETWORKs stayed home).
+         Under preserveHandles every number the graph names stays real,
+         so the family travels; a default write reports the honest
+         skip. */
+      const t = (p.appClass?.dxfName ?? p.sourceType ?? '').toUpperCase();
+      if (!t.startsWith('ACDBASSOC')) return true;
+      skipped.push(p.sourceType ?? t);
+      return false;
+    });
   for (const p of unknownObjs) {
     if (p.typeCode === undefined) {
       addProxyCls(p.appClass, p.sourceType, 'ACAD_PROXY_OBJECT', false);
@@ -1263,7 +1313,17 @@ const writeDwgImpl = (
     if (V >= 2004) w.b(1);                /* xdict missing */
     if (V <= 2002) w.b(0);                /* nolinks = 0: chain present */
     if (V >= 2018) w.b(ctx.hasDs ? 1 : 0);  /* has_ds_data (2013+) */
-    w.bs(colorIndex(e));
+    /* ENC (R2004+): a true colour is flags 0x80 in the high byte with
+       the nearest ACI as the legacy index, then the 0xC2-method RGB
+       dword — bit-for-bit what AutoCAD writes (walked off the field
+       corpus). Collapsing it to index 7 painted every true-colour
+       entity white/black. */
+    if (V >= 2004 && e.color.kind === 'rgb') {
+      w.bs(0x8000 | (nearestAci(e.color.rgb) & 0xff));
+      w.bl((0xc2000000 | (e.color.rgb & 0xffffff)) >>> 0);
+    } else {
+      w.bs(colorIndex(e));
+    }
     w.bd(e.linetypeScale ?? 1);
     if (V >= 2000) {
       w.bb(ltFlags);
@@ -1368,7 +1428,15 @@ const writeDwgImpl = (
         makeEntity(35, handle, e, ctx, (w) => {
           w.bd3(e.center.x, e.center.y, e.center.z ?? 0);
           w.bd3(e.majorAxis.x, e.majorAxis.y, e.majorAxis.z ?? 0);
-          w.bd3(0, 0, 1);
+          /* The ellipse is a true 3D entity: center and major axis are
+             WCS and this field is its plane NORMAL, not an OCS
+             extrusion to convert away. Forging +Z here mirrored every
+             mirrored ellipse — and AutoCAD 2027 refuses the drawing
+             (ErrorStatus 53) when the forged normal is no longer
+             perpendicular to the major axis within its tolerance,
+             which a real field drawing's near-planar tilts exceed. */
+          const n = e.extrusion ?? { x: 0, y: 0, z: 1 };
+          w.bd3(n.x, n.y, n.z ?? 1);
           w.bd(e.ratio);
           w.bd(e.startParam); w.bd(e.endParam);
         });
@@ -1675,6 +1743,7 @@ const writeDwgImpl = (
         if (attrs.length) {
           const fake: Entity = {
             type: 'point', layer: e.layer, color: { kind: 'byLayer' },
+            linetype: e.linetype,
             position: { x: 0, y: 0, z: 0 }
           };
           makeEntity(6, seqH, fake, { entmode: 0, owner: handle },
@@ -1775,11 +1844,26 @@ const writeDwgImpl = (
           w.bd3(0, 0, 1);
           w.t(outText(e.patternName || (e.solid ? 'SOLID' : 'ANSI31')));
           w.b(e.solid ? 1 : 0);
-          w.b(e.associative ? 1 : 0);
+          /* No boundary entity handles are written below, so the
+             associativity flag has to say so: associative-with-no-
+             boundary is audited on every such hatch ("Boundary
+             Undefined — Remove Associativity"). */
+          w.b(0);
           w.bl(e.loops.length);
+          /* The loop-type bits ride with each loop: external(1),
+             derived(4), outermost(16) — audit erases a style-1/2 hatch
+             whose loops all lost their external bit. The derived bit is
+             only spelled when the pixel size that must follow the
+             pattern block is known. */
+          const loopBits = (lp: typeof e.loops[number]): number =>
+            (lp.external ? 1 : 0)
+            | (lp.derived && e.pixelSize !== undefined ? 4 : 0)
+            | (lp.outermost ? 16 : 0);
+          const anyDerived = e.loops.some(
+            (lp) => lp.derived && e.pixelSize !== undefined);
           for (const loop of e.loops) {
             if (loop.kind === 'polyline') {
-              w.bl(2);                    /* polyline path */
+              w.bl(2 | loopBits(loop));   /* polyline path */
               const bulges = loop.vertices.some((p) => p.bulge);
               w.b(bulges ? 1 : 0);
               w.b(loop.closed ? 1 : 0);
@@ -1789,7 +1873,7 @@ const writeDwgImpl = (
                 if (bulges) w.bd(p.bulge ?? 0);
               }
             } else {
-              w.bl(0);                    /* edge path */
+              w.bl(loopBits(loop));       /* edge path */
               const edges = loop.kind === 'edges' ? loop.edges
                 : loop.kind === 'circle'
                   ? [{ kind: 'arc', center: loop.center, radius: loop.radius,
@@ -1828,6 +1912,22 @@ const writeDwgImpl = (
                     w.rd(p.x); w.rd(p.y);
                     if (ed.weights?.length) w.bd(ed.weights[i] ?? 1);
                   });
+                  /* R2010+ closes a spline edge with its fit data: the
+                     count, and — only when there are any — the points
+                     and the two end tangents. Omitting the count leaves
+                     the record misaligned from here on: our own reader
+                     seals such a hatch as an undecodable unknown, and
+                     AutoCAD 2027 refuses the drawing (ErrorStatus 53)
+                     or dies in regen when they come by the thousand. */
+                  if (V >= 2010) {
+                    const fits = ed.fitPoints ?? [];
+                    w.bl(fits.length);
+                    if (fits.length) {
+                      for (const p of fits) { w.rd(p.x); w.rd(p.y); }
+                      w.rd(0); w.rd(0);   /* start tangent: default */
+                      w.rd(0); w.rd(0);   /* end tangent: default */
+                    }
+                  }
                 }
               }
             }
@@ -1849,6 +1949,7 @@ const writeDwgImpl = (
               for (const d of dl.dashes) w.bd(d);
             }
           }
+          if (anyDerived) w.bd(e.pixelSize!);   /* derived-boundary size */
           const seeds = e.seeds ?? [];
           w.bl(seeds.length);
           for (const s of seeds) { w.rd(s.x); w.rd(s.y); }
@@ -2366,7 +2467,7 @@ const writeDwgImpl = (
 
       case 'acis': {
         const typeNum = e.kind === 'region' ? 37 : e.kind === 'solid3d' ? 38 : 39;
-        if (V >= 2018 && e.sab && !e.surfaceKind && !acdsSection) {
+        if (V >= 2018 && e.sab && !e.surfaceKind) {
           /* AC1032: the SAB payload rides the AcDs data section and the
              entity record itself is the empty-inline form AutoCAD's own
              2018 saves carry — written out field by field below.
@@ -2385,9 +2486,8 @@ const writeDwgImpl = (
              one type-specific handle is the solid-history reference, null
              here (SOLIDHIST off). */
           const blob = fromBase64(e.sab);
-          const ds = buildAcDs(handle, blob);
-          if (ds) {
-            acdsSection = ds;
+          if (blob.length) {
+            acdsSolids.push({ handle, sab: blob });
             makeEntity(typeNum, handle, e, { ...ctx, hasDs: true }, (w) => {
               w.b(1);                     /* acis empty: the blob is in AcDs */
               w.b(1);                     /* wireframe data present */
@@ -2414,17 +2514,17 @@ const writeDwgImpl = (
         /* a container without the binary kernel form (pre-2007) takes the
            SAB payload as its SAT text conversion */
         /* AC1032 (R2013+) stores ACIS data in the AcDs data section; the
-           branch above carries the first solid's SAB there (proven: the
-           singleton opens in AutoCAD 2027 with AUDIT 0/0, while every
-           inline form is refused with ErrorStatus 53).
-           KNOWN LIMITS: one solid per drawing rides AcDs — buildAcDs
-           emits the whole section for a single solid handle, and a
-           drawing carries one such section — and AutoCAD only accepts
-           modern ASM-format blobs: a pre-ASM "ACIS BinaryFile" payload
-           still makes it refuse the drawing, whichever way it is stored.
-           Any solid the AcDs branch cannot take falls through to the
-           inline SAB below: it round-trips through this library and other
-           readers losslessly, which beats discarding the payload. */
+           branch above carries every solid's SAB there (proven: the
+           records open in AutoCAD 2027 with AUDIT 0/0, while every
+           inline form is refused with ErrorStatus 53 — and a drawing
+           where only the FIRST solid rode AcDs was refused for the
+           inline rest, or with dozens of them died outright in regen).
+           KNOWN LIMIT: AutoCAD only accepts modern ASM-format blobs; a
+           pre-ASM "ACIS BinaryFile" payload still makes it refuse the
+           drawing, whichever way it is stored. A solid the AcDs branch
+           cannot take falls through to the inline SAB below: it
+           round-trips through this library and other readers
+           losslessly, which beats discarding the payload. */
         /* the same dialect rule the filter above applies: a payload the
            target's kernel cannot read inline leaves as SAT text */
         const sabInline = !!e.sab && (isAsmSab(e.sab) ? V >= 2013 : V >= 2007);
@@ -2520,6 +2620,7 @@ const writeDwgImpl = (
         e.vertices.forEach((p, i) => {
           const fake: Entity = {
             type: 'point', layer: e.layer, color: { kind: 'byLayer' },
+            linetype: e.linetype,
             position: p
           };
           makeEntity(vType, vertHs[i], fake, {
@@ -2535,6 +2636,7 @@ const writeDwgImpl = (
             const i = vertHs.length + k;
             const fake: Entity = {
               type: 'point', layer: e.layer, color: { kind: 'byLayer' },
+            linetype: e.linetype,
               position: { x: 0, y: 0, z: 0 }
             };
             makeEntity(14, faceHs[k], fake, {
@@ -2548,6 +2650,7 @@ const writeDwgImpl = (
         {
           const fake: Entity = {
             type: 'point', layer: e.layer, color: { kind: 'byLayer' },
+            linetype: e.linetype,
             position: { x: 0, y: 0, z: 0 }
           };
           makeEntity(6, seqendH, fake, { entmode: 0, owner: handle },
@@ -2557,9 +2660,17 @@ const writeDwgImpl = (
       }
 
       case 'image': {
-        const key = (e.path ?? '') + '|' + e.widthPx + 'x' + e.heightPx;
-        let defH = imageDefH.get(key);
-        if (defH === undefined) imageDefH.set(key, defH = H());
+        /* A WIPEOUT references NO imagedef: every wipeout of the
+           AutoCAD-written corpus carries a null handle there, and one
+           we mint (path-less, "loaded") plots the mask as a black box.
+           Real images share one imagedef per path+size. */
+        let defH = 0;
+        if (!e.wipeout) {
+          const key = (e.path ?? '') + '|' + e.widthPx + 'x' + e.heightPx;
+          const got = imageDefH.get(key);
+          defH = got ?? H();
+          if (got === undefined) imageDefH.set(key, defH);
+        }
         makeEntity(e.wipeout ? CLS_WIPEOUT : CLS_IMAGE, handle, e, ctx, (w) => {
           w.bl(0);                        /* class version */
           w.bd3(e.position.x, e.position.y, e.position.z ?? 0);
@@ -2578,18 +2689,26 @@ const writeDwgImpl = (
           if (clip.length !== 2) w.bl(clip.length);
           for (const p of clip) { w.rd(p.x); w.rd(p.y); }
         }, (w) => {
-          w.h(5, defH!);                  /* imagedef */
+          w.h(5, defH);                   /* imagedef (null for wipeouts) */
           w.h(3, 0);                      /* imagedef reactor */
         });
         return;
       }
 
       case 'spline': {
+        /* R2013+ spells the scenario differently: the leading BL is
+           ALWAYS 1, and the truth moves into the two flag longs — a fit
+           spline is flags1 9 with chord knots (0), a control spline is
+           flags1 0 with custom knots (15). That is what AutoCAD writes,
+           uniformly, across every spline of the reference corpus, and
+           AutoCAD 2027 FATALs during regen on the old scenario-2
+           spelling that pre-2013 files carry (our reader accepts both,
+           which is why no round trip ever saw it). */
         makeEntity(36, handle, e, ctx, (w) => {
           const hasCtrl = e.controlPoints.length >= 2;
           if (hasCtrl) {
             w.bl(1);                      /* scenario: full spline */
-            if (V >= 2018) { w.bl(0); w.bl(0); }   /* flags1, knotparam */
+            if (V >= 2018) { w.bl(0); w.bl(15); }  /* flags1, custom knots */
             w.bl(e.degree > 0 ? e.degree : 3);
             w.b(e.weights?.length ? 1 : 0);
             w.b(e.closed ? 1 : 0);
@@ -2604,8 +2723,8 @@ const writeDwgImpl = (
               if (e.weights?.length) w.bd(e.weights[i] ?? 1);
             });
           } else {
-            w.bl(2);                      /* scenario: fit points */
-            if (V >= 2018) { w.bl(1); w.bl(0); }   /* flags1 (fit), knotparam */
+            w.bl(V >= 2018 ? 1 : 2);      /* scenario: fit points */
+            if (V >= 2018) { w.bl(9); w.bl(0); }   /* flags1 (fit), chord knots */
             w.bl(e.degree > 0 ? e.degree : 3);
             w.bd(1e-7);
             w.bd3(0, 0, 0); w.bd3(0, 0, 0);
@@ -2833,10 +2952,14 @@ const writeDwgImpl = (
   };
 
   const makeLtype = (name: string, h: number, lt?: Linetype): void => {
+    /* AutoCAD's audit refuses a one-dash pattern ("Dash Count Less
+       than 2 — Continuous"): a lone dash with no gap draws solid
+       anyway, so it is written as the continuous form the audit would
+       make of it. */
+    const pattern = (lt?.pattern ?? []).length >= 2 ? lt!.pattern : [];
     makeObject(57, h, (w) => {
       tableFlags(w, name);
       w.t(outText(r14Str(lt?.description ?? '')));
-      const pattern = lt?.pattern ?? [];
       w.bd(pattern.reduce((s, d) => s + Math.abs(d), 0));
       w.rc(65);                           /* alignment 'A' */
       w.rc(pattern.length);
@@ -2856,7 +2979,7 @@ const writeDwgImpl = (
       w.h(4, ltypeControl);
       if (V < 2004) w.h(3, 0);
       w.h(5, 0);                          /* xref */
-      for (const d of lt?.pattern ?? []) { void d; w.h(5, 0); }  /* per-dash style */
+      for (const d of pattern) { void d; w.h(5, 0); }  /* per-dash style */
     });
   };
 
@@ -3081,13 +3204,21 @@ const writeDwgImpl = (
     });
   };
 
+  /** The stored name of an anonymous block. The file keeps the bare
+   *  stem ("*X", "*D", "*U") and AutoCAD assigns the display numbers at
+   *  load — the reader numbers them back the same way. Writing the
+   *  numbered display name is what audit flags, once per block, as
+   *  `Name Invalid anonymous name "*X"` (396 times in the field
+   *  corpus). References are by handle, so the stem loses nothing. */
+  const storedBlockName = (name: string): string =>
+    /^\*[A-Za-z]\d+$/.test(name) ? name.slice(0, 2) : name;
   const makeBlockHeader = (
     h: number, name: string, blockEnt: number, endblkEnt: number,
     ownedEnts: number[], base = { x: 0, y: 0, z: 0 }, layoutHandle = 0,
     xdictH = 0, hasAttdefs = false
   ): void => {
     makeObject(49, h, (w) => {
-      tableFlags(w, name);
+      tableFlags(w, storedBlockName(name));
       /* the two space blocks start with '*' but are NOT anonymous —
          AutoCAD's audit flags them when marked so */
       w.b(name.startsWith('*')
@@ -3140,7 +3271,7 @@ const writeDwgImpl = (
     };
     const em = spaceEntmode(owner);
     makeEntity(4, h, fake, { entmode: em, owner: em === 0 ? owner : undefined }, (w) => {
-      w.t(nameText(r14Name(name)));
+      w.t(nameText(r14Name(storedBlockName(name))));
     });
   };
   const makeEndblk = (h: number, owner: number): void => {
@@ -4124,6 +4255,8 @@ const writeDwgImpl = (
   }
 
   /* ---------------- assemble the file ---------------- */
+  const acdsSection = acdsSolids.length
+    ? buildAcDs(acdsSolids) ?? undefined : undefined;
   if (V >= 2004) {
     return {
       data: assemble2004(hvBytes(), clsBytes(), objects, handseed,

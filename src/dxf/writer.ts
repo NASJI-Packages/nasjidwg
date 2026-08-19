@@ -830,9 +830,16 @@ export const writeDxf = (drawing: Drawing): string => {
   };
 
   const writeHatchLoop = (b: HatchBoundary, first: boolean): void => {
+    /* the loop-type bits beyond the structural polyline one; when the
+       source never said, the first loop is spelled external as before */
+    const flagged = b.external !== undefined || b.derived !== undefined
+      || b.outermost !== undefined;
+    const bits = flagged
+      ? (b.external ? 1 : 0) | (b.derived ? 4 : 0) | (b.outermost ? 16 : 0)
+      : (first ? 1 : 0);
     if (b.kind === 'polyline') {
       const hasBulge = b.vertices.some((p) => isNum(p.bulge) && p.bulge !== 0);
-      w(92, 2 | (first ? 1 : 0));            /* polyline (+external) */
+      w(92, 2 | bits);                       /* polyline (+loop bits) */
       w(72, hasBulge ? 1 : 0);
       w(73, b.closed ? 1 : 0);
       w(93, b.vertices.length);
@@ -842,14 +849,14 @@ export const writeDxf = (drawing: Drawing): string => {
       }
       w(97, 0);
     } else if (b.kind === 'circle') {
-      w(92, first ? 1 : 0); w(93, 1);
+      w(92, bits); w(93, 1);
       w(72, 2);                              /* circular arc edge */
       w(10, fmt(b.center.x)); w(20, fmt(b.center.y));
       w(40, fmt(b.radius));
       w(50, 0); w(51, 360); w(73, 1);
       w(97, 0);
     } else if (b.kind === 'ellipse') {
-      w(92, first ? 1 : 0); w(93, 1);
+      w(92, bits); w(93, 1);
       w(72, 3);                              /* ellipse edge */
       w(10, fmt(b.center.x)); w(20, fmt(b.center.y));
       w(11, fmt(b.majorAxis.x)); w(21, fmt(b.majorAxis.y));
@@ -858,7 +865,7 @@ export const writeDxf = (drawing: Drawing): string => {
       w(97, 0);
     } else {
       /* exact edge list — angles are radians in the model, degrees in DXF */
-      w(92, first ? 1 : 0);
+      w(92, bits);
       w(93, b.edges.length);
       for (const e of b.edges) {
         if (e.kind === 'line') {
@@ -1204,6 +1211,7 @@ export const writeDxf = (drawing: Drawing): string => {
             }
           }
         }
+        if (ent.pixelSize !== undefined) w(47, fmt(ent.pixelSize));
         w(98, ent.seeds?.length ?? 0);
         for (const s of ent.seeds ?? []) { w(10, fmt(s.x)); w(20, fmt(s.y)); }
         /* No gradient block: groups 450-470 are R2004+, and the AC1015

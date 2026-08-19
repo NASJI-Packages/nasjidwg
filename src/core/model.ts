@@ -228,12 +228,26 @@ export type HatchEdge =
       knots: number[]; controlPoints: Point2[]; weights?: number[];
       fitPoints?: Point2[] };
 
-export type HatchBoundary =
+/** DXF 92 loop-type bits beyond the structural polyline bit: how the
+ *  loop relates to the hatch. AutoCAD's audit needs them back — a
+ *  style-1/2 (outer/ignore) hatch whose loops all lost their `external`
+ *  bit cannot name its outer ring and is erased as unrepairable. */
+export interface HatchLoopFlags {
+  /** DXF 92 bit 1: the loop is the hatch's external boundary. */
+  external?: boolean;
+  /** DXF 92 bit 4: computed from a picked point (derived boundary). */
+  derived?: boolean;
+  /** DXF 92 bit 16: outermost loop. */
+  outermost?: boolean;
+}
+
+export type HatchBoundary = (
   | { kind: 'polyline'; vertices: PolylineVertex[]; closed: boolean }
   | { kind: 'circle'; center: Point2; radius: number }
   | { kind: 'ellipse'; center: Point2; majorAxis: Point2; ratio: number }
   /** Exact edge list (line/arc/ellipse/spline), kept unsampled. */
-  | { kind: 'edges'; edges: HatchEdge[] };
+  | { kind: 'edges'; edges: HatchEdge[] }
+) & HatchLoopFlags;
 
 /** One pattern definition line (DXF 53/43,44/45,46/49*). */
 export interface HatchDefLine {
@@ -270,6 +284,8 @@ export interface HatchEntity extends EntityCommon {
   definitionLines?: HatchDefLine[];
   gradient?: HatchGradient;
   seeds?: Point2[];
+  /** DXF 47: derived-boundary pixel size (rides with `derived` loops). */
+  pixelSize?: number;
 }
 
 export interface SolidEntity extends EntityCommon {

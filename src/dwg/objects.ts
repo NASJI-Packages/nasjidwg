@@ -20,6 +20,7 @@ import type {
   AcisEntity, BlockParameter, Color, DimensionEntity, DimensionKind, Entity,
   Face3DEntity,
   FileVersion, GeoData, HatchBoundary, HatchDefLine, HatchEdge, HatchGradient,
+  HatchLoopFlags,
   MeshEntity, MLineVertex, Point2, Point3, PolylineVertex, ProxyObject,
   TableCell,
   TextHAlign, TextVAlign, UnknownObject, ViewportEntity, VPort, XdataGroup,
@@ -1975,6 +1976,13 @@ const decodeHatch = (x: Ctx): Entity => {
   for (let i = 0; i < numPaths; i++) {
     const flag = r.bl();
     if (flag & 4) hasDerived = true;
+    /* the loop-type bits beyond the structural polyline one: audit
+       validates them (a style-1/2 hatch with no external loop is
+       erased), so they are modeled and written back */
+    const lf: HatchLoopFlags = {};
+    if (flag & 1) lf.external = true;
+    if (flag & 4) lf.derived = true;
+    if (flag & 16) lf.outermost = true;
     if (!(flag & 2)) {
       /* edge path: exact segments, kept unsampled */
       const numSegs = r.bl();
@@ -2039,7 +2047,7 @@ const decodeHatch = (x: Ctx): Entity => {
           throw new RangeError('hatch curve type');
         }
       }
-      loops.push(simplifyEdgeLoop(edges));
+      loops.push(Object.assign(simplifyEdgeLoop(edges), lf));
     } else {
       /* polyline path with real bulges */
       const bulges = r.b() === 1;
@@ -2055,7 +2063,7 @@ const decodeHatch = (x: Ctx): Entity => {
         }
         vertices.push(vert);
       }
-      loops.push({ kind: 'polyline', vertices, closed });
+      loops.push({ kind: 'polyline', vertices, closed, ...lf });
     }
     const nBoundary = r.bl();
     if (nBoundary > 10000) throw new RangeError('hatch boundary handles');
@@ -2089,7 +2097,7 @@ const decodeHatch = (x: Ctx): Entity => {
       });
     }
   }
-  if (hasDerived) r.bd();                 /* pixel size */
+  const pixelSize = hasDerived ? r.bd() : undefined;
   const numSeeds = r.bl();
   let seeds: Point2[] | undefined;
   if (numSeeds > 0 && numSeeds <= 10000) {
@@ -2110,7 +2118,8 @@ const decodeHatch = (x: Ctx): Entity => {
     doubled: doubled || undefined,
     definitionLines: definitionLines?.length ? definitionLines : undefined,
     gradient,
-    seeds
+    seeds,
+    pixelSize
   };
 };
 
