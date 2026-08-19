@@ -23,6 +23,20 @@ itself, **every one at zero AUDIT errors**: `node tools/validate-external.mjs`
 opens and AUDITs each one in AutoCAD 2027's Core Console, and fails if any
 of them stops passing.
 
+The R2018 writer additionally survived a heavy-field campaign: the same
+72 MB production drawing (246k entities, AEC content, 9,522 fit splines,
+68 ACIS solids) rewritten in both handle modes — and once more through a
+full DXF round trip — opens in AutoCAD 2027 with **RECOVER and AUDIT at
+0 errors, 0 erased** (the untouched source itself audits 18 errors), and
+its plot matches AutoCAD's plot of the original section for section.
+Eleven writer spellings that our own reader tolerated but AutoCAD did
+not — the R2013+ SPLINE scenario form, multi-solid AcDs payloads, hatch
+spline fit data, forged ellipse normals, true colours collapsed to ACI,
+path-less wipeout IMAGEDEFs, dropped hatch loop-type bits, anonymous
+block naming, mesh linetype inheritance, multi-line hatch patterns in
+the DXF reader, and stale sealed-object re-emission — were each read off
+AutoCAD's own bytes and are pinned by regression tests.
+
 DXF is read and written in both the ASCII and binary forms, at every
 group-code width. The ASCII writer's output is gated in the same external
 run (`DXF` row): the corpus DXF opens in AutoCAD 2027 at **AUDIT 0
