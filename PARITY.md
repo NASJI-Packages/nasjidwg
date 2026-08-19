@@ -172,7 +172,7 @@ downloaded, and `npm test` reproduces every fixture it asserts on.
 | Entity | Status | Notes |
 |---|---|---|
 | LINE, POINT, CIRCLE, ARC, ELLIPSE | ✅ | oracle-verified geometry |
-| TEXT, ATTRIB/ATTDEF (as text), MTEXT | ✅ | R13/14 explicit form + R2000+ dataflags form |
+| TEXT, ATTRIB/ATTDEF (as text), MTEXT | ✅ | R13/14 explicit form + R2000+ dataflags form. ATTRIB/ATTDEF carry their marker (`attribute`) and their 70-flags — bit 1 sets `invisible`, bit 2 `constant` — verified against a field drawing whose 150-unit invisible ATTDEFs used to paint as plain visible text |
 | LWPOLYLINE (bulges, widths, ids) | ✅ | |
 | POLYLINE_2D/3D + vertex folding | ✅ | chain (≤R2000) and owned (R2004+) forms |
 | POLYLINE_MESH / POLYLINE_PFACE + faces | ✅ | mesh entity; 1–2 index faces kept |
@@ -182,7 +182,7 @@ downloaded, and `npm test` reproduces every fixture it asserts on.
 | DIMENSION ×7 + ARC_DIMENSION | ✅ | all kinds, full point sets, oracle-verified |
 | HATCH | ✅ | exact edge paths, polyline paths w/ bulges, deflines, seeds, gradient (R2004+) |
 | MLINE, TOLERANCE, LEADER (full), VIEWPORT | ✅ | |
-| IMAGE / WIPEOUT (+IMAGEDEF path) | ✅ | clip, brightness/contrast/fade |
+| IMAGE / WIPEOUT (+IMAGEDEF path) | ✅ | clip (an open ring — the DXF reader drops the closing duplicate so both codecs agree), the R2010+ inverted-clip bit, brightness/contrast/fade |
 | REGION / 3DSOLID / BODY (ACIS) | ✅ SAT (v1) inline, SAB (v2) inline, and R2013+ payloads from the AcDs section — all 6 containers verified |
 | LIGHT | ✅ | name, type, position/target, intensity, colour |
 | MULTILEADER | ✅ | leader lines, dogleg, landing, text or block content |
@@ -208,6 +208,7 @@ the entity is retained with its source type name — verified per version.
 | Saved view: VIEWTWIST + the viewport UCS | ✅ the whole VPORT record — twist, target/direction, lens, clipping, view mode, circle sides, UCSICON, snap and grid, and the R2000+ per-viewport UCS — read, written and carried through DXF. Graded field for field against AutoCAD's own DXFOUT: **36 of 36 on nine drawings** across R14/R2000/R2007/R2018, including three saved with UCSICON 3, 1 and 0 and one with DVIEW front clipping. A drawing laid out at an angle draws square only if VIEWTWIST survives, and `viewTwistTransform` hands a consumer the 2D transform that squares it |
 | Header UCS (UCSORG / UCSXDIR / UCSYDIR) | ✅ captured into `header.ucs` (and `header.pUcs`), written back by every DWG writer and by the DXF writer as $UCSORG/$UCSXDIR/$UCSYDIR; `ucsTransform` turns it into a basis. Before R2000 this is the only place a rotated layout is recorded |
 | XRECORD retention (typed values, dictionary names) | ✅ DWG + DXF both ways |
+| SORTENTSTABLE (draw order) | ✅ applied, not just parsed: each table reorders its space's entity array in place by ascending sort key (an entity no entry names sorts under its own handle), so the array a consumer draws IS the draw order — DWG and DXF readers agree. Verified pair-for-pair against AutoCAD's own DXF of a 193,382-entry model-space table (518 tables in that drawing; the 507 empty ones skip). The DXF spelling hides a trap: the object's own handle is a group 5 that sits BEFORE the AcDbSortentsTable marker, and only the 331/5 pairs after it are entries |
 | Dynamic-block visibility (states + members) | ✅ | blocks flagged dynamic; every state named in definition order with the entities it shows — 48 states verified |
 | Dynamic-block parameters + actions | ✅ linear/rotation/flip/alignment/base-point parameters with names, labels, descriptions, points and value sets ("Door Size" [24,28,32,36,40] decodes from the fixture), plus the action kinds (move/stretch/scale/flip/rotate/…) |
 | Remaining dynamic-block records (lookup tables, constraint parameters, grips) | 🚧 retained as objects; they carry no geometry of their own |
@@ -242,6 +243,8 @@ the entity is retained with its source type name — verified per version.
 | Reader certified against real AutoCAD files | ✅ **317 real drawings, 139 MB, spanning 1982 to 2027** — every AutoCAD 2027 sample library, field drawings up to 3 MB from real producers, vintage R1.4/R2.6/R2.10/R9/R10/R12/R13/R14 files, and 49 purpose-minted references — all read with **zero throws, zero timeouts, zero CRC mismatches** in 13.2 s with CRC verification enabled, and the decoded geometry matches AutoCAD's own DXFOUT field for field. The whole corpus produces four warning occurrences in total. Twelve reader defects the generated corpus could never expose were found and pinned, among them: the R2007 table cell grammar and the R2010+ inline grid (real tables had been decoding as empty stubs); MLINESTYLE's per-element linetype (a data-stream index through R2013, a handle only from R2018 — this alone had been sealing the record on 155 of 280 files, and the same error lived in the R2007 writer); the MTEXT background-scale field (BD, not BL — 89 MTEXTs were being sealed with their text already parsed); XRECORD trusting a declared size that overran the record; a header-extents guard that let a Z of 7.35e+223 through; the DICTIONARY hard-owner byte that starts at R13c3 (61 of 71 dictionaries in a genuine R13 file were failing silently); GROUP naming; anonymous-block numbering; the 2004+ CMC ByLayer/ByBlock methods; and entities whose owner resolves to nothing, which now land in model space with a warning instead of vanishing. **No test reads any of these files** — they are external oracles only; the suite still generates every fixture it asserts on |
 | OLE2FRAME write | ✅ R14→R2018: frame + embedded compound document byte-for-byte; a hand-built entity gets its 0x62-byte frame header synthesized from the corners. R13 (which predates OLE2FRAME) reports the skip |
 | Dynamic-block visibility write | ✅ R2000→R2018: blocks with visibility states leave as a real BLOCKVISIBILITYPARAMETER — name, prompt, member list and per-state entity lists remapped onto the written file's handles — and come back as the same dynamic block through the reader |
+| Draw order (SORTENTSTABLE) write | ✅ a default write needs no table — fresh handles ascend in array order, and array order IS the draw order. Under `preserveHandles`, every space whose array order differs from its ascending handle order gets a native SORTENTSTABLE under an ACAD_SORTENTS entry in the block record's extension dictionary, its sort keys reusing the space's own handles (the i-th array entity sorts under the i-th smallest handle — no fresh numbers, no collisions). Verified on a 72 MB field drawing: 232,382 model entities keep their exact draw order through a preserved rewrite. R13/R14 cannot name the class and report the skip |
+| R2007+ string-stream sizes past 0x8000 bits | ✅ the two-word spelling the readers always accepted (high word first, low word carrying the 0x8000 continuation flag) is now written too. The old single-word write silently truncated the size: a drawing registering a few hundred application classes — the 72 MB field file carries 245 — wrote a CLASSES section that read back as ZERO classes, and every class-typed record in the file went sealed or missing with it |
 
 ## DWG write — entity coverage
 
@@ -281,7 +284,7 @@ text, leader/mleader/mline → polylines, tolerance → text) and the rest
 | Capability | Status |
 |---|---|
 | ASCII write (R2000) full entity set | ✅ dimensions-by-kind, exact hatch edges + gradient, mline, mesh, image w/ CLASSES + OBJECTS sections, Arabic pipeline, saved view |
-| ASCII tolerant read | ✅ never throws; every model type incl. ATTDEF, ARC_DIMENSION, mesh flavors, IMAGEDEF paths |
+| ASCII tolerant read | ✅ never throws; every model type incl. ATTDEF, ARC_DIMENSION, mesh flavors, IMAGEDEF paths; SORTENTSTABLE draw order applied the same way the DWG reader applies it |
 | Binary DXF read | ✅ verified against a real-world binary DXF byte stream |
 | Binary DXF write | ✅ round-trip tested |
 | OBJECTS section write (root dict, layouts, groups, mline styles, image defs) | ✅ |

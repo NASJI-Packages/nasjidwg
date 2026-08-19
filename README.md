@@ -192,8 +192,9 @@ itself.
 ## What survives a round trip
 
 **Entities** — line, point, circle, arc, ellipse, lwpolyline, polyline
-2D/3D, polygon/polyface/subdivision meshes, text, mtext, attributes,
-insert and minsert, spline (both fit-point and control-point forms),
+2D/3D, polygon/polyface/subdivision meshes, text, mtext, attributes
+(with their invisible and constant flags — a hidden attribute stays
+hidden), insert and minsert, spline (both fit-point and control-point forms),
 solid, trace, 3dface, shape, ray, xline, leader, multileader, tolerance,
 mline, viewport, image, wipeout, PDF/DGN/DWF underlays, hatch (exact edge
 paths, pattern lines, gradients), all eight dimension kinds, light,
@@ -210,7 +211,10 @@ definitions including dynamic-block visibility states (read *and*
 written back as a real BLOCKVISIBILITYPARAMETER) and parameters,
 layouts, groups, mline styles, UCS, views, viewports, appids, dimension
 styles, image and underlay definitions, geographic placement, XRECORDs
-and XDATA.
+and XDATA. Draw order too: a SORTENTSTABLE reorders its space's entity
+array on read — the array a consumer walks IS the order AutoCAD paints —
+and a handle-preserving rewrite writes the table back whenever the array
+no longer matches handle order.
 
 **Proxies and the unknown** — a proxy entity or proxy object keeps its
 application payload bit-for-bit, its cached display list byte-for-byte
