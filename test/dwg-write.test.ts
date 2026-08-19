@@ -3,6 +3,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { readDwg } from '../src/dwg/reader.js';
+import { ByteSink } from '../src/dwg/bitwriter.js';
 import { writeDwg2000, writeDwg2004, writeDwg2007, writeDwg2018 } from '../src/dwg/writer.js';
 import { emptyDrawing } from '../src/core/model.js';
 import type { Drawing, Entity } from '../src/core/model.js';
@@ -266,5 +267,33 @@ describe('header round-trip', () => {
     expect(back.header.vars?.PDMODE).toBe(34);
     near(back.header.vars?.PDSIZE as number, 1.5);
     expect(back.entities.length).toBe(1);
+  });
+});
+
+describe('assembly byte sink', () => {
+  it('speaks the assemblers\' dialect byte for byte', () => {
+    const sink = new ByteSink();
+    const model: number[] = [];
+    sink.push(0xca, 0x0d);            model.push(0xca, 0x0d);
+    sink.append([1, 2, 3]);           model.push(1, 2, 3);
+    sink.append(Uint8Array.from([4, 5])); model.push(4, 5);
+    sink.set(0, 0xff);                model[0] = 0xff;
+    expect(sink.length).toBe(model.length);
+    expect(sink.at(0)).toBe(0xff);
+    expect(Array.from(sink.view(2))).toEqual(model.slice(2));
+    expect(Array.from(sink.bytes())).toEqual(model);
+  });
+
+  it('grows past the plain-Array cap a large objects section used to hit', () => {
+    /* V8 stops growing a plain Array at 112,813,858 elements — push
+       throws RangeError "Invalid array length" — which is exactly where
+       a 246k-entity drawing's objects section landed and writeDwg2018
+       died. The sink has no such ceiling. */
+    const sink = new ByteSink();
+    const chunk = new Uint8Array(1 << 20).fill(0xab);
+    while (sink.length <= 112_813_858) sink.append(chunk);
+    sink.push(0xcd);                  /* the push that used to throw */
+    expect(sink.at(sink.length - 1)).toBe(0xcd);
+    expect(sink.at(sink.length - 2)).toBe(0xab);
   });
 });

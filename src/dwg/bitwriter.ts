@@ -221,6 +221,57 @@ export class BitWriter {
   }
 }
 
+/* nasjidwg — byte-level growable sink for section and file assembly.
+ * The assemblers used to accumulate whole section images in a plain
+ * number[]; V8 refuses to grow an Array past ~112.8M elements (push
+ * throws RangeError "Invalid array length"), so a large drawing whose
+ * objects section crossed that many bytes could not be written at all.
+ * A Uint8Array has no such cap — and holds one byte per byte, not one
+ * tagged slot. */
+export class ByteSink {
+  private buf = new Uint8Array(1024);
+  length = 0;
+
+  private ensure(n: number): void {
+    const need = this.length + n;
+    if (need <= this.buf.length) return;
+    let cap = this.buf.length * 2;
+    while (cap < need) cap *= 2;
+    const next = new Uint8Array(cap);
+    next.set(this.buf.subarray(0, this.length));
+    this.buf = next;
+  }
+
+  push(...values: number[]): void {
+    this.ensure(values.length);
+    for (let i = 0; i < values.length; i++) {
+      this.buf[this.length++] = values[i];
+    }
+  }
+
+  append(bytes: Uint8Array | readonly number[]): void {
+    this.ensure(bytes.length);
+    if (bytes instanceof Uint8Array) {
+      this.buf.set(bytes, this.length);
+      this.length += bytes.length;
+    } else {
+      for (let i = 0; i < bytes.length; i++) this.buf[this.length++] = bytes[i];
+    }
+  }
+
+  at(i: number): number { return this.buf[i]; }
+  set(i: number, v: number): void { this.buf[i] = v; }
+
+  /** Live window into the accumulated bytes (no copy) — consume it
+   *  before the next push, which may reallocate the buffer under it. */
+  view(start = 0, end = this.length): Uint8Array {
+    return this.buf.subarray(start, end);
+  }
+
+  /** The finished image (an owned copy, trimmed to length). */
+  bytes(): Uint8Array { return this.buf.slice(0, this.length); }
+}
+
 /** The DWG CRC-16 (reflected poly 0xA001, i.e. CRC-16/ARC with a seed). */
 export const crc16 = (
   seed: number, data: Uint8Array, start = 0, end = data.length

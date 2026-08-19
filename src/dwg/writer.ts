@@ -12,7 +12,7 @@
  * the drawing's warnings array.
  */
 
-import { BitWriter, crc16 } from './bitwriter.js';
+import { BitWriter, ByteSink, crc16 } from './bitwriter.js';
 import { BitReader } from './bitstream.js';
 import { compressR2004 } from './compress.js';
 import { SEAL_MAGIC, encodingGroup } from './objects.js';
@@ -107,10 +107,8 @@ export function assemble2004(
   /** R2018: an AcDb:AcDsPrototype_1b image (solid-modeling payloads). */
   acds?: Uint8Array
 ): Uint8Array {
-  const out: number[] = [];
-  const push = (b: Uint8Array | readonly number[]): void => {
-    for (let i = 0; i < b.length; i++) out.push((b as Uint8Array)[i] as number);
-  };
+  const out = new ByteSink();
+  const push = (b: Uint8Array | readonly number[]): void => { out.append(b); };
   const u32 = (v: number): void => {
     out.push(v & 0xff, (v >>> 8) & 0xff, (v >>> 16) & 0xff, (v >>> 24) & 0xff);
   };
@@ -156,7 +154,7 @@ export function assemble2004(
     Uint8Array.from(SN_CLASS_END), 8, true);
 
   /* objects section + handles map (offsets are section-relative here) */
-  const objBytes: number[] = [];
+  const objBytes = new ByteSink();
   /* AutoCAD never places an object at offset 0 — its own R2004 and R2018
      files both open the section with the same four bytes (CA 0D 00 00)
      and put the first object at offset 4; offset 0 reads like the runtime
@@ -184,13 +182,13 @@ export function assemble2004(
         objBytes.push(lo | 0x80);
       }
     }
-    for (const b of obj.bytes) objBytes.push(b);
-    const crc = crc16(0xC0C1, Uint8Array.from(objBytes.slice(offset)));
+    objBytes.append(obj.bytes);
+    const crc = crc16(0xC0C1, objBytes.view(offset));
     objBytes.push(crc & 0xff, (crc >> 8) & 0xff);
   }
-  const objectsSec = Uint8Array.from(objBytes);
+  const objectsSec = objBytes.bytes();
 
-  const mapBytes: number[] = [];
+  const mapBytes = new ByteSink();
   {
     let idx = 0;
     while (idx < mapEntries.length) {
@@ -224,17 +222,17 @@ export function assemble2004(
         lastOff = en.offset;
       }
       const pageSize = mapBytes.length - pageStart;
-      mapBytes[pageStart] = (pageSize >> 8) & 0xff;
-      mapBytes[pageStart + 1] = pageSize & 0xff;
-      const crc = crc16(0xC0C1, Uint8Array.from(mapBytes.slice(pageStart)));
+      mapBytes.set(pageStart, (pageSize >> 8) & 0xff);
+      mapBytes.set(pageStart + 1, pageSize & 0xff);
+      const crc = crc16(0xC0C1, mapBytes.view(pageStart));
       mapBytes.push((crc >> 8) & 0xff, crc & 0xff);
     }
     const tStart = mapBytes.length;
     mapBytes.push(0, 2);
-    const tcrc = crc16(0xC0C1, Uint8Array.from(mapBytes.slice(tStart)));
+    const tcrc = crc16(0xC0C1, mapBytes.view(tStart));
     mapBytes.push((tcrc >> 8) & 0xff, tcrc & 0xff);
   }
-  const handlesSec = Uint8Array.from(mapBytes);
+  const handlesSec = mapBytes.bytes();
 
   interface Sec { name: string; data: Uint8Array }
   const sections: Sec[] = [
@@ -603,7 +601,7 @@ export function assemble2004(
     let x = 1;
     for (let i = 0; i < dec.length; i++) {
       x = (Math.imul(x, 0x343fd) + 0x269ec3) >>> 0;
-      out[encHeaderAt + i] = dec[i] ^ ((x >>> 16) & 0xff);
+      out.set(encHeaderAt + i, dec[i] ^ ((x >>> 16) & 0xff));
     }
   }
 
@@ -615,10 +613,10 @@ export function assemble2004(
     new DataView(tail.buffer).setUint32(0, PAGE_MAP_TYPE, true);
     tail[12] = 0x02;                            /* compression method slot */
     push(tail);
-    for (let i = 0; i < 0x6c; i++) out.push(out[encHeaderAt + i]);
+    for (let i = 0; i < 0x6c; i++) out.push(out.at(encHeaderAt + i));
   }
   void handseed;
-  return Uint8Array.from(out);
+  return out.bytes();
 }
 
 /** Millimeters -> DWG lineweight code (29 = ByLayer). */
@@ -4135,10 +4133,8 @@ const writeDwgImpl = (
       skipped
     };
   }
-  const out: number[] = [];
-  const push = (bytes: Uint8Array | readonly number[]): void => {
-    for (let i = 0; i < bytes.length; i++) out.push((bytes as Uint8Array)[i] as number);
-  };
+  const out = new ByteSink();
+  const push = (bytes: Uint8Array | readonly number[]): void => { out.append(bytes); };
   const pushRS = (v: number): void => { out.push(v & 0xff, (v >> 8) & 0xff); };
   const pushRL = (v: number): void => { pushRS(v & 0xffff); pushRS(Math.floor(v / 0x10000)); };
 
@@ -4151,8 +4147,7 @@ const writeDwgImpl = (
     const sizeStart = out.length;
     pushRL(data.length);
     push(data);
-    const arr = Uint8Array.from(out.slice(sizeStart));
-    pushRS(crc16(0xC0C1, arr));
+    pushRS(crc16(0xC0C1, out.view(sizeStart)));
     push(end);
     return [addr, out.length - addr];
   };
@@ -4212,8 +4207,7 @@ const writeDwgImpl = (
     }
     for (const p of msParts) pushRS(p);
     push(obj.bytes);
-    const whole = Uint8Array.from(out.slice(offset));
-    pushRS(crc16(0xC0C1, whole));
+    pushRS(crc16(0xC0C1, out.view(offset)));
   }
 
   /* object map section (2) */
@@ -4255,16 +4249,15 @@ const writeDwgImpl = (
       }
       void startIdx;
       const pageSize = out.length - pageStart;
-      out[pageStart] = (pageSize >> 8) & 0xff;    /* big-endian size */
-      out[pageStart + 1] = pageSize & 0xff;
-      const pageArr = Uint8Array.from(out.slice(pageStart));
-      const crc = crc16(0xC0C1, pageArr);
+      out.set(pageStart, (pageSize >> 8) & 0xff); /* big-endian size */
+      out.set(pageStart + 1, pageSize & 0xff);
+      const crc = crc16(0xC0C1, out.view(pageStart));
       out.push((crc >> 8) & 0xff, crc & 0xff);    /* big-endian CRC */
     }
     /* terminator page */
     const tStart = out.length;
     out.push(0, 2);
-    const tcrc = crc16(0xC0C1, Uint8Array.from(out.slice(tStart)));
+    const tcrc = crc16(0xC0C1, out.view(tStart));
     out.push((tcrc >> 8) & 0xff, tcrc & 0xff);
   }
   const mapSize = out.length - mapAddr;
@@ -4388,7 +4381,7 @@ const writeDwgImpl = (
   }
 
   /* patch locators + thumbnail address + file header CRC */
-  const data = Uint8Array.from(out);
+  const data = out.bytes();
   const dv = new DataView(data.buffer);
   dv.setUint32(previewAddrPos, previewAddr, true);
   const locs: [number, number, number][] = V === 14
