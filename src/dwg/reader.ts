@@ -156,10 +156,39 @@ export const readDwg = (
   }
   const failures = new Map<string, number>();
 
-  const objects = new Map<number, RawObject>();
+  /* Handle -> record. DWG handles are in practice a dense counter, so a
+     plain array replaces the Map that was the hottest line of the whole
+     read (1.7M inserts with growth rehashing). Records whose body carries
+     a handle outside the map's range land in the overflow map; sparse
+     handle spaces fall back to a Map outright. */
+  const omap = readObjectMap(handlesSection);
+  let maxHandle = 0;
+  for (let i = 0; i < omap.count; i++) {
+    if (omap.handles[i] > maxHandle) maxHandle = omap.handles[i];
+  }
+  const dense = maxHandle > 0 && maxHandle < omap.count * 8 + 4096;
+  const objArr: (RawObject | undefined)[] | null =
+    dense ? new Array(maxHandle + 1).fill(undefined) : null;
+  const objMap: Map<number, RawObject> | null = dense ? null : new Map();
+  const overflow = new Map<number, RawObject>();
+  const objects = {
+    get(h: number): RawObject | undefined {
+      if (objArr) {
+        return (h >= 0 && h <= maxHandle) ? objArr[h] : overflow.get(h);
+      }
+      return objMap!.get(h);
+    },
+    set(h: number, o: RawObject): void {
+      if (objArr) {
+        if (h >= 0 && h <= maxHandle) objArr[h] = o;
+        else overflow.set(h, o);
+      } else objMap!.set(h, o);
+    },
+  };
   const order: RawObject[] = [];          /* file order matters for chains */
   let crcChecked = 0, crcBad = 0;
-  for (const { handle, offset } of readObjectMap(handlesSection)) {
+  for (let mi = 0; mi < omap.count; mi++) {
+    const handle = omap.handles[mi], offset = omap.offsets[mi];
     try {
       if (offset < 0 || offset + 2 > objectSpace.length) throw new RangeError('offset');
       /* MS size prefix, then (R2010+) the handle-stream split as UMC bits */
@@ -210,6 +239,9 @@ export const readDwg = (
           };
         }
         objects.set(raw.handle, raw);
+        /* file position, for the vertex sequence fallback — a third
+           1.7M-entry Map built just to answer indexOf was pure overhead */
+        raw.fileIndex = order.length;
         order.push(raw);
       }
     } catch (err) {
@@ -352,9 +384,6 @@ export const readDwg = (
       list.push(raw);
     }
   }
-  /** Position of each object in file order, for the sequence fallback. */
-  const orderIndex = new Map<RawObject, number>();
-  order.forEach((raw, i) => orderIndex.set(raw, i));
 
   const ownedVerts = (
     raw: RawObject, handles: number[]
@@ -372,7 +401,7 @@ export const readDwg = (
     /* Some producers write the vertices with neither owned-handle list nor
        owner back-pointer, leaving only the file order to say what belongs
        to what: take the run that follows, up to the closing SEQEND. */
-    const start = orderIndex.get(raw);
+    const start = raw.fileIndex;
     if (start === undefined) return [];
     const out: RawObject[] = [];
     for (let i = start + 1; i < order.length; i++) {
@@ -662,10 +691,12 @@ export const readDwg = (
   }
 
   /* ---- named objects: layouts, groups, mline styles, ucs/views/vports ---- */
-  const entityByHandle = new Map<number, Entity>();
-  for (const raw of order) {
-    if (raw.entity) entityByHandle.set(raw.handle, raw.entity);
-  }
+  /* answered from the objects map — building a second 1.7M-entry Map for
+     three lookups cost more than every lookup it ever served */
+  const entityByHandle = {
+    has: (h: number) => !!objects.get(h)?.entity,
+    get: (h: number) => objects.get(h)?.entity,
+  };
   const blockNameOf = (h?: number): string | undefined =>
     h === undefined ? undefined : blockHeaderByHandle.get(h)?.table?.name;
 

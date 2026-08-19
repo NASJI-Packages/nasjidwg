@@ -7,15 +7,28 @@
  * page carries absolute values, not deltas from the previous page.
  */
 
-export interface ObjectMapEntry {
-  handle: number;
+export interface ObjectMap {
+  /** Entry count; handles[i]/offsets[i] are one pair. Parallel arrays,
+   *  not objects: a heavy drawing has ~1.7M entries and a wrapper object
+   *  per pair was measurable GC pressure before the decode even began. */
+  count: number;
+  handles: Float64Array;
   /** Absolute file offset (R13-R2000) or offset into AcDb:AcDbObjects
    *  (R2004+); the reader knows which. */
-  offset: number;
+  offsets: Float64Array;
 }
 
-export const readObjectMap = (section: Uint8Array): ObjectMapEntry[] => {
-  const entries: ObjectMapEntry[] = [];
+export const readObjectMap = (section: Uint8Array): ObjectMap => {
+  /* grow-by-doubling typed arrays; section length bounds the entry count */
+  let cap = Math.max(1024, section.length >> 2);
+  let handles = new Float64Array(cap);
+  let offsets = new Float64Array(cap);
+  let count = 0;
+  const grow = (): void => {
+    cap *= 2;
+    const h2 = new Float64Array(cap); h2.set(handles); handles = h2;
+    const o2 = new Float64Array(cap); o2.set(offsets); offsets = o2;
+  };
   let pos = 0;
 
   /* byte-aligned modular chars (7 data bits, high bit = continuation) */
@@ -56,9 +69,12 @@ export const readObjectMap = (section: Uint8Array): ObjectMapEntry[] => {
     while (pos < end) {
       handle += umc(end);
       offset += mc(end);
-      entries.push({ handle, offset });
+      if (count === cap) grow();
+      handles[count] = handle;
+      offsets[count] = offset;
+      count++;
     }
     pos = end + 2;                        /* skip the page CRC */
   }
-  return entries;
+  return { count, handles, offsets };
 };

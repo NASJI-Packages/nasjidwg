@@ -55,6 +55,9 @@ export class BitReader {
   /** Scratch for unaligned doubles; built on first use, since most
    *  readers only ever meet aligned ones. */
   private scratch?: DataView;
+  /** Byte/double alias pair for the unaligned rd fast path. */
+  private sBytes?: Uint8Array;
+  private sF64?: Float64Array;
   /** A view over the whole buffer, so an aligned double is one read.
    *  `base` is this reader's byte offset within it. */
   private view: DataView;
@@ -86,8 +89,17 @@ export class BitReader {
     return v;
   }
 
-  /** BB — two bits. */
-  bb(): number { return (this.b() << 1) | this.b(); }
+  /** BB — two bits. It fronts every BS/BL/BD in the stream, so it reads
+   *  directly with a single bounds check instead of two b() round trips. */
+  bb(): number {
+    const pos = this.pos;
+    if (pos + 2 > this.endBit) this.need(2);
+    const i = pos >> 3, off = pos & 7;
+    this.pos = pos + 2;
+    if (off < 7) return (this.data[i] >> (6 - off)) & 3;
+    /* straddles the byte boundary */
+    return ((this.data[i] & 1) << 1) | ((this.data[i + 1] ?? 0) >> 7);
+  }
 
   /** 3B — three bits (spec 3B, used by R2007+ section headers). */
   bbb(): number { return (this.bb() << 1) | this.b(); }
@@ -152,9 +164,36 @@ export class BitReader {
       this.pos = pos + 64;
       return this.view.getFloat64(this.base + (pos >> 3), true);
     }
+    /* Unaligned: bit-packed entity doubles nearly always land here. The
+       bit stream is MSB-first, so on a BIG-endian reading three 32-bit
+       words shifted by the bit offset reproduce the 8 payload bytes — two
+       stores and one load on a reused scratch instead of an 8-byte merge
+       loop. The last word may poke past the data end; the view spans the
+       whole underlying buffer, so only a read at the buffer's true tail
+       needs the byte fallback. */
     const scratch = this.scratch ??= new DataView(new ArrayBuffer(8));
-    for (let i = 0; i < 8; i++) scratch.setUint8(i, this.rc());
-    return scratch.getFloat64(0, true);
+    const i = this.base + (pos >> 3), off = pos & 7, inv = 32 - off;
+    if (i + 12 <= this.view.byteLength) {
+      const v = this.view;
+      const w0 = v.getUint32(i, false), w1 = v.getUint32(i + 4, false);
+      const w2 = v.getUint32(i + 8, false);
+      scratch.setUint32(0, ((w0 << off) | (w1 >>> inv)) >>> 0, false);
+      scratch.setUint32(4, ((w1 << off) | (w2 >>> inv)) >>> 0, false);
+      this.pos = pos + 64;
+      return scratch.getFloat64(0, true);
+    }
+    const d = this.data, j = pos >> 3, jinv = 8 - off;
+    let sb = this.sBytes;
+    if (!sb) {
+      const ab = new ArrayBuffer(8);
+      sb = this.sBytes = new Uint8Array(ab);
+      this.sF64 = new Float64Array(ab);
+    }
+    for (let k = 0; k < 8; k++) {
+      sb[k] = ((d[j + k] << off) | (d[j + k + 1] >> jinv)) & 0xFF;
+    }
+    this.pos = pos + 64;
+    return this.sF64![0];
   }
 
   /** BS — bitshort. */
@@ -199,6 +238,14 @@ export class BitReader {
   bd3(): [number, number, number] { return [this.bd(), this.bd(), this.bd()]; }
   rd2(): [number, number] { return [this.rd(), this.rd()]; }
 
+  /** One byte off the bit stream without the rc() bounds ceremony —
+   *  caller has already need()ed the whole run. */
+  private byteAt(pos: number): number {
+    const d = this.data, i = pos >> 3, off = pos & 7;
+    if (off === 0) return d[i];
+    return ((d[i] << off) | ((d[i + 1] ?? 0) >> (8 - off))) & 0xFF;
+  }
+
   /** DD — double with default: patches bytes of the default's LE image. */
   dd(dflt: number): number {
     const code = this.bb();
@@ -207,11 +254,17 @@ export class BitReader {
     const scratch = this.scratch ??= new DataView(new ArrayBuffer(8));
     scratch.setFloat64(0, dflt, true);
     if (code === 1) {
-      for (let i = 0; i < 4; i++) scratch.setUint8(i, this.rc());
+      this.need(32);
+      const p = this.pos;
+      for (let i = 0; i < 4; i++) scratch.setUint8(i, this.byteAt(p + i * 8));
+      this.pos = p + 32;
     } else {                              /* code 2: bytes 4,5 then 0..3 */
-      scratch.setUint8(4, this.rc());
-      scratch.setUint8(5, this.rc());
-      for (let i = 0; i < 4; i++) scratch.setUint8(i, this.rc());
+      this.need(48);
+      const p = this.pos;
+      scratch.setUint8(4, this.byteAt(p));
+      scratch.setUint8(5, this.byteAt(p + 8));
+      for (let i = 0; i < 4; i++) scratch.setUint8(i, this.byteAt(p + 16 + i * 8));
+      this.pos = p + 48;
     }
     return scratch.getFloat64(0, true);
   }
@@ -280,6 +333,34 @@ export class BitReader {
     let value = 0;
     for (let i = 0; i < counter; i++) value = value * 256 + this.rc();
     return { code, value };
+  }
+
+  /** H resolved against its owner, allocation-free. A large drawing reads
+   *  handle references tens of millions of times; the {code,value} object
+   *  h() returns was the single biggest source of GC pressure in a whole
+   *  readDwg, so the hot path never builds one. */
+  hAbs(owner: number): number {
+    const first = this.rc();
+    const code = (first >> 4) & 0x0F;
+    const counter = first & 0x0F;
+    let value = 0;
+    for (let i = 0; i < counter; i++) value = value * 256 + this.rc();
+    switch (code) {
+      case 0x6: return owner + 1;
+      case 0x8: return owner - 1;
+      case 0xA: return owner + value;
+      case 0xC: return owner - value;
+      default: return value;              /* 2,3,4,5: absolute */
+    }
+  }
+
+  /** H's raw stored value, allocation-free (for absolute references). */
+  hValue(): number {
+    const first = this.rc();
+    const counter = first & 0x0F;
+    let value = 0;
+    for (let i = 0; i < counter; i++) value = value * 256 + this.rc();
+    return value;
   }
 
   /** T — length-prefixed (BS) codepage text. Returns raw bytes; the caller

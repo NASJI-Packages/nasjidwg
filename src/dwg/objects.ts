@@ -26,6 +26,21 @@ import type {
   XdataValue
 } from '../core/model.js';
 import type { DwgClassInfo } from './classes.js';
+/* The structural member types, checked once per record — a regex test per
+ * 1.7M records showed up in profiles. */
+const STRUCTURAL_TYPES = new Set([
+  'POLYLINE_2D', 'POLYLINE_3D', 'BLOCK', 'ENDBLK', 'SEQEND']);
+
+/* Colour singletons. A million-entity drawing builds a Color object per
+ * entity; ByLayer alone accounted for most of them, and none is ever
+ * mutated (consumers clone before editing), so every entity shares one
+ * frozen instance per value. */
+const BY_LAYER: Color = Object.freeze({ kind: 'byLayer' } as Color);
+const BY_BLOCK: Color = Object.freeze({ kind: 'byBlock' } as Color);
+const ACI_COLORS: readonly Color[] = Object.freeze(
+  Array.from({ length: 256 }, (_, i) =>
+    Object.freeze({ kind: 'aci', index: i } as Color)));
+
 
 export interface DecodeContext {
   version: FileVersion;
@@ -98,6 +113,9 @@ export interface RawObject {
   handle: number;
   typeName: string;
   isEntity: boolean;
+  /** Position in file order, stamped by the reader's main loop (the vertex
+   *  sequence fallback needs it; a Map built for it was pure overhead). */
+  fileIndex?: number;
   entity?: Entity;
   /* common entity relations */
   entmode?: number;                       /* 0 owner block, 1 paper, 2 model */
@@ -492,7 +510,7 @@ class Ctx {
     return decodeCadText(raw);
   }
 
-  handle(owner: number): number { return resolveHandle(this.hr.h(), owner); }
+  handle(owner: number): number { return this.hr.hAbs(owner); }
 
   /** ENC (R2004+ entities) / CMC (before) — reads hr for DBCOLOR refs. */
   entityColor(): Color {
@@ -526,15 +544,15 @@ class Ctx {
        field AutoCAD leaves 0 in 2004+ CMCs, so falling through to it read
        every ByLayer as ByBlock (caught against AutoCAD 2027's own
        MLINESTYLE records, whose BYLAYER elements decoded as byBlock). */
-    if (method === 0xc1) return { color: { kind: 'byBlock' }, index: 0 };
-    if (method === 0xc0) return { color: { kind: 'byLayer' }, index: 256 };
+    if (method === 0xc1) return { color: BY_BLOCK, index: 0 };
+    if (method === 0xc0) return { color: BY_LAYER, index: 256 };
     return { color: this.indexColor(index), index };
   }
 
   indexColor(index: number): Color {
-    if (index === 256 || index === -1) return { kind: 'byLayer' };
-    if (index === 0) return { kind: 'byBlock' };
-    return { kind: 'aci', index: Math.abs(index) & 0xff };
+    if (index === 256 || index === -1) return BY_LAYER;
+    if (index === 0) return BY_BLOCK;
+    return ACI_COLORS[Math.abs(index) & 0xff];
   }
 
   /** Common entity data + common entity handles. */
@@ -546,7 +564,7 @@ class Ctx {
 
   commonEntity(): CommonEntity {
     const { r, v } = this;
-    const handle = r.h().value;
+    const handle = r.hValue();
     this.xdata = parseEed(r, this.c);
     if (r.b()) {                          /* cached display list */
       const size = v <= 2007 ? r.rl() : r.bll();
@@ -631,7 +649,7 @@ class Ctx {
    *  handle stream inline after the data instead of trusting bitsize. */
   commonObject(isControl: boolean): { handle: number } {
     const { r, v } = this;
-    const handle = r.h().value;
+    const handle = r.hValue();
     this.xdata = parseEed(r, this.c);
     if (v <= 14) {
       /* R13/R14: the handle-stream position lives here, after EED */
@@ -3539,7 +3557,7 @@ export const decodeObjectBody = (
     } catch {
       failed = true;
     }
-    const structural = /^(VERTEX_|POLYLINE_[23]D|BLOCK$|ENDBLK$|SEQEND$)/.test(typeName);
+    const structural = STRUCTURAL_TYPES.has(typeName) || typeName.startsWith('VERTEX_');
     const bareUnknown = entity?.type === 'unknown' && entity.data === undefined;
     if ((failed || bareUnknown) && !structural) {
       r.pos = dpos;

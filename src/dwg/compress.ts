@@ -26,6 +26,23 @@ class Packed {
 
   next(): number { return this.at < this.src.length ? this.src[this.at++] : 0; }
 
+  /** Copy `n` source bytes straight into `out` at `write` (short reads
+   *  zero-fill, matching next()'s salvage semantics). One set() replaces a
+   *  method call per byte on the literal runs that dominate a big page. */
+  copyInto(out: Uint8Array, write: number, n: number): void {
+    const src = this.src;
+    const avail = Math.min(n, Math.max(0, src.length - this.at));
+    /* the byte-wise original tolerated writes past out's end (tail padding
+       is never read) and always consumed the source — keep both */
+    const room = Math.min(avail, Math.max(0, out.length - write));
+    if (room > 0) out.set(src.subarray(this.at, this.at + room), write);
+    this.at += avail;
+    const zeroFrom = write + avail;
+    if (avail < n && zeroFrom < out.length) {
+      out.fill(0, zeroFrom, Math.min(write + n, out.length));
+    }
+  }
+
   /** The escape chain: 0xFF for every 0x00 byte, plus the byte that ends it. */
   private escaped(): number {
     let total = 0;
@@ -59,7 +76,8 @@ export function decompressR2004Into(
 
   /* Emit `n` raw bytes and hand back the opcode stored right behind them. */
   const literals = (n: number): number => {
-    for (let i = 0; i < n; i++) out[write++] = packed.next();
+    packed.copyInto(out, write, n);
+    write += n;
     return packed.next();
   };
 
@@ -102,13 +120,18 @@ export function decompressR2004Into(
         `R2004 unpack: back-reference ${distance} reaches before the output start at ${write}`);
     }
 
-    /* One byte at a time, deliberately. A distance shorter than the length
-     * is how the format spells a repeating run: the copy has to read back
-     * bytes it wrote moments ago, which a block move would not do. The last
-     * copy of a page may run into the buffer's tail; that overshoot is
-     * padding and is never read. */
+    /* A distance shorter than the length is how the format spells a
+     * repeating run: that copy must read back bytes it wrote moments ago,
+     * so it stays byte-at-a-time. A distance >= length has no overlap and
+     * moves as one block. The last copy of a page may run into the
+     * buffer's tail; that overshoot is padding and is never read. */
     const stop = Math.min(write + length, out.length);
-    for (; write < stop; write++) out[write] = out[write - distance];
+    if (distance >= stop - write) {
+      out.copyWithin(write, write - distance, write - distance + (stop - write));
+      write = stop;
+    } else {
+      for (; write < stop; write++) out[write] = out[write - distance];
+    }
 
     /* The literal run that follows, named by the low bits of whichever byte
      * ended the back-reference. Zero means the count is in the next opcode. */
