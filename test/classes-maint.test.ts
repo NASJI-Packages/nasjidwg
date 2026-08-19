@@ -7,6 +7,9 @@
 import { describe, expect, it } from 'vitest';
 import { BitWriter } from '../src/dwg/bitwriter.js';
 import { readClasses } from '../src/dwg/classes.js';
+import { readDwg } from '../src/dwg/reader.js';
+import { writeDwg2007, writeDwg2018 } from '../src/dwg/writer.js';
+import { emptyDrawing } from '../src/core/model.js';
 
 /** Build a 2004-layout CLASSES section (no sentinel) with the given
  *  records; each record's five-long tail takes explicit values so the
@@ -66,4 +69,41 @@ describe('readClasses R2004+ five-bitlong record tail', () => {
     expect(classes.get(500)?.isEntity).toBe(true);
     expect(classes.get(501)?.dxfName).toBe('IMAGEDEF');
   });
+});
+
+/* The R2007+ CLASSES section keeps its names in a string stream whose
+ * size field is one RS through 0x7FFF bits and TWO words past that (high
+ * word first, low word carrying the 0x8000 continuation flag). The writer
+ * used to emit the single-word form always, silently truncating the size
+ * — a drawing carrying a few hundred application classes (a real 72 MB
+ * field file registers 245) wrote a CLASSES section that read back as
+ * ZERO classes, and every class-typed record with it. */
+describe('CLASSES string stream past 0x8000 bits', () => {
+  const proxyHeavy = () => {
+    const d = emptyDrawing();
+    d.unknownObjects = Array.from({ length: 90 }, (_, i) => {
+      const name = `NASJI_TEST_CLASS_${String(i).padStart(3, '0')}_` + 'X'.repeat(30);
+      return {
+        sourceType: name,
+        appClass: {
+          dxfName: name, cppName: 'AcDb' + name,
+          appName: 'NasjiTestApp |Product Desc: string stream witness'
+        },
+        encoding: 2018, data: 'qg==', dataBits: 8      /* one 0xAA byte */
+      };
+    });
+    return d;
+  };
+
+  it.each([['R2007', writeDwg2007], ['R2018', writeDwg2018]] as const)(
+    '%s: 90 sealed classes survive the round trip', (_v, writer) => {
+      const enc = _v === 'R2007' ? 2007 : 2018;
+      const d = proxyHeavy();
+      for (const u of d.unknownObjects!) u.encoding = enc;
+      const back = readDwg(writer(d).data);
+      const names = (back.unknownObjects ?? []).map((u) => u.sourceType).sort();
+      expect(names.length).toBe(90);
+      expect(names[0]).toBe('NASJI_TEST_CLASS_000_' + 'X'.repeat(30));
+      expect(names[89]).toBe('NASJI_TEST_CLASS_089_' + 'X'.repeat(30));
+    });
 });

@@ -1110,6 +1110,21 @@ const writeDwgImpl = (
     return sw;
   };
 
+  /** The R2007+ string-stream size, in the reader's own two-word spelling:
+   *  one RS through 0x7FFF bits, and past that a high word FIRST, then the
+   *  low word with its 0x8000 continuation flag. The old single-word write
+   *  silently truncated any stream of 32768+ bits — a drawing carrying a
+   *  few hundred application classes has exactly that in its CLASSES
+   *  section, and the whole section read back as zero classes. */
+  const strStreamSize = (w: BitWriter, size: number): void => {
+    if (size >= 0x8000) {
+      w.rs(size >> 15);
+      w.rs((size & 0x7fff) | 0x8000);
+    } else {
+      w.rs(size);
+    }
+  };
+
   /** Close the data area: append the string stream, its size and the
    *  end flag, and return the resulting bitsize. */
   const closeData = (w: BitWriter, sw: BitWriter | null): number => {
@@ -1122,7 +1137,7 @@ const writeDwgImpl = (
       return w.pos;
     }
     w.appendBits(sw);
-    w.rs(size & 0x7fff);
+    strStreamSize(w, size);
     w.b(1);                               /* strings-present flag */
     return w.pos;
   };
@@ -3931,7 +3946,7 @@ const writeDwgImpl = (
     const strSize = hvStr ? hvStr.pos : 0;
     if (hvStr) {
       hv.appendBits(hvStr);
-      hv.rs(strSize & 0x7fff);
+      strStreamSize(hv, strSize);
       hv.b(1);                            /* strings-present flag */
     }
     const out = new BitWriter();
@@ -4022,7 +4037,7 @@ const writeDwgImpl = (
       clsW.strTarget = undefined;
       const strSize = strW.pos;
       clsW.appendBits(strW);
-      clsW.rs(strSize & 0x7fff);
+      strStreamSize(clsW, strSize);
       clsW.b(1);                          /* strings-present flag */
       clsW.patchRl(sizePos, clsW.pos - sizePos);
     }
