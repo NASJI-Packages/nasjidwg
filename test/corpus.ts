@@ -281,6 +281,11 @@ export const sampleDrawing = (): Drawing => {
     name: 'FRONT_WALL', description: 'الحائط الأمامي',
     selectable: true, entityHandles: ['30', '31']
   }];
+  /* the group's members are real entities: source handles live on them,
+     and the DXF writer maps each to the handle the output file assigns
+     (a member spelled verbatim would dangle — AUDIT strips those) */
+  d.entities[0].handle = '30';
+  d.entities[1].handle = '31';
   d.mlineStyles = [{
     name: 'STANDARD', description: 'two parallel lines',
     elements: [

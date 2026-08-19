@@ -846,6 +846,9 @@ export interface VPort {
   upperRight: Point2;
   center: Point2;
   height: number;
+  /** DXF group 41: the view aspect ratio, width / height. (The DWG record
+   *  itself stores the view width; the readers and writers convert at that
+   *  boundary, so this field always speaks DXF.) */
   aspectRatio?: number;
   direction?: Point3;
   target?: Point3;

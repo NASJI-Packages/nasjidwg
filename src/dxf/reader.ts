@@ -1500,7 +1500,7 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
         if (type === 'ENDSEC' || type === 'EOF') break;
         const rec = collectGroups(k, end);
         const q = G(rec.g);
-        if (type === 'DICTIONARY') {
+        if (type === 'DICTIONARY' || type === 'ACDBDICTIONARYWDFLT') {
           /* remember which name each entry handle is listed under; a
              group 3 binds to the next 350/360 that follows it */
           let entryName: string | null = null;
@@ -1511,6 +1511,11 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
               entryName = null;
             }
           }
+        } else if (type === 'ACDBPLACEHOLDER') {
+          /* plot-style plumbing. The writer synthesizes the canonical
+             ACAD_PLOTSTYLENAME dictionary and placeholder on every
+             write, so the incoming pair is consumed here — sealing it
+             would stack a duplicate on every round trip. */
         } else if (type === 'ACAD_PROXY_OBJECT') {
           /* the dictionary-owned twin of the proxy entity: same payload
              discipline, named afterwards through its owning dictionary */

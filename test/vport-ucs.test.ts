@@ -129,3 +129,123 @@ describe('the saved view survives every path', () => {
     expect(vp.target).toEqual({ x: 0, y: 0, z: 0 });
   });
 });
+
+/* The values AutoCAD 2027 reports for a production AC1032 file whose
+ * record stores 8.045723887507847 beside a 3.4212145347610234 height:
+ * group 41 comes back 2.351715686274510 — the ratio, not the width. */
+const ACAD_RATIO = 2.351715686274510;
+
+/** the numeric groups that follow a header variable, code lines skipped */
+const varTail = (dxf: string, name: string, count: number): number[] => {
+  const lines = dxf.split(/\r?\n/).map((s) => s.trim());
+  const i = lines.indexOf(name);
+  expect(i, name + ' present').toBeGreaterThan(-1);
+  const vals: number[] = [];
+  for (let k = i + 1; vals.length < count; k += 2) vals.push(Number(lines[k + 1]));
+  return vals;
+};
+
+/** one numeric group out of the *Active VPORT record */
+const vportGroup = (dxf: string, code: number): number => {
+  const a = dxf.indexOf('AcDbViewportTableRecord');
+  expect(a).toBeGreaterThan(-1);
+  const lines = dxf.slice(a, dxf.indexOf('ENDTAB', a)).split(/\r?\n/);
+  const i = lines.findIndex((s) => s.trim() === String(code));
+  expect(i, 'group ' + code + ' present').toBeGreaterThan(-1);
+  return Number(lines[i + 1]);
+};
+
+describe('group 41 is a ratio, not the view width', () => {
+  const writers: [string, (d: Drawing) => { data: Uint8Array }][] = [
+    ['R14', writeDwgR14], ['R2000', writeDwg2000],
+    ['R2007', writeDwg2007], ['R2018', writeDwg2018]
+  ];
+  it.each(writers)('%s round-trips the ratio through the width slot', (_name, write) => {
+    const d = turned();
+    active(d)!.aspectRatio = ACAD_RATIO;
+    const back = readDwg(write(d).data);
+    /* the slot stores width = ratio x height; what comes back must be
+       the ratio again, not the width the old walk reported (8.05) */
+    expect(active(back)!.aspectRatio).toBeCloseTo(ACAD_RATIO, 9);
+  });
+
+  it('writeDxf states the ratio in 41, matching AutoCAD to the digit', () => {
+    const d = turned();
+    active(d)!.aspectRatio = ACAD_RATIO;
+    expect(vportGroup(writeDxf(d), 41)).toBeCloseTo(ACAD_RATIO, 12);
+    /* and the DXF trip preserves it */
+    expect(active(readDxf(writeDxf(d)))!.aspectRatio).toBeCloseTo(ACAD_RATIO, 12);
+  });
+
+  it('a record with no usable ratio falls back to a plausible window', () => {
+    const dxf = writeDxf(turned());          /* no aspectRatio set */
+    const v = vportGroup(dxf, 41);
+    expect(v).toBeGreaterThan(0);
+    expect(v).toBeLessThan(10);              /* a ratio, never a width */
+  });
+});
+
+describe('the saved frame beats the entity sweep', () => {
+  const line = (x2: number, y2: number): Drawing['entities'][number] => ({
+    type: 'line', layer: '0', color: { kind: 'byLayer' },
+    start: { x: 0, y: 0, z: 0 }, end: { x: x2, y: y2, z: 0 }
+  });
+
+  it('stored header extents go out over the sweep, strays and all', () => {
+    /* a production file kept invisible strays a million units out; the
+       sweep framed them and ZOOM EXTENTS showed 99.96% blank paper,
+       while AutoCAD 2027 reports the stored pair even after a regen */
+    const d = emptyDrawing();
+    d.entities = [line(10, 5), line(1e6, 1e6)];
+    d.header.extMin = { x: 0, y: 0, z: 0 };
+    d.header.extMax = { x: 10, y: 5, z: 0 };
+    const dxf = writeDxf(d);
+    expect(varTail(dxf, '$EXTMIN', 2)).toEqual([0, 0]);
+    expect(varTail(dxf, '$EXTMAX', 2)).toEqual([10, 5]);
+    /* no stored limits: limits = the stored extents, not the sweep */
+    expect(varTail(dxf, '$LIMMAX', 2)).toEqual([10, 5]);
+  });
+
+  it('the sweep still frames a drawing that carries no extents', () => {
+    const d = emptyDrawing();
+    d.entities = [line(10, 5)];
+    const dxf = writeDxf(d);
+    expect(varTail(dxf, '$EXTMAX', 2)).toEqual([10, 5]);
+  });
+
+  it('a poisoned stored pair falls back to the sweep', () => {
+    /* pre-R13 files use +-1e20 as the "never set" sentinel */
+    const d = emptyDrawing();
+    d.entities = [line(10, 5)];
+    d.header.extMin = { x: 1e20, y: 1e20, z: 0 };
+    d.header.extMax = { x: -1e20, y: -1e20, z: 0 };
+    expect(varTail(writeDxf(d), '$EXTMAX', 2)).toEqual([10, 5]);
+  });
+
+  it('stored limits go out as stored, the way DXFOUT writes them', () => {
+    const d = emptyDrawing();
+    d.entities = [line(10, 5)];
+    d.header.limMin = { x: 0, y: 0 };
+    d.header.limMax = { x: 12, y: 9 };
+    const dxf = writeDxf(d);
+    expect(varTail(dxf, '$LIMMIN', 2)).toEqual([0, 0]);
+    expect(varTail(dxf, '$LIMMAX', 2)).toEqual([12, 9]);
+  });
+
+  it('$VIEWCTR/$VIEWSIZE mirror the active viewport when there is one', () => {
+    const d = turned();                      /* saved view: a tight zoom */
+    const dxf = writeDxf(d);
+    const vp = active(d)!;
+    expect(varTail(dxf, '$VIEWCTR', 2)).toEqual([vp.center.x, vp.center.y]);
+    expect(varTail(dxf, '$VIEWSIZE', 1)[0]).toBeCloseTo(vp.height, 9);
+  });
+
+  it('and still frame the whole drawing when there is none', () => {
+    const d = emptyDrawing();
+    d.entities = [line(10, 5)];
+    const dxf = writeDxf(d);
+    expect(varTail(dxf, '$VIEWCTR', 2)).toEqual([5, 2.5]);
+    /* max(5, 10 / 1.6) x 1.06: the plausible-window fallback */
+    expect(varTail(dxf, '$VIEWSIZE', 1)[0]).toBeCloseTo(6.625, 9);
+  });
+});

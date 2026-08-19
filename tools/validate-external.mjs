@@ -55,7 +55,8 @@ const VERSIONS = ['R12', 'R13', 'R14', 'R2000', 'R2004', 'R2007', 'R2018'];
  * cost ErrorStatus 53 before AUDIT ever ran), NUL-terminated strings,
  * the missing 53-byte ObjFreeSpace section, and the four trailing shorts
  * that close the header-variable section. See test/external.test.ts. */
-const PASS_BASELINE = ['R12', 'R13', 'R14', 'R2000', 'R2004', 'R2007', 'R2018'];
+const PASS_BASELINE = ['R12', 'R13', 'R14', 'R2000', 'R2004', 'R2007', 'R2018',
+  'DXF'];
 
 /* ------------------------------------------------------------------ */
 
@@ -75,11 +76,12 @@ const probe = join(ROOT, 'test', `zz-validate-emit-${process.pid}.test.ts`);
 writeFileSync(probe, `
 import { it } from 'vitest';
 import { writeFileSync } from 'node:fs';
-import { DWG_VERSIONS, dwgOf } from './corpus.js';
+import { DWG_VERSIONS, dwgOf, dxfOf } from './corpus.js';
 it('emit', () => {
   for (const v of DWG_VERSIONS) {
     writeFileSync(${JSON.stringify(work)} + '/corpus_' + v + '.dwg', dwgOf(v));
   }
+  writeFileSync(${JSON.stringify(work)} + '/corpus_DXF.dxf', dxfOf());
 });
 `);
 try {
@@ -134,8 +136,11 @@ const verdictOf = (text) => {
 };
 
 const results = [];
-for (const v of VERSIONS) {
-  const dwg = join(work, `corpus_${v}.dwg`);
+/* the ASCII DXF writer is gated exactly like the DWG containers */
+const targets = VERSIONS.map((v) => [v, `corpus_${v}.dwg`])
+  .concat([['DXF', 'corpus_DXF.dxf']]);
+for (const [v, file] of targets) {
+  const dwg = join(work, file);
   let verdict = verdictOf(runAcad(dwg));
   if (verdict.flaky) {
     /* transient sharing/lock hiccup — one retry after a breather */

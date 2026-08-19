@@ -264,8 +264,12 @@ describe('named objects DXF round-trip', () => {
     expect(m.elements[0].offset).toBeCloseTo(sm.elements[0].offset, 9);
 
     expect(back.appIds).toContain('ACAD');
-    expect(back.dimStyles?.map((d) => d.name)).toEqual(
-      drawing.dimStyles!.map((d) => d.name));
+    /* the source's styles survive — and Standard is always alongside
+       them now, since every DIMENSION names it and DXFIN discards a
+       file whose group 3 names a style the table does not list */
+    const dimNames = back.dimStyles?.map((d) => d.name);
+    expect(dimNames).toContain('Standard');
+    for (const s of drawing.dimStyles!) expect(dimNames).toContain(s.name);
   });
 });
 

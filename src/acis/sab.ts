@@ -199,14 +199,18 @@ export const sabToSat = (sab: Uint8Array | string): string | null => {
           return null;                    /* a tag outside the grammar */
       }
     }
-    /* the End-of-ACIS-data marker never became a record; it closes the
-       stream rather than describing anything, so it is dropped */
+    /* The stream must CLOSE, not merely stop: every SAB is ACIS 7+ or ASM
+       (SAB itself only exists from R2007 on), and both dialects end their
+       text form with an explicit terminator line. Without it AutoCAD's
+       modeler reads to the last record, waits for more, and refuses the
+       whole entity — "Premature end of object". */
     const head = [
       `${version} ${records.length} ${a} ${b} `,
       headStrings.map((s) => s.length + ' ' + s).join(' ') + ' ',
       headDoubles.map(num).join(' ') + ' '
     ];
-    return head.join('\n') + '\n' + records.join('\n') + '\n';
+    const terminator = opens(SIG_ASM) ? 'End-of-ASM-data ' : 'End-of-ACIS-data ';
+    return head.join('\n') + '\n' + records.join('\n') + '\n' + terminator + '\n';
   } catch {
     return null;                          /* truncated stream */
   }

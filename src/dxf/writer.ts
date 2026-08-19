@@ -120,6 +120,11 @@ export const writeDxf = (drawing: Drawing): string => {
      duplicate, empty model space. */
   const msRecHandle = '1F';
   const psRecHandle = '1B';
+  /* ACAD_PLOTSTYLENAME and the placeholder its "Normal" entry points at.
+     Every LAYER record must name its plot style through group 390 — DXFIN
+     discards the whole drawing when the group is missing. */
+  const plotStyleDictHandle = 'E';
+  const plotStyleHolderHandle = 'F';
   const blockRecHandle: Record<string, string> = {};
   for (const nm of blockNames) blockRecHandle[nm] = handle();
 
@@ -138,6 +143,22 @@ export const writeDxf = (drawing: Drawing): string => {
     return out;
   };
   const usesImages = allEntities().some((e) => e.type === 'image');
+  /* MLINE entities must name their style through a hard 340 — DXFIN
+     discards the whole drawing without it. The styles land in OBJECTS,
+     but their handles are fixed here so entities can point at them; a
+     drawing that has MLINEs and no styles gets a Standard to point at. */
+  const mlStyles = drawing.mlineStyles?.length
+    ? drawing.mlineStyles
+    : allEntities().some((e) => e.type === 'mline')
+      ? [{
+        name: 'Standard', elements: [
+          { offset: 0.5, color: { kind: 'byLayer' } as Color },
+          { offset: -0.5, color: { kind: 'byLayer' } as Color }]
+      }]
+      : [];
+  const mlStyleHandles = mlStyles.map(() => handle());
+  const mlStyleIndex = new Map<string, number>();
+  mlStyles.forEach((m, i) => mlStyleIndex.set(m.name.toLowerCase(), i));
   /** Underlay kinds present, each needing its class + definition pair. */
   const underlayKinds = [...new Set(allEntities()
     .filter((e): e is Extract<Entity, { type: 'underlay' }> => e.type === 'underlay')
@@ -201,7 +222,9 @@ export const writeDxf = (drawing: Drawing): string => {
   }
   const proxyClassId = new Map<string, number>();
   {
-    let id = 500 + (usesImages ? 4 : 0) + underlayKinds.length * 2;
+    /* class numbers are positional (first CLASS record = 500); the two
+       always-present plot-style classes come before everything else */
+    let id = 502 + (usesImages ? 4 : 0) + underlayKinds.length * 2;
     for (const key of proxyClasses.keys()) proxyClassId.set(key, id++);
   }
 
@@ -310,15 +333,30 @@ export const writeDxf = (drawing: Drawing): string => {
   };
   for (const ent of drawing.entities) growEnt(ent);
 
+  /* The extents the drawing itself carries beat the sweep. Production
+     files keep invisible strays far outside the real content — a 438-unit
+     drawing whose sweep came back 1,030,277 wide — and AutoCAD 2027 itself
+     reports the stored pair even after a regen, so stating the sweep here
+     framed 99.96% blank paper. The sweep stays as the fallback for
+     drawings built from scratch, which carry no header extents at all. */
+  const hdr = drawing.header;
+  const box = (mn?: Point3, mx?: Point3, ordered = true)
+    : { min: { x: number; y: number }; max: { x: number; y: number } } | null => {
+    if (!mn || !mx) return null;
+    if (![mn.x, mn.y, mx.x, mx.y].every((q) => isNum(q) && Math.abs(q) < 1e19)) return null;
+    if (ordered && (mx.x < mn.x || mx.y < mn.y)) return null;
+    return { min: { x: mn.x, y: mn.y }, max: { x: mx.x, y: mx.y } };
+  };
+  const stored = box(hdr.extMin, hdr.extMax);
   /* An empty drawing has no extents to state; AutoCAD's own "nothing here"
      sentinel is a min above a max, and every reader knows to ignore it. */
-  const hasExt = ext.maxx >= ext.minx && ext.maxy >= ext.miny;
-  const exMin = hasExt ? { x: ext.minx, y: ext.miny } : { x: 1e20, y: 1e20 };
-  const exMax = hasExt ? { x: ext.maxx, y: ext.maxy } : { x: -1e20, y: -1e20 };
-  const spanX = hasExt ? Math.max(ext.maxx - ext.minx, 1e-6) : 100;
-  const spanY = hasExt ? Math.max(ext.maxy - ext.miny, 1e-6) : 100;
-  const ctrX = hasExt ? (ext.minx + ext.maxx) / 2 : 0;
-  const ctrY = hasExt ? (ext.miny + ext.maxy) / 2 : 0;
+  const hasExt = !!stored || (ext.maxx >= ext.minx && ext.maxy >= ext.miny);
+  const exMin = stored?.min ?? (hasExt ? { x: ext.minx, y: ext.miny } : { x: 1e20, y: 1e20 });
+  const exMax = stored?.max ?? (hasExt ? { x: ext.maxx, y: ext.maxy } : { x: -1e20, y: -1e20 });
+  const spanX = hasExt ? Math.max(exMax.x - exMin.x, 1e-6) : 100;
+  const spanY = hasExt ? Math.max(exMax.y - exMin.y, 1e-6) : 100;
+  const ctrX = hasExt ? (exMin.x + exMax.x) / 2 : 0;
+  const ctrY = hasExt ? (exMin.y + exMax.y) / 2 : 0;
   /* VIEW_ASPECT is the shape of a plausible CAD window: the saved height
      must cover the drawing once that aspect has had its say, or a wide
      drawing in a tall window is cropped left and right on open. */
@@ -327,7 +365,7 @@ export const writeDxf = (drawing: Drawing): string => {
   const viewH = Math.max(spanY, spanX / VIEW_ASPECT) * VIEW_MARGIN;
 
   /* ---- HEADER ---- */
-  const hdr = drawing.header;
+  const activeVp = (drawing.vports ?? []).find((p) => /^\*active$/i.test(p.name));
   w(0, 'SECTION'); w(2, 'HEADER');
   w(9, '$ACADVER'); w(1, 'AC1015');
   w(9, '$DWGCODEPAGE'); w(3, hdr.codepage ?? 'ANSI_1252');
@@ -356,12 +394,25 @@ export const writeDxf = (drawing: Drawing): string => {
   }
   w(9, '$EXTMIN'); w(10, fmt(exMin.x)); w(20, fmt(exMin.y)); w(30, 0);
   w(9, '$EXTMAX'); w(10, fmt(exMax.x)); w(20, fmt(exMax.y)); w(30, 0);
-  /* limits = the extents, so ZOOM ALL and ZOOM EXTENTS agree */
-  w(9, '$LIMMIN'); w(10, fmt(hasExt ? ext.minx : 0)); w(20, fmt(hasExt ? ext.miny : 0));
-  w(9, '$LIMMAX'); w(10, fmt(hasExt ? ext.maxx : 100)); w(20, fmt(hasExt ? ext.maxy : 100));
+  /* Stored limits travel as stored, the way AutoCAD's own DXFOUT writes
+     them (ZOOM ALL frames limits union extents, so content stays framed
+     either way). A drawing without any gets limits = the extents, so
+     ZOOM ALL and ZOOM EXTENTS agree. */
+  const lim = box(hdr.limMin && { ...hdr.limMin, z: 0 },
+    hdr.limMax && { ...hdr.limMax, z: 0 }, false);
+  w(9, '$LIMMIN'); w(10, fmt(lim ? lim.min.x : hasExt ? exMin.x : 0));
+  w(20, fmt(lim ? lim.min.y : hasExt ? exMin.y : 0));
+  w(9, '$LIMMAX'); w(10, fmt(lim ? lim.max.x : hasExt ? exMax.x : 100));
+  w(20, fmt(lim ? lim.max.y : hasExt ? exMax.y : 100));
   w(9, '$LIMCHECK'); w(70, 0);      /* limits frame the view, never gate input */
-  w(9, '$VIEWCTR'); w(10, fmt(ctrX)); w(20, fmt(ctrY));
-  w(9, '$VIEWSIZE'); w(40, fmt(viewH));
+  /* The view on open is the one the drawing was saved with, when it has
+     one — $VIEWCTR/$VIEWSIZE mirror the *Active VPORT the way AutoCAD
+     writes them. The frame-everything view stays for drawings built from
+     scratch, which have no saved view to restore. */
+  w(9, '$VIEWCTR'); w(10, fmt(activeVp ? activeVp.center.x : ctrX));
+  w(20, fmt(activeVp ? activeVp.center.y : ctrY));
+  w(9, '$VIEWSIZE');
+  w(40, fmt(activeVp && isNum(activeVp.height) && activeVp.height > 0 ? activeVp.height : viewH));
   /* The current UCS. A drawing laid out at an angle carries its rotation
      here, and writing the world default instead does not read as missing
      data — it reads as "this drawing is not rotated", which is worse. */
@@ -375,16 +426,32 @@ export const writeDxf = (drawing: Drawing): string => {
     w(9, '$PUCSXDIR'); w(10, fmt(hdr.pUcs.xAxis.x)); w(20, fmt(hdr.pUcs.xAxis.y)); w(30, fmt(hdr.pUcs.xAxis.z));
     w(9, '$PUCSYDIR'); w(10, fmt(hdr.pUcs.yAxis.x)); w(20, fmt(hdr.pUcs.yAxis.y)); w(30, fmt(hdr.pUcs.yAxis.z));
   }
-  w(9, '$HANDSEED'); w(5, 'FFFF');
+  /* HANDSEED must clear every handle in the file: DXFIN treats a handle
+     at or above the seed as invalid and reseats it, and the reseated
+     value then collides with the record that legitimately holds it
+     ("Bad handle FFFF: already in use"). The counter is not done yet,
+     so a placeholder goes out here and the real top lands at the end. */
+  w(9, '$HANDSEED');
+  const handseedAt = out.length + 1;
+  w(5, 'FFFF');
   w(0, 'ENDSEC');
 
-  /* ---- CLASSES (only when class entities are present) ---- */
-  if (usesImages || underlayKinds.length || proxyClasses.size) {
+  /* ---- CLASSES ---- */
+  {
     w(0, 'SECTION'); w(2, 'CLASSES');
     const cls = (dxf: string, cpp: string, isEntity: boolean): void => {
       w(0, 'CLASS'); w(1, dxf); w(2, cpp);
       w(3, 'ISM'); w(90, 127); w(280, 0); w(281, isEntity ? 1 : 0);
     };
+    /* The plot-style machinery below is spelled the way AutoCAD spells
+       it — these two classes exist in every R2000+ file it writes. */
+    for (const [dxfName, cpp] of [
+      ['ACDBDICTIONARYWDFLT', 'AcDbDictionaryWithDefault'],
+      ['ACDBPLACEHOLDER', 'AcDbPlaceholder']
+    ]) {
+      w(0, 'CLASS'); w(1, dxfName); w(2, cpp);
+      w(3, 'ObjectDBX Classes'); w(90, 0); w(280, 0); w(281, 0);
+    }
     if (usesImages) {
       cls('IMAGE', 'AcDbRasterImage', true);
       cls('WIPEOUT', 'AcDbWipeout', true);
@@ -420,7 +487,7 @@ export const writeDxf = (drawing: Drawing): string => {
   /* When the drawing carries the view it was saved with, that view goes
      out — twist included. Only a drawing that has none gets the synthetic
      frame below, which is what the exporter has always written. */
-  const src = (drawing.vports ?? []).find((p) => /^\*active$/i.test(p.name));
+  const src = activeVp;
   if (src) {
     w(10, fmt(src.lowerLeft.x)); w(20, fmt(src.lowerLeft.y));
     w(11, fmt(src.upperRight.x)); w(21, fmt(src.upperRight.y));
@@ -484,9 +551,17 @@ export const writeDxf = (drawing: Drawing): string => {
   }
   w(0, 'ENDTAB');
 
-  const linetypes = drawing.linetypes.some((lt) => /^continuous$/i.test(lt.name))
-    ? drawing.linetypes
-    : [{ name: 'Continuous', description: 'Solid line', pattern: [] }, ...drawing.linetypes];
+  /* ByBlock and ByLayer are not decoration: DXFIN discards the whole
+     drawing over a "Missing Default entry ByLayer in SymbolTable:LTYPE" */
+  const missingLt = (nm: string): boolean =>
+    !drawing.linetypes.some((lt) => lt.name.toLowerCase() === nm);
+  const linetypes = [
+    ...missingLt('byblock') ? [{ name: 'ByBlock', pattern: [] as number[] }] : [],
+    ...missingLt('bylayer') ? [{ name: 'ByLayer', pattern: [] as number[] }] : [],
+    ...missingLt('continuous')
+      ? [{ name: 'Continuous', description: 'Solid line', pattern: [] as number[] }] : [],
+    ...drawing.linetypes
+  ];
   w(0, 'TABLE'); w(2, 'LTYPE'); w(5, handle()); w(100, 'AcDbSymbolTable');
   w(70, linetypes.length);
   for (const lt of linetypes) {
@@ -515,6 +590,7 @@ export const writeDxf = (drawing: Drawing): string => {
     w(6, ly.linetype ?? 'Continuous');
     if (isNum(ly.lineweight)) w(370, lineweightCode(ly.lineweight));
     if (ly.plottable === false) w(290, 0);
+    w(390, plotStyleHolderHandle);
   }
   w(0, 'ENDTAB');
 
@@ -534,11 +610,14 @@ export const writeDxf = (drawing: Drawing): string => {
   }
   w(0, 'ENDTAB');
 
-  /* named tables the model carries: VPORT/VIEW/UCS/APPID/DIMSTYLE */
-  if (drawing.views?.length) {
+  /* named tables the model carries: VPORT/VIEW/UCS/APPID/DIMSTYLE.
+     Every one goes out even when empty — DXFIN discards the whole
+     drawing over a missing symbol table ("Missing SymbolTable:VIEW"),
+     exactly as it does over a LAYER without its plot style. */
+  {
     w(0, 'TABLE'); w(2, 'VIEW'); w(5, handle()); w(100, 'AcDbSymbolTable');
-    w(70, drawing.views.length);
-    for (const v of drawing.views) {
+    w(70, drawing.views?.length ?? 0);
+    for (const v of drawing.views ?? []) {
       w(0, 'VIEW'); w(5, handle());
       w(100, 'AcDbSymbolTableRecord'); w(100, 'AcDbViewTableRecord');
       w(2, v.name); w(70, 0);
@@ -550,10 +629,10 @@ export const writeDxf = (drawing: Drawing): string => {
     }
     w(0, 'ENDTAB');
   }
-  if (drawing.ucs?.length) {
+  {
     w(0, 'TABLE'); w(2, 'UCS'); w(5, handle()); w(100, 'AcDbSymbolTable');
-    w(70, drawing.ucs.length);
-    for (const u of drawing.ucs) {
+    w(70, drawing.ucs?.length ?? 0);
+    for (const u of drawing.ucs ?? []) {
       w(0, 'UCS'); w(5, handle());
       w(100, 'AcDbSymbolTableRecord'); w(100, 'AcDbUCSTableRecord');
       w(2, u.name); w(70, 0);
@@ -574,11 +653,18 @@ export const writeDxf = (drawing: Drawing): string => {
     }
     w(0, 'ENDTAB');
   }
-  if (drawing.dimStyles?.length) {
+  {
+    /* Standard is always in the table, whatever else the source carried:
+       every DIMENSION/LEADER/TOLERANCE goes out naming it, and a group 3
+       that names a style the table does not list is fatal to DXFIN
+       ("Invalid dimension style name" — the whole file is discarded). */
+    const srcDimStyles = drawing.dimStyles ?? [];
+    const dimStyles = srcDimStyles.some((s) => /^standard$/i.test(s.name))
+      ? srcDimStyles : [{ name: 'Standard' }, ...srcDimStyles];
     w(0, 'TABLE'); w(2, 'DIMSTYLE'); w(5, handle()); w(100, 'AcDbSymbolTable');
-    w(70, drawing.dimStyles.length);
+    w(70, dimStyles.length);
     w(100, 'AcDbDimStyleTable'); w(71, 0);
-    for (const ds of drawing.dimStyles) {
+    for (const ds of dimStyles) {
       w(0, 'DIMSTYLE'); w(105, handle());
       w(100, 'AcDbSymbolTableRecord'); w(100, 'AcDbDimStyleTableRecord');
       w(2, ds.name); w(70, 0);
@@ -591,10 +677,25 @@ export const writeDxf = (drawing: Drawing): string => {
   w(70, 2 + blockNames.length);
   const brHandleOf = (nm: string): string => nm === '*Model_Space' ? msRecHandle
     : nm === '*Paper_Space' ? psRecHandle : blockRecHandle[nm];
+  /* Layouts and their block records must point at each other — 330 down
+     from the LAYOUT object, 340 back from the BLOCK_RECORD — or AUDIT
+     deletes the dictionary entry. Handles are fixed here so the table
+     can state the back-pointers; a layout whose block never lands in
+     the table (an extra paper space this writer does not emit) stays
+     out of the dictionary rather than being listed dangling. */
+  const outLayouts: { l: NonNullable<Drawing['layouts']>[number]; h: string; brh: string }[] = [];
+  for (const l of drawing.layouts ?? []) {
+    const brh = l.blockName ? brHandleOf(l.blockName)
+      : /model/i.test(l.name) ? msRecHandle : psRecHandle;
+    if (brh) outLayouts.push({ l, h: handle(), brh });
+  }
+  const layoutOfBr = new Map(outLayouts.map((o) => [o.brh, o.h]));
   for (const nm of ['*Model_Space', '*Paper_Space'].concat(blockNames)) {
     w(0, 'BLOCK_RECORD'); w(5, brHandleOf(nm));
     w(100, 'AcDbSymbolTableRecord'); w(100, 'AcDbBlockTableRecord');
     w(2, isSystemBlock(nm) ? nm : outBlockName(nm));
+    const lh = layoutOfBr.get(brHandleOf(nm));
+    if (lh) w(340, lh);
   }
   w(0, 'ENDTAB');
   w(0, 'ENDSEC');
@@ -610,8 +711,15 @@ export const writeDxf = (drawing: Drawing): string => {
     /* byLayer: nothing — absence of 62 means ByLayer */
   };
 
+  /* Source handle -> the handle this file gave the entity. GROUP members
+     are spelled with source handles in the model; written verbatim they
+     point at nothing (every object here is renumbered) and AUDIT strips
+     each one as "not an entity". */
+  const newHandleOf = new Map<string, string>();
   const entStart = (dxfName: string, ent: Entity, subclass?: string): void => {
-    w(0, dxfName); w(5, handle());
+    const h = handle();
+    w(0, dxfName); w(5, h);
+    if (ent.handle) newHandleOf.set(ent.handle.toUpperCase(), h);
     w(330, currentOwner);
     w(100, 'AcDbEntity');
     if (inPaperSpace) w(67, 1);
@@ -783,9 +891,11 @@ export const writeDxf = (drawing: Drawing): string => {
             w(10, fmt(p.x)); w(20, fmt(p.y));
             if (e.weights?.length) w(42, fmt(e.weights[i] ?? 1));
           }
-          /* control points fully define the curve; fit points would need
-             the exact tangents to reproduce, so they are not re-emitted */
-          w(97, 0);
+          /* No fit-point block, and no 97 here at all: the R2000 spline
+             edge ends at its control points. AutoCAD's own DXFOUT writes
+             none, and its reader takes an edge-level 97 for the LOOP's
+             source-boundary count — the loop's real 97 then reads as a
+             stray group and DXFIN discards the file ("expected 75"). */
         }
       }
       w(97, 0);                              /* source boundary objects */
@@ -820,6 +930,12 @@ export const writeDxf = (drawing: Drawing): string => {
           w(v.code, fmt(v.point.x));
           w(v.code + 10, fmt(v.point.y));
           w(v.code + 20, fmt(v.point.z ?? 0));
+        } else if (v.code === 1005) {
+          /* the source drawing's handle space is gone — every object was
+             renumbered — so a carried 1005 can only dangle. AUDIT flags
+             each one ("XData Handle Unknown") and nulls it; null it here
+             instead, which is the same end state without the noise. */
+          w(1005, 0);
         } else {
           w(v.code, typeof v.value === 'number' ? fmt(v.value) : v.value);
         }
@@ -1020,7 +1136,11 @@ export const writeDxf = (drawing: Drawing): string => {
         w(210, fmt(hn.x)); w(220, fmt(hn.y)); w(230, fmt(hn.z ?? 1));
         w(2, ent.solid ? 'SOLID' : (ent.patternName || 'ANSI31'));
         w(70, ent.solid ? 1 : 0);
-        w(71, ent.associative ? 1 : 0);
+        /* Always non-associative on the way out: associativity is a live
+           link to source boundary objects (97 n + 330 ...), and no such
+           links are written — a hatch that CLAIMS the link without them
+           is an AUDIT error ("Boundary Undefined") on every single one. */
+        w(71, 0);
         w(91, ent.loops.length);
         ent.loops.forEach((b, i) => writeHatchLoop(b, i === 0));
         w(75, ent.styleFlag ?? 0);           /* island style */
@@ -1061,20 +1181,10 @@ export const writeDxf = (drawing: Drawing): string => {
         }
         w(98, ent.seeds?.length ?? 0);
         for (const s of ent.seeds ?? []) { w(10, fmt(s.x)); w(20, fmt(s.y)); }
-        if (ent.gradient) {
-          const g = ent.gradient;
-          w(450, 1); w(451, 0);
-          w(460, fmt(g.angle)); w(461, fmt(g.shift));
-          w(452, g.singleColor ? 1 : 0);
-          w(462, fmt(g.tint));
-          w(453, g.colors.length);
-          for (const c of g.colors) {
-            w(463, fmt(c.shift));
-            w(63, c.color.kind === 'aci' ? c.color.index : 7);
-            if (c.color.kind === 'rgb') w(421, c.color.rgb);
-          }
-          w(470, g.name || 'LINEAR');
-        }
+        /* No gradient block: groups 450-470 are R2004+, and the AC1015
+           hatch parser stops dead on 450 ("Premature end of object" —
+           the whole file is then discarded). AutoCAD's own R2000 DXFOUT
+           omits them exactly the same way, gradient hatches included. */
         return;
       }
 
@@ -1110,7 +1220,11 @@ export const writeDxf = (drawing: Drawing): string => {
       case 'mline': {
         if (ent.vertices.length < 2) return;
         entStart('MLINE', ent, 'AcDbMline');
-        w(2, ent.styleName ?? 'Standard');
+        /* name AND hard pointer must agree; an unmatched name falls back
+           to the first style so 340 never dangles */
+        const msi = mlStyleIndex.get((ent.styleName ?? '').toLowerCase()) ?? 0;
+        w(2, mlStyles[msi]?.name ?? 'Standard');
+        w(340, mlStyleHandles[msi] ?? '0');
         w(40, fmt(isNum(ent.scale) && ent.scale !== 0 ? ent.scale : 1));
         w(70, ent.justification);
         w(71, 1 | (ent.closed ? 2 : 0));
@@ -1151,9 +1265,16 @@ export const writeDxf = (drawing: Drawing): string => {
           w(71, ent.vertices.length);
           w(72, ent.faces?.length ?? 0);
         }
+        /* sub-records repeat the owner's layer AND linetype — a vertex
+           left at ByLayer under an owner with its own linetype is an
+           AUDIT error on every single vertex ("linetype != owner's") */
+        const subEnt = (): void => {
+          w(100, 'AcDbEntity'); w(8, ent.layer || '0');
+          if (ent.linetype) w(6, ent.linetype);
+        };
         for (const p of ent.vertices) {
           w(0, 'VERTEX'); w(5, handle()); w(330, currentOwner);
-          w(100, 'AcDbEntity'); w(8, ent.layer || '0');
+          subEnt();
           w(100, 'AcDbVertex');
           w(100, isGrid ? 'AcDbPolygonMeshVertex' : 'AcDbPolyFaceMeshVertex');
           w(10, fmt(p.x)); w(20, fmt(p.y)); w(30, fmt(p.z ?? 0));
@@ -1162,7 +1283,7 @@ export const writeDxf = (drawing: Drawing): string => {
         if (!isGrid) {
           for (const f of ent.faces ?? []) {
             w(0, 'VERTEX'); w(5, handle()); w(330, currentOwner);
-            w(100, 'AcDbEntity'); w(8, ent.layer || '0');
+            subEnt();
             w(100, 'AcDbFaceRecord');
             w(10, 0); w(20, 0); w(30, 0);
             w(70, 128);
@@ -1170,32 +1291,48 @@ export const writeDxf = (drawing: Drawing): string => {
           }
         }
         w(0, 'SEQEND'); w(5, handle()); w(330, currentOwner);
-        w(100, 'AcDbEntity'); w(8, ent.layer || '0');
+        subEnt();
         return;
       }
 
       case 'image': {
         /* IMAGE needs an IMAGEDEF object; both are collected and written
-           into the OBJECTS section after the entities */
-        const defHandle = imageDefFor(ent.path ?? '', ent.widthPx, ent.heightPx);
-        entStart(ent.wipeout ? 'WIPEOUT' : 'IMAGE', ent, 'AcDbRasterImage');
+           into the OBJECTS section after the entities. A WIPEOUT gets a
+           NULL def instead — it has no raster file, and AutoCAD's own
+           DXFOUT writes 340 0 there. */
+        const defHandle = ent.wipeout ? '0'
+          : imageDefFor(ent.path ?? '', ent.widthPx, ent.heightPx);
+        /* same field layout, but the separator must name the class:
+           DXFIN refuses a WIPEOUT spelled "100 AcDbRasterImage" */
+        entStart(ent.wipeout ? 'WIPEOUT' : 'IMAGE', ent,
+          ent.wipeout ? 'AcDbWipeout' : 'AcDbRasterImage');
         w(90, 0);
         w(10, fmt(ent.position.x)); w(20, fmt(ent.position.y)); w(30, fmt(ent.position.z ?? 0));
         w(11, fmt(ent.uVector.x)); w(21, fmt(ent.uVector.y)); w(31, fmt(ent.uVector.z ?? 0));
         w(12, fmt(ent.vVector.x)); w(22, fmt(ent.vVector.y)); w(32, fmt(ent.vVector.z ?? 0));
         w(13, fmt(ent.widthPx)); w(23, fmt(ent.heightPx));
         w(340, defHandle);
-        w(70, 3);                            /* show + show when not aligned */
-        w(280, ent.clip && ent.clip.length ? 1 : 0);
+        const hasClip = !!(ent.clip && ent.clip.length);
+        /* 1 show, 2 show unaligned, 4 clip in use — AutoCAD writes 7 for
+           a clipped record and its reader wants the flags to say so */
+        w(70, 3 | (hasClip ? 4 : 0));
+        w(280, hasClip ? 1 : 0);
         w(281, fmt(ent.brightness ?? 50));
         w(282, fmt(ent.contrast ?? 50));
         w(283, fmt(ent.fade ?? 0));
+        w(360, 0);                           /* imagedef reactor (null) */
         const clip = ent.clip && ent.clip.length
           ? ent.clip
           : [{ x: -0.5, y: -0.5 }, { x: ent.widthPx - 0.5, y: ent.heightPx - 0.5 }];
+        /* a polygonal boundary must CLOSE — AutoCAD repeats the first
+           vertex as the last and its reader counts on it; an open ring
+           leaves the record half-read ("Xdata wasn't read") */
+        const first = clip[0], last = clip[clip.length - 1];
+        const ring = clip.length > 2 && (first.x !== last.x || first.y !== last.y)
+          ? [...clip, first] : clip;
         w(71, clip.length === 2 ? 1 : 2);
-        w(91, clip.length);
-        for (const p of clip) { w(14, fmt(p.x)); w(24, fmt(p.y)); }
+        w(91, ring.length);
+        for (const p of ring) { w(14, fmt(p.x)); w(24, fmt(p.y)); }
         return;
       }
 
@@ -1333,6 +1470,20 @@ export const writeDxf = (drawing: Drawing): string => {
         if (!sat) return;
         const name = ent.kind === 'region' ? 'REGION'
           : ent.kind === 'solid3d' ? '3DSOLID' : 'BODY';
+        /* An ASM-dialect stream (21800 and up) cannot be spelled in an
+           AC1015 DXF. AutoCAD's own R2000 DXFOUT downgrades the kernel
+           data to the ACIS-400 text dialect — no record ids, reshaped
+           fields — and its DXF reader refuses the modern spelling with
+           "Premature end of object", discarding the ENTIRE file over one
+           such entity. Until a downgrade translator exists, the entity
+           stays out and the drawing says so. */
+        const satVersion = parseInt(sat, 10);
+        if (isFinite(satVersion) && satVersion >= 21800) {
+          drawing.warnings.push(name + ' skipped in DXF: its ' +
+            (sat.includes('asmheader') ? 'ASM' : 'kernel') + ' stream (v' +
+            satVersion + ') has no AC1015 spelling AutoCAD accepts.');
+          return;
+        }
         entStart(name, ent, 'AcDbModelerGeometry');
         w(70, 1);
         for (const line of sat.split('\n')) {
@@ -1549,32 +1700,32 @@ export const writeDxf = (drawing: Drawing): string => {
   w(0, 'ENDSEC');
 
   /* ---- OBJECTS (root dictionary, layouts, groups, mline styles, images) ---- */
-  const layouts = drawing.layouts ?? [];
   const groups = drawing.groups ?? [];
-  const mlStyles = drawing.mlineStyles ?? [];
   const xrecords = drawing.xrecords ?? [];
   const geo = drawing.geoData;
-  if (imageDefs.size || layouts.length || groups.length || mlStyles.length
-      || xrecords.length || geo || underlayDefs.size || proxyObjs.length
-      || sealedObjs.length) {
+  /* Unconditional: a DXF without the root dictionary (and the group and
+     plot-style dictionaries under it) is discarded by DXFIN outright. */
+  {
     w(0, 'SECTION'); w(2, 'OBJECTS');
     const rootHandle = 'C';
     const imgDictHandle = imageDefs.size ? handle() : '';
-    const layoutDictHandle = layouts.length ? handle() : '';
-    const groupDictHandle = groups.length ? handle() : '';
+    const layoutDictHandle = outLayouts.length ? handle() : '';
+    /* always present, even empty: DXFIN discards the drawing when the
+       named objects dictionary lists no GroupTable */
+    const groupDictHandle = handle();
     const mlDictHandle = mlStyles.length ? handle() : '';
     const geoHandle = geo ? handle() : '';
     const underlayDicts = new Map<string, string>();
     for (const kind of underlayKinds) underlayDicts.set(kind, handle());
-    const layoutHandles = layouts.map(() => handle());
     const groupHandles = groups.map(() => handle());
-    const mlHandles = mlStyles.map(() => handle());
+    const mlHandles = mlStyleHandles;         /* fixed before the entities */
     const proxyObjHandles = proxyObjs.map(() => handle());
     const sealedObjHandles = sealedObjs.map(() => handle());
 
     w(0, 'DICTIONARY'); w(5, rootHandle); w(330, 0);
     w(100, 'AcDbDictionary'); w(281, 1);
-    if (groupDictHandle) { w(3, 'ACAD_GROUP'); w(350, groupDictHandle); }
+    w(3, 'ACAD_PLOTSTYLENAME'); w(350, plotStyleDictHandle);
+    w(3, 'ACAD_GROUP'); w(350, groupDictHandle);
     if (layoutDictHandle) { w(3, 'ACAD_LAYOUT'); w(350, layoutDictHandle); }
     if (mlDictHandle) { w(3, 'ACAD_MLINESTYLE'); w(350, mlDictHandle); }
     if (imgDictHandle) { w(3, 'ACAD_IMAGE_DICT'); w(350, imgDictHandle); }
@@ -1594,6 +1745,15 @@ export const writeDxf = (drawing: Drawing): string => {
       w(3, o.name ?? ('SEALED_OBJECT_' + (i + 1)));
       w(350, sealedObjHandles[i]);
     });
+
+    /* the plot-style dictionary every LAYER's group 390 points into:
+       a with-default dictionary whose one entry, Normal, is a
+       placeholder — exactly the shape AutoCAD itself writes */
+    w(0, 'ACDBDICTIONARYWDFLT'); w(5, plotStyleDictHandle); w(330, rootHandle);
+    w(100, 'AcDbDictionary'); w(281, 1);
+    w(3, 'Normal'); w(350, plotStyleHolderHandle);
+    w(100, 'AcDbDictionaryWithDefault'); w(340, plotStyleHolderHandle);
+    w(0, 'ACDBPLACEHOLDER'); w(5, plotStyleHolderHandle); w(330, plotStyleDictHandle);
 
     /* ---- dictionary-owned proxy objects: same record shape as the
        entity form, under AcDbProxyObject ---- */
@@ -1668,9 +1828,9 @@ export const writeDxf = (drawing: Drawing): string => {
     if (layoutDictHandle) {
       w(0, 'DICTIONARY'); w(5, layoutDictHandle); w(330, rootHandle);
       w(100, 'AcDbDictionary'); w(281, 1);
-      layouts.forEach((l, i) => { w(3, l.name); w(350, layoutHandles[i]); });
-      layouts.forEach((l, i) => {
-        w(0, 'LAYOUT'); w(5, layoutHandles[i]); w(330, layoutDictHandle);
+      outLayouts.forEach(({ l, h }) => { w(3, l.name); w(350, h); });
+      outLayouts.forEach(({ l, h, brh }, i) => {
+        w(0, 'LAYOUT'); w(5, h); w(330, layoutDictHandle);
         w(100, 'AcDbPlotSettings');
         w(1, ''); w(2, l.paperSize ?? 'none_device');
         w(4, ''); w(6, '');
@@ -1684,11 +1844,10 @@ export const writeDxf = (drawing: Drawing): string => {
         w(12, fmt(l.insBase?.x ?? 0)); w(22, fmt(l.insBase?.y ?? 0)); w(32, fmt(l.insBase?.z ?? 0));
         if (l.extMin) { w(14, fmt(l.extMin.x)); w(24, fmt(l.extMin.y)); w(34, fmt(l.extMin.z ?? 0)); }
         if (l.extMax) { w(15, fmt(l.extMax.x)); w(25, fmt(l.extMax.y)); w(35, fmt(l.extMax.z ?? 0)); }
-        const brh = l.blockName ? brHandleOf(l.blockName) : undefined;
-        w(330, brh ?? (/model/i.test(l.name) ? msRecHandle : psRecHandle));
+        w(330, brh);                        /* the block record, which 340s back */
       });
     }
-    if (groupDictHandle) {
+    {
       w(0, 'DICTIONARY'); w(5, groupDictHandle); w(330, rootHandle);
       w(100, 'AcDbDictionary'); w(281, 1);
       groups.forEach((g, i) => { w(3, g.name); w(350, groupHandles[i]); });
@@ -1698,7 +1857,10 @@ export const writeDxf = (drawing: Drawing): string => {
         w(300, g.description ?? '');
         w(70, g.name.startsWith('*') ? 1 : 0);
         w(71, g.selectable === false ? 0 : 1);
-        for (const h of g.entityHandles) w(340, h);
+        for (const h of g.entityHandles) {
+          const nh = newHandleOf.get(h.toUpperCase());
+          if (nh) w(340, nh);              /* unwritten members stay out */
+        }
       });
     }
     if (mlDictHandle) {
@@ -1769,6 +1931,7 @@ export const writeDxf = (drawing: Drawing): string => {
   }
 
   w(0, 'EOF');
+  out[handseedAt] = handleCounter.toString(16).toUpperCase();
   return out.join('\n') + '\n';
 };
 

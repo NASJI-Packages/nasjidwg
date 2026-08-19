@@ -101,15 +101,20 @@ What the workflow does not give you for free is correctness, so nothing
 here rests on it. Every claim in this README is backed by something that
 runs: `npm test` regenerates the whole corpus with the library's own
 writers, the DWG and DXF codecs cross-check each other, and
-`node tools/validate-external.mjs` re-opens all seven writable releases in
-AutoCAD and fails if any of them regresses. Defects found by those
-mechanisms — a Reed-Solomon parity bug that made every R2007 data page
-invalid, an inline ACIS payload written one bit-alignment off, a CLASSES
-section AutoCAD refuses when empty, an AC1021 table cell written as a bare
-string where the format keeps a whole typed value, a view twist that was
-never decoded and drifted every field behind it, and a one-byte dictionary
-shift that had blocked R13 for four campaigns — were found because the
-mechanisms exist, not because the model was careful.
+`node tools/validate-external.mjs` re-opens all seven writable releases —
+and the ASCII DXF — in AutoCAD and fails if any of them regresses.
+Defects found by those mechanisms — a Reed-Solomon parity bug that made
+every R2007 data page invalid, an inline ACIS payload written one
+bit-alignment off, a CLASSES section AutoCAD refuses when empty, an AC1021
+table cell written as a bare string where the format keeps a whole typed
+value, a view twist that was never decoded and drifted every field behind
+it, a one-byte dictionary shift that had blocked R13 for four campaigns, a
+VPORT aspect field that left as the raw view width when DXF group 41
+means width ÷ height, and DXF header extents re-derived from entities so
+that two invisible strays framed 99.96% blank paper — were found because
+the mechanisms exist, not because the model was careful. The last two
+came in as [a field report](https://github.com/NASJI-Packages/nasjidwg/issues/1),
+the most valuable kind of issue this project receives.
 
 ---
 

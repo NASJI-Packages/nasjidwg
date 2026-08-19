@@ -24,7 +24,17 @@ opens and AUDITs each one in AutoCAD 2027's Core Console, and fails if any
 of them stops passing.
 
 DXF is read and written in both the ASCII and binary forms, at every
-group-code width.
+group-code width. The ASCII writer's output is gated in the same external
+run (`DXF` row): the corpus DXF opens in AutoCAD 2027 at **AUDIT 0
+errors**. The campaign that got it there was driven by a 72 MB production
+drawing (AC1032, 232,382 model entities) whose 270 MB DXF now opens with a
+single AUDIT fix — a one-dash linetype broken in the source, which
+AutoCAD's own DXFOUT reproduces identically. DXFIN turned out to be far
+stricter than any DWG reader: one missing group — a LAYER without its
+plot-style 390, an absent empty VIEW table, a `97` inside a spline hatch
+edge, gradient groups in an AC1015 file, an MLINE without its style's
+hard 340 — discards the entire file, and each of those rules is now
+pinned in `test/dxf-acadopen.test.ts`.
 
 ### Known limits
 
@@ -33,6 +43,14 @@ group-code width.
 - ACAD_TABLE, MULTILEADER, LIGHT and the underlays are application
   classes and cannot exist in R13/R14; the writer reports them as
   skipped rather than writing something a reader would not understand.
+- An ASM-dialect kernel stream (the solids of R2010+ files) has no
+  spelling an AC1015 DXF can carry: AutoCAD's own R2000 DXFOUT downgrades
+  the kernel data to the ACIS-400 text dialect — record ids dropped,
+  fields reshaped — and that translator does not exist here yet. One
+  inline ASM entity makes DXFIN discard the entire file, so `writeDxf`
+  keeps such REGION/3DSOLID/BODY entities out and says so in
+  `drawing.warnings`. Classic ACIS streams (R13–R2007 sources) travel
+  as always.
 - Pre-R13 table names are bound to CP1252 by the format itself; entity
   text still travels losslessly through `\U+` escapes.
 - Real (non-nasjidwg) proxy payloads are preserved exactly as the source

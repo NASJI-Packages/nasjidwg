@@ -3298,7 +3298,14 @@ const decodeObjectSpecific = (x: Ctx, typeName: string, raw: RawObject): void =>
        * rotated, and DXF group 51 goes out a confident zero. */
       const name = x.tableFlags();
       const height = r.bd();
-      const aspectRatio = r.bd();
+      /* The double after the height is the view WIDTH, not the ratio.
+       * DXF group 41 is width / height: AutoCAD 2027's own table reports
+       * 41 = 2.3517 for a record storing 8.0457 beside a 3.4212 height
+       * (2.3517 x 3.4212 = 8.0457, and LibreDWG divides here too), so
+       * the ratio the model speaks is derived at this boundary. */
+      const viewWidth = r.bd();
+      const aspectRatio = Number.isFinite(viewWidth) && Number.isFinite(height)
+        && height > 0 && viewWidth > 0 ? viewWidth / height : undefined;
       const cx = r.rd(), cy = r.rd();
       const [tx, ty, tz] = r.bd3();       /* target comes BEFORE direction */
       const [dx2, dy2, dz2] = r.bd3();

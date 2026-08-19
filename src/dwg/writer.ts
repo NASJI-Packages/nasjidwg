@@ -3352,8 +3352,12 @@ const writeDwgImpl = (
       : [number, number, number] => p ? [p.x, p.y, p.z ?? 0] : [d[0], d[1], d[2]];
     makeObject(65, vportActive, (w) => {
       tableFlags(w, '*Active');
+      const avH = av?.height && av.height > 0 ? av.height : 100;
       w.bd(av?.height ?? 100);            /* view height */
-      w.bd(av?.aspectRatio ?? 150);       /* view width / aspect */
+      /* the slot stores the view WIDTH; the model speaks DXF's 41 =
+         width / height, so the ratio multiplies back out here (the
+         1.5 x 100 default is the same 150 this always wrote) */
+      w.bd((av?.aspectRatio && av.aspectRatio > 0 ? av.aspectRatio : 1.5) * avH);
       const [ccx, ccy] = p2(av?.center, 50, 50);
       w.rd(ccx); w.rd(ccy);               /* view center */
       const [ttx, tty, ttz] = p3v(av?.target, [0, 0, 0]);
