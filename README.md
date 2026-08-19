@@ -460,8 +460,16 @@ writers can emit), warm, mean of 30 runs on a development machine
 Those figures include the LZ77 matchers — compression bought a 37-43%
 smaller file (R2004: 6.6 → 3.8 KB, R2007: 9.6 → 6.0 KB, R2018:
 7.7 → 4.4 KB on the corpus drawing) without moving the write times out
-of the low milliseconds. On a real 1.2 MB R2018 drawing with 56 blocks,
-a full decode measured about 82 ms.
+of the low milliseconds.
+
+Reading scales to real production files: a 72 MB R2018 site drawing —
+1.7 million object records, 246k model-space entities, 6,484 block
+definitions — decodes in about 3.4 s (0.13.1; it was 4.9 s before that
+release went after allocation churn: handle references resolve without
+building an object, colours are shared frozen singletons, the handle
+table is a dense array instead of a Map, unaligned doubles merge three
+words instead of eight bytes, and page decompression copies in blocks).
+The output is byte-for-byte identical to what 0.13.0 produced.
 
 ## License
 

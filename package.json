@@ -28,6 +28,7 @@
     "LICENSE",
     "NOTICE",
     "PROVENANCE.md",
+    "docs/comparison.png",
     "docs/comparison.svg"
   ],
   "scripts": {
