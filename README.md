@@ -50,12 +50,35 @@ AutoCAD 2027 with **zero AUDIT errors**, and a harness in the repository
 re-checks every one so a regression fails loudly. Getting there took nine
 campaigns against AutoCAD as the oracle and turned up defects no
 self-consistent test could ever have found, because a reader and a writer
-can share the same wrong belief and still round-trip perfectly. R2007
-carries one documented limit, and it is the format's own rather than
+can share the same wrong belief and still round-trip perfectly. The
+tenth campaign put a real drawing through: 72 MB, 246k entities, 9,522
+fit splines, 68 ACIS solids — read, rewritten in both handle modes and
+once more through a full DXF round trip, then opened in AutoCAD 2027 at
+**RECOVER and AUDIT 0 errors, 0 erased** (the untouched source itself
+audits 18), its plot matching AutoCAD's plot of the original section for
+section. Eleven writer spellings this library's own reader had always
+tolerated died there — the R2013+ SPLINE scenario form, multi-solid AcDs
+payloads, forged ellipse normals, true colours collapsed to an index
+among them — each one read off AutoCAD's own bytes and pinned by a test.
+R2007 carries one documented limit, and it is the format's own rather than
 ours: an ASM-dialect ACIS payload cannot travel inline in an AC1021 file,
 because that container's kernel reads only the pre-ASM form — so it
 leaves as SAT text, or is reported to the caller. See
 [PARITY.md](PARITY.md).
+
+**A drawing comes back the way it was drawn.** Entities arrive in the
+order they paint, not the order they were stored: the SORTENTSTABLE that
+a modern file uses to put a mask over the wall it hides is decoded and
+applied, so `drawing.entities` *is* the draw order, and a rewrite that
+keeps its handles writes the table back out. Attributes keep their
+invisible and constant flags, so a title block's hidden ATTDEFs stay
+hidden instead of surfacing as giant text. Text keeps the STYLE it was
+written with — font file, typeface, width factor, oblique — including
+the TrueType families a file names only in the style record's extended
+data. And curvature that is degenerate stays degenerate: a bulge whose
+sagitta is a billionth of its chord, or an arc stored with a zero sweep,
+draws as the hairline AutoCAD draws rather than as the enormous circle
+it was cut from.
 
 **A drawing that is laid out at an angle stays that way.** Site plans are
 routinely drawn turned — the model sits at 45°, and it reads square only
@@ -468,12 +491,12 @@ of the low milliseconds.
 
 Reading scales to real production files: a 72 MB R2018 site drawing —
 1.7 million object records, 246k model-space entities, 6,484 block
-definitions — decodes in about 3.4 s (0.13.1; it was 4.9 s before that
-release went after allocation churn: handle references resolve without
-building an object, colours are shared frozen singletons, the handle
-table is a dense array instead of a Map, unaligned doubles merge three
-words instead of eight bytes, and page decompression copies in blocks).
-The output is byte-for-byte identical to what 0.13.0 produced.
+definitions — decodes in about 3.5 s, measured on 0.14.2. It was 4.9 s
+until 0.13.1 went after allocation churn: handle references resolve
+without building an object, colours are shared frozen singletons, the
+handle table is a dense array instead of a Map, unaligned doubles merge
+three words instead of eight bytes, and page decompression copies in
+blocks. None of that changed a byte of the output.
 
 ## License
 
