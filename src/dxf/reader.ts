@@ -1490,6 +1490,20 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
               if (fh > 0) st.fixedHeight = fh;
               const wf = q.num(41, 0);
               if (wf > 0) st.widthFactor = wf;
+              const ob = q.num(50, 0);
+              if (ob) st.oblique = ob;
+              /* the TrueType typeface lives in the record's ACAD xdata */
+              for (const g of parseXdata(rec.g) ?? []) {
+                if (g.appName !== 'ACAD') continue;
+                for (const val of g.values) {
+                  if ('value' in val && val.code === 1000 &&
+                      typeof val.value === 'string' && !st.typeface) st.typeface = val.value;
+                  if ('value' in val && val.code === 1071 && typeof val.value === 'number') {
+                    if (val.value & 0x1000000) st.italic = true;
+                    if (val.value & 0x2000000) st.bold = true;
+                  }
+                }
+              }
               drawing.textStyles.push(st);
             }
           }

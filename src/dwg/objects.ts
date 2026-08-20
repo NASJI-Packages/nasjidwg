@@ -99,6 +99,11 @@ export interface TableRecord {
   bigFont?: string;
   fixedHeight?: number;
   widthFactor?: number;
+  oblique?: number;
+  /** STYLE only: the record's own EED, where a TrueType style keeps its
+   *  typeface. Resolved to a name by the reader, which is the first place
+   *  that knows which APPID each group belongs to. */
+  xdata?: XdataGroup[];
   /* block header */
   basePoint?: Point3;
   anonymous?: boolean;
@@ -124,6 +129,8 @@ export interface RawObject {
   layerHandle?: number;
   ltypeFlags?: number;
   ltypeHandle?: number;
+  /** TEXT/ATTRIB/ATTDEF/MTEXT: the STYLE record the object is drawn with. */
+  styleHandle?: number;
   prev?: number;
   next?: number;
   /* per-type extras used by the assembler */
@@ -569,6 +576,7 @@ class Ctx {
   commonEntity(): CommonEntity {
     const { r, v } = this;
     const handle = r.hValue();
+    this.selfHandle = handle;
     this.xdata = parseEed(r, this.c);
     if (r.b()) {                          /* cached display list */
       const size = v <= 2007 ? r.rl() : r.bll();
@@ -645,6 +653,9 @@ class Ctx {
   nextHandle?: number;
   layerHandle?: number;
   ltypeHandle?: number;
+  /** The record's own handle, which a relative reference resolves against. */
+  selfHandle = 0;
+  styleHandle?: number;
 
   numReactors = 0;
   xdicMissing = false;
@@ -745,7 +756,7 @@ const decodeTextLike = (
       halign: H_ALIGN[ha] ?? 'left',
       valign: V_ALIGN[va] ?? 'baseline'
     });
-    x.hr.h();                             /* style handle */
+    x.styleHandle = x.handle(x.selfHandle);   /* style */
     return ent;
   }
   const df = r.rc();                      /* dataflags: bits mark ABSENT fields */
@@ -774,7 +785,7 @@ const decodeTextLike = (
     valign: V_ALIGN[va] ?? 'baseline',
     ...(textExt ? { extrusion: textExt } : {})
   });
-  x.hr.h();                               /* style handle */
+  x.styleHandle = x.handle(x.selfHandle);     /* style */
   return ent;
 };
 
@@ -1034,7 +1045,7 @@ const decodeEntitySpecific = (
       r.bs();                             /* flow direction */
       r.bd(); r.bd();                     /* extents */
       const raw = x.text();
-      x.hr.h();                           /* style */
+      x.styleHandle = x.handle(x.selfHandle);   /* style */
       if (v >= 2000) { r.bs(); r.bd(); r.b(); }    /* line spacing */
       if (v >= 2004) {
         const bg = r.bl();
@@ -3083,14 +3094,21 @@ const decodeObjectSpecific = (x: Ctx, typeName: string, raw: RawObject): void =>
       r.b(); r.b();                       /* is_shape, is_vertical */
       const fixedHeight = r.bd();
       const widthFactor = r.bd();
-      r.bd(); r.rc(); r.bd();             /* oblique, generation, last height */
+      const oblique = r.bd();
+      r.rc(); r.bd();                     /* generation, last height */
       const font = x.text();
       const bigFont = x.text();
+      /* A TrueType style names its FILE above and its TYPEFACE in the
+         record's EED, which is carried through whole: at this depth an
+         xdata group knows only its APPID's HANDLE, and the reader is the
+         first place that can say which of them is ACAD. */
       raw.table = {
         kind: 'style', name, font: font || undefined,
         bigFont: bigFont || undefined,
         fixedHeight: fixedHeight || undefined,
-        widthFactor: widthFactor !== 1 ? widthFactor : undefined
+        widthFactor: widthFactor !== 1 ? widthFactor : undefined,
+        oblique: oblique || undefined,
+        xdata: x.xdata
       };
       return;
     }
@@ -3636,6 +3654,8 @@ export const decodeObjectBody = (
       entity = null;                      /* structural member: folds later */
     }
     if (entity) {
+      /* the type-specific decode is what reads the style reference */
+      raw.styleHandle = x.styleHandle;
       entity.handle = raw.handle.toString(16).toUpperCase();
       entity.color = common.color;
       if (common.ltypeScale !== 1) entity.linetypeScale = common.ltypeScale;

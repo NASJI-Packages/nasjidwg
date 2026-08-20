@@ -9,7 +9,7 @@
 
 import type {
   BlockDefinition, Drawing, Entity, FileVersion, HeaderUcs, Layer, MeshEntity,
-  PolylineEntity
+  PolylineEntity, TextStyle, XdataGroup
 } from '../core/model.js';
 import { emptyDrawing } from '../core/model.js';
 import {
@@ -255,6 +255,9 @@ export const readDwg = (
   const ltypeName = new Map<number, string>();
   const appidName = new Map<number, string>();
   const dimStyleName = new Map<number, string>();
+  const styleName = new Map<number, string>();
+  /* style -> its own EED, read once the APPID names are all in */
+  const styleEed: { st: TextStyle; xd: XdataGroup[] }[] = [];
   const blockHeaderByHandle = new Map<number, RawObject>();
   let modelSpaceHandle: number | undefined;
   let paperSpaceHandle: number | undefined;
@@ -299,12 +302,18 @@ export const readDwg = (
         });
         break;
       case 'style':
-        drawing.textStyles.push({
-          name: t.name || 'Standard',
-          font: t.font, bigFont: t.bigFont,
-          fixedHeight: t.fixedHeight, widthFactor: t.widthFactor,
-          handle: raw.handle.toString(16).toUpperCase()
-        });
+        styleName.set(raw.handle, t.name || 'Standard');
+        {
+          const st: TextStyle = {
+            name: t.name || 'Standard',
+            font: t.font, bigFont: t.bigFont,
+            fixedHeight: t.fixedHeight, widthFactor: t.widthFactor,
+            oblique: t.oblique,
+            handle: raw.handle.toString(16).toUpperCase()
+          };
+          if (t.xdata) styleEed.push({ st, xd: t.xdata });
+          drawing.textStyles.push(st);
+        }
         break;
       case 'blockHeader':
         blockHeaderByHandle.set(raw.handle, raw);
@@ -323,6 +332,28 @@ export const readDwg = (
         break;
       default:
         break;
+    }
+  }
+  /* THE TRUETYPE TYPEFACE. A TTF style keeps its FILE in the font field
+     and its FAMILY in the record's ACAD xdata — 1000 is the family and the
+     top two bits of the 1071 flag word are italic and bold — and a style
+     may leave the file empty and say all of it there. The APPID names are
+     known only now, so this is the earliest the group can be identified. */
+  for (const { st, xd } of styleEed) {
+    for (const g of xd) {
+      const app = g.appName
+        ?? (g.appHandle ? appidName.get(parseInt(g.appHandle, 16)) : undefined);
+      if (app !== 'ACAD') continue;
+      for (const val of g.values) {
+        if (!('value' in val)) continue;
+        if (val.code === 1000 && typeof val.value === 'string' && !st.typeface) {
+          st.typeface = val.value;
+        }
+        if (val.code === 1071 && typeof val.value === 'number') {
+          if (val.value & 0x1000000) st.italic = true;
+          if (val.value & 0x2000000) st.bold = true;
+        }
+      }
     }
   }
   if (!drawing.layers.length) drawing.layers = emptyDrawing().layers;
@@ -491,6 +522,13 @@ export const readDwg = (
     if (!e) continue;
     if (raw.layerHandle !== undefined) {
       e.layer = layerName.get(raw.layerHandle) ?? '0';
+    }
+    /* the STYLE a text names: TEXT/ATTRIB/ATTDEF and MTEXT each point at a
+       style record, and without the name behind that pointer no consumer
+       can know which font, width factor or slant the file asked for */
+    if (raw.styleHandle !== undefined && (e.type === 'text' || e.type === 'mtext')) {
+      const sn = styleName.get(raw.styleHandle);
+      if (sn) e.style = sn;
     }
     if (raw.ltypeFlags === 3 && raw.ltypeHandle !== undefined) {
       e.linetype = ltypeName.get(raw.ltypeHandle);

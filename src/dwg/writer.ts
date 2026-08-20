@@ -2939,7 +2939,7 @@ const writeDwgImpl = (
       w.b(0); w.b(0);                     /* shape, vertical */
       w.bd(st.fixedHeight ?? 0);
       w.bd(st.widthFactor ?? 1);
-      w.bd(0);                            /* oblique */
+      w.bd(st.oblique ?? 0);
       w.rc(0);                            /* generation */
       w.bd(2.5);                          /* last height */
       w.t(outText(r14Str(st.font ?? 'txt')));

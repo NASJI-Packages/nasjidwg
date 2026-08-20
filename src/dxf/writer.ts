@@ -604,7 +604,7 @@ export const writeDxf = (drawing: Drawing): string => {
     w(2, st.name); w(70, 0);
     w(40, fmt(st.fixedHeight ?? 0));
     w(41, fmt(st.widthFactor ?? 1));
-    w(50, 0); w(71, 0); w(42, 2.5);
+    w(50, fmt(st.oblique ?? 0)); w(71, 0); w(42, 2.5);
     w(3, st.font ?? 'txt');
     w(4, st.bigFont ?? '');
   }

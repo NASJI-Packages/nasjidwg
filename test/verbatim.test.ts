@@ -149,12 +149,21 @@ describe('verbatim rewrite: the byte-level proof', () => {
   });
 
   it('is the option that does it, not the writer being deterministic', () => {
-    /* At least one covered record does NOT survive re-encoding — the
-       corpus TEXT entity is one: its Arabic goes through the writer's
-       shaper again. Verbatim emission is what keeps it exact. */
-    const drifted = covered.filter((h) => rPlain.get(h) !== r1.get(h));
-    expect(drifted.length).toBeGreaterThan(0);
-    for (const h of drifted) expect(rVerbatim.get(h)).toBe(r1.get(h));
+    /* The drawing still holds records the plain path cannot reproduce —
+       INSERT, DIMENSION, MLINE, LEADER and their kin re-model on the way
+       out — which is what the option exists for.
+       The covered set is no longer among them, and that is a fix rather
+       than a weakening: the corpus TEXT was the last one to drift, and it
+       drifted because the reader dropped the STYLE its record pointed at
+       and the writer put a default handle back in its place. Now that the
+       reader keeps the style, the record it writes is the record it read. */
+    const anyDrift = allEntities(g1)
+      .filter(({ e }) => e.handle && e.record && rPlain.get(e.handle) !== r1.get(e.handle));
+    expect(anyDrift.length).toBeGreaterThan(0);
+    for (const h of covered) {
+      expect(rPlain.get(h), `plain record ${h}`).toBe(r1.get(h));
+      expect(rVerbatim.get(h), `verbatim record ${h}`).toBe(r1.get(h));
+    }
   });
 
   it('stays byte-identical over any number of generations', () => {

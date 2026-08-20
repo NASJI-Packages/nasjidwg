@@ -186,7 +186,7 @@ downloaded, and `npm test` reproduces every fixture it asserts on.
 | Entity | Status | Notes |
 |---|---|---|
 | LINE, POINT, CIRCLE, ARC, ELLIPSE | ✅ | oracle-verified geometry |
-| TEXT, ATTRIB/ATTDEF (as text), MTEXT | ✅ | R13/14 explicit form + R2000+ dataflags form. ATTRIB/ATTDEF carry their marker (`attribute`) and their 70-flags — bit 1 sets `invisible`, bit 2 `constant` — verified against a field drawing whose 150-unit invisible ATTDEFs used to paint as plain visible text |
+| TEXT, ATTRIB/ATTDEF (as text), MTEXT | ✅ | R13/14 explicit form + R2000+ dataflags form. ATTRIB/ATTDEF carry their marker (`attribute`) and their 70-flags — bit 1 sets `invisible`, bit 2 `constant` — verified against a field drawing whose 150-unit invisible ATTDEFs used to paint as plain visible text. Each of the four resolves the STYLE record it points at, so `style` names the font, width factor and slant the file asked for: the pointer used to be read and dropped, and a 72 MB drawing whose 59 styles mix TTF and SHX handed back all 1,652 of its text objects with no style at all |
 | LWPOLYLINE (bulges, widths, ids) | ✅ | |
 | POLYLINE_2D/3D + vertex folding | ✅ | chain (≤R2000) and owned (R2004+) forms |
 | POLYLINE_MESH / POLYLINE_PFACE + faces | ✅ | mesh entity; 1–2 index faces kept |
@@ -322,7 +322,7 @@ text, leader/mleader/mline → polylines, tolerance → text) and the rest
 | Capability | Status |
 |---|---|
 | Bounding boxes (entity + drawing, insert-aware) | ✅ |
-| 2D transforms + deep clone | ✅ |
+| 2D transforms + deep clone | ✅ a transform that is not a similarity turns a circle, arc or ellipse into the ellipse it really becomes (conjugate semi-diameters → axes + parameter shift), so explode and both exporters place a squashed round curve where AutoCAD draws it |
 | Explode: insert (recursive), polyline→arcs | ✅ |
 | Explode: hatch pattern lines | ✅ clipped to boundaries, with dashes |
 | Dimension geometry generation | ✅ `explodeDimension`: extension/dimension lines, arrowheads, measurement text (with `<>`/override rules and DIMSCALE/DIMTXT/DIMEXO/DIMEXE) for linear, aligned, radius, diameter, both angulars and ordinate — SVG/PDF fall back to it, and the R12 writer materializes it as a real *D block |

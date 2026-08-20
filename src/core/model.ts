@@ -746,10 +746,21 @@ export interface Linetype {
 
 export interface TextStyle {
   name: string;
-  font?: string;                   /* file name, e.g. 'arial.ttf' */
+  /** The font FILE, e.g. 'arial.ttf'. A name with no extension is an .shx. */
+  font?: string;
   bigFont?: string;
   fixedHeight?: number;
   widthFactor?: number;
+  /** Slant, in degrees. */
+  oblique?: number;
+  /** The TrueType TYPEFACE, which is where a TTF style really says its
+   *  family: AutoCAD keeps the file in `font` and the family here, in the
+   *  style record's ACAD xdata — and a style may leave the file empty and
+   *  say all of it through this one. Read on both codecs; a rewrite carries
+   *  the file name, so writing it back is still owed. */
+  typeface?: string;
+  bold?: boolean;
+  italic?: boolean;
   /** Source-file handle (hex), for handle-stable rewrites. */
   handle?: string;
 }

@@ -598,11 +598,85 @@ export const contentBounds = (drawing: Drawing): Bounds | null => {
  * transform + explode
  * ------------------------------------------------------------------ */
 
+/** The transform's linear part, applied to a direction. */
+const linear = (m: Transform2, p: Point2): Point2 =>
+  ({ x: m.a * p.x + m.c * p.y, y: m.b * p.x + m.d * p.y });
+
+/** Is this transform a SIMILARITY — the same scale on both axes, and the
+ *  axes still square? Only under one of those does a circle stay a circle. */
+const isSimilarity = (m: Transform2): boolean => {
+  const c1 = Math.hypot(m.a, m.b), c2 = Math.hypot(m.c, m.d);
+  const s = Math.max(c1, c2, 1);
+  return Math.abs(c1 - c2) <= 1e-12 * s &&
+    Math.abs(m.a * m.c + m.b * m.d) <= 1e-12 * s * s;
+};
+
+/** The two CONJUGATE semi-diameters of a round curve's image, turned back
+ *  into the axis pair an ellipse names plus the parameter shift that keeps
+ *  a swept one on exactly the points it drew. */
+const conjAxes = (u: Point2, v: Point2) => {
+  const uu = u.x * u.x + u.y * u.y;
+  const vv = v.x * v.x + v.y * v.y;
+  /* |P(t)| peaks here, and P(t0), P(t0 + pi/2) are the axes themselves */
+  const t0 = 0.5 * Math.atan2(2 * (u.x * v.x + u.y * v.y), uu - vv);
+  const c0 = Math.cos(t0), s0 = Math.sin(t0);
+  const ax = u.x * c0 + v.x * s0, ay = u.y * c0 + v.y * s0;
+  const bx = v.x * c0 - u.x * s0, by = v.y * c0 - u.y * s0;
+  return {
+    major: { x: ax, y: ay }, minor: Math.hypot(bx, by), t0,
+    /* a mirrored transform hands back a left-handed pair, and an ellipse is
+       always right-handed — so its parameter runs the other way */
+    flip: ax * by - ay * bx < 0
+  };
+};
+
+/** A circle, arc or ellipse carried through a transform that is NOT a
+ *  similarity. The image is an ellipse and nothing else can stand for it:
+ *  scaling a radius by the magnitude of one column — all a single scale
+ *  factor can say — leaves the curve nowhere near its own centre. Measured
+ *  on a production drawing, one arc-fit hairline (radius 3.1 million, sweep
+ *  1.8 microradians) under a 600x800 placement landed 580,000 units away
+ *  and held that drawing's extents at five times its true height. */
+const squashToEllipse = (
+  e: Extract<Entity, { type: 'circle' | 'arc' | 'ellipse' }>, m: Transform2
+): Entity => {
+  let u: Point2, v: Point2, p0: number | undefined, p1 = TAU;
+  if (e.type === 'ellipse') {
+    const rr = Math.hypot(e.majorAxis.x, e.majorAxis.y);
+    const co = rr > 0 ? e.majorAxis.x / rr : 1;
+    const si = rr > 0 ? e.majorAxis.y / rr : 0;
+    const mr = rr * e.ratio;
+    u = linear(m, { x: rr * co, y: rr * si });
+    v = linear(m, { x: -mr * si, y: mr * co });
+    p0 = e.startParam; p1 = e.endParam;
+  } else {
+    u = linear(m, { x: e.radius, y: 0 });
+    v = linear(m, { x: 0, y: e.radius });
+    if (e.type === 'arc') { p0 = e.startAngle; p1 = e.endAngle; }
+  }
+  const A = conjAxes(u, v);
+  const rx = Math.hypot(A.major.x, A.major.y);
+  let s0 = (p0 ?? 0) - A.t0, s1 = p1 - A.t0;
+  if (A.flip) { const t = s0; s0 = -s1; s1 = -t; }
+  const o = e as unknown as Extract<Entity, { type: 'ellipse' }> &
+    { radius?: number; startAngle?: number; endAngle?: number };
+  o.center = apply3(m, e.center);
+  o.type = 'ellipse';
+  o.majorAxis = { x: A.major.x, y: A.major.y, z: 0 };
+  o.ratio = rx > 0 ? A.minor / rx : 1;
+  o.startParam = p0 === undefined ? 0 : s0;
+  o.endParam = p0 === undefined ? TAU : s1;
+  delete o.radius; delete o.startAngle; delete o.endAngle;
+  return o;
+};
+
 /** Return a transformed copy of an entity (2D affine; z passes through). */
 export const transformEntity = (ent: Entity, m: Transform2): Entity => {
   const e = clone(ent);
   const rot = Math.atan2(m.b, m.a);
   const scl = Math.hypot(m.a, m.b);
+  if ((e.type === 'circle' || e.type === 'arc' || e.type === 'ellipse') &&
+      !isSimilarity(m)) return squashToEllipse(e, m);
   switch (e.type) {
     case 'line': e.start = apply3(m, e.start); e.end = apply3(m, e.end); break;
     case 'point': e.position = apply3(m, e.position); break;
