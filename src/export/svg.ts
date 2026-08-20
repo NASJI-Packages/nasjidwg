@@ -12,8 +12,8 @@ import { explodeDimension } from '../core/dim.js';
 import { shxTextStrokes } from '../text/shx.js';
 import { layoutMtext } from '../text/layout.js';
 import {
-  contentBounds, flattenPolyline, insertTransform, compose, translation,
-  transformEntity, toWcs, type Transform2
+  arcSweep, contentBounds, flattenPolyline, insertTransform, compose,
+  translation, transformEntity, toWcs, type Transform2
 } from '../core/geo.js';
 
 export interface SvgOptions {
@@ -174,9 +174,15 @@ export const writeSvg = (drawing: Drawing, opts: SvgOptions = {}): string => {
       case 'circle':
         out.push(`<circle cx="${P(e.center.x)}" cy="${P(-e.center.y)}" r="${P(e.radius)}" stroke="${stroke}"${dashAttr(e)}/>`);
         return;
-      case 'arc':
-        out.push(`<path d="${polyPath(arcPoints(e.center.x, e.center.y, e.radius, e.startAngle, e.endAngle), false)}" stroke="${stroke}"${dashAttr(e)}/>`);
+      case 'arc': {
+        /* equal angles are a zero-length arc, not a whole circle: drawing
+           the circle put rings in the picture AutoCAD never shows — an
+           arc-fit leftover keeps the two angles bit-identical */
+        const sweep = arcSweep(e.startAngle, e.endAngle);
+        if (!sweep) return;
+        out.push(`<path d="${polyPath(arcPoints(e.center.x, e.center.y, e.radius, e.startAngle, e.startAngle + sweep), false)}" stroke="${stroke}"${dashAttr(e)}/>`);
         return;
+      }
       case 'ellipse': {
         const rx = Math.hypot(e.majorAxis.x, e.majorAxis.y);
         const ry = rx * e.ratio;

@@ -188,6 +188,70 @@ describe('object coordinates (the mirrored-entity family)', () => {
     /* the stored point is still the object-plane one, as AutoCAD writes it */
     expect(c?.type === 'circle' && c.center.x).toBeCloseTo(-10, 9);
   });
+
+  /* ELLIPSE is the exception the format makes: its centre and major axis
+     are spelled "in WCS", so the object plane names the sweep's direction
+     and nothing else. Handle 1F0324 of a 246,377-entity field drawing sits
+     at (125.53, -1.70) with a negated normal, and AutoCAD 2027 draws it at
+     x = +125.5 — mapping the centre threw it to -125.5. */
+  const flippedEllipse = (): Entity => ({
+    type: 'ellipse', layer: '0', color: { kind: 'byLayer' },
+    center: { x: 125.53, y: -1.7, z: 0 },
+    majorAxis: { x: 0, y: 3.8376, z: 0 }, ratio: 0.91867,
+    startParam: -0.0269, endParam: 0.1582,
+    extrusion: { x: 0, y: 0, z: -1 }
+  });
+
+  it('leaves a negated-normal ellipse where the file put it', () => {
+    const w = toWcs(flippedEllipse());
+    expect(w.type === 'ellipse' && w.center.x).toBeCloseTo(125.53, 9);
+    expect(w.type === 'ellipse' && w.center.y).toBeCloseTo(-1.7, 9);
+    expect(w.extrusion).toBeUndefined();
+    const b = entityBounds(flippedEllipse())!;
+    expect(b.min.x).toBeGreaterThan(0);
+    const dd = emptyDrawing();
+    dd.entities.push(flippedEllipse());
+    expect(writeSvg(dd)).not.toMatch(/-125\.5/);
+  });
+
+  it('runs that ellipse sweep the other way instead', () => {
+    const w = toWcs(flippedEllipse());
+    expect(w.type === 'ellipse' && w.startParam).toBeCloseTo(-0.1582, 9);
+    expect(w.type === 'ellipse' && w.endParam).toBeCloseTo(0.0269, 9);
+  });
+
+  /* A negated normal on a REFERENCE is a reflection, not a half turn: the
+     block comes out mirrored about the Y axis and turned the other way.
+     Adding pi to the rotation instead flipped it about the wrong axis and
+     put the contents on the far side of the insertion point. */
+  const mirroredInsert = (): Drawing => {
+    const d = emptyDrawing();
+    d.blocks['M'] = {
+      name: 'M', basePoint: { x: 0, y: 0, z: 0 }, entities: [{
+        type: 'line', layer: '0', color: { kind: 'byLayer' },
+        start: { x: 10, y: 0, z: 0 }, end: { x: 10, y: 5, z: 0 }
+      }]
+    };
+    d.entities.push({
+      type: 'insert', layer: '0', color: { kind: 'byLayer' }, blockName: 'M',
+      position: { x: -20, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 },
+      rotation: 0, extrusion: { x: 0, y: 0, z: -1 }
+    });
+    return d;
+  };
+
+  it('mirrors a negated-normal reference instead of turning it', () => {
+    const d = mirroredInsert();
+    const w = toWcs(d.entities[0]);
+    expect(w.type === 'insert' && w.position.x).toBeCloseTo(20, 9);
+    expect(w.type === 'insert' && w.scale?.x).toBeCloseTo(-1, 9);
+    expect(w.type === 'insert' && w.rotation).toBeCloseTo(0, 9);
+    const b = entityBounds(d.entities[0], d.blocks)!;
+    /* the child runs UP from the axis, as it does in the definition */
+    expect(b.min.x).toBeCloseTo(10, 9);
+    expect(b.min.y).toBeCloseTo(0, 9);
+    expect(b.max.y).toBeCloseTo(5, 9);
+  });
 });
 
 describe('writer output validity', () => {

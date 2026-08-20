@@ -20,8 +20,8 @@ import { explodeDimension } from '../core/dim.js';
 import { shxTextStrokes } from '../text/shx.js';
 import { layoutMtext } from '../text/layout.js';
 import {
-  contentBounds, flattenPolyline, insertTransform, compose, translation,
-  transformEntity, toWcs, type Transform2
+  arcSweep, contentBounds, flattenPolyline, insertTransform, compose,
+  translation, transformEntity, toWcs, type Transform2
 } from '../core/geo.js';
 
 export interface PdfOptions {
@@ -260,10 +260,16 @@ export const writePdf = (drawing: Drawing, opts: PdfOptions = {}): PdfResult => 
       case 'circle':
         withDash(e, () => strokeArc(e.center.x, e.center.y, e.radius, e.radius, 0, TAU));
         return;
-      case 'arc':
+      case 'arc': {
+        /* equal angles are a zero-length arc, not a whole circle: plotting
+           the circle put rings on the page AutoCAD never draws — an
+           arc-fit leftover keeps the two angles bit-identical */
+        const sweep = arcSweep(e.startAngle, e.endAngle);
+        if (!sweep) return;
         withDash(e, () => strokeArc(e.center.x, e.center.y, e.radius, e.radius,
-          e.startAngle, e.endAngle));
+          e.startAngle, e.startAngle + sweep));
         return;
+      }
       case 'ellipse': {
         const rx = Math.hypot(e.majorAxis.x, e.majorAxis.y);
         const tilt = Math.atan2(e.majorAxis.y, e.majorAxis.x);

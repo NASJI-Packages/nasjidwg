@@ -362,7 +362,8 @@ The axes a DWG/DXF library is judged on, and where this one stands:
 | Codepages | ✅ 29 single-byte + 5 CJK + MIF escapes |
 | Underlays (PDF/DGN/DWF) | ✅ all three kinds, read and write, DWG and DXF |
 | Dynamic-block parameters + actions | ✅ visibility states and nine parameter kinds with their labels and value sets |
-| OCS / arbitrary-axis handling | ✅ extrusion retained, round-tripped, and resolved in bounds and every export (`toWcs`) |
+| OCS / arbitrary-axis handling | ✅ extrusion retained, round-tripped, and resolved in bounds and every export (`toWcs`). A negated normal is a reflection: a reference comes out mirrored (negative X scale, rotation reversed), not turned by pi. ELLIPSE is the format's exception — its centre and major axis are spelled in WCS, so a negated normal turns its sweep and moves nothing |
+| Degenerate curvature (arc-fit leftovers) | ✅ a bulge under 1e-8, an ARC whose two angles are bit-identical, and a hatch edge that wraps all but a hair of a turn the wrong way round collapse to what AutoCAD draws — the chord, nothing, and the hair — in bounds, in boundaries and in every export; an arc is boxed by the run it draws, not by the circle it was cut from |
 | Rotated layouts (VIEWTWIST + header UCS) | ✅ read, written, DXF both ways, and `viewTwistTransform` / `ucsTransform` for consumers |
 | Adversarial-file corpus | ✅ 18 regression cases covering the structural quirks real-world producers emit |
 | Validate-by-round-trip tooling | ✅ `convert --verify` |

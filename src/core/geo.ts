@@ -172,8 +172,18 @@ export const toWcs = (ent: Entity): Entity => {
       return out;
     }
     case 'ellipse':
-      out.center = p(out.center);
-      out.majorAxis = ocsToWcs(m, out.majorAxis);
+      /* ELLIPSE is the one entity whose centre and major axis are already
+         WORLD coordinates (DXF spells both "in WCS"); its normal only
+         names the plane. Mapping them through the object plane threw
+         every mirrored ellipse to the other side of the Y axis — checked
+         against AutoCAD 2027, which draws them where they are stored.
+         A negated normal does run the parameters the other way, so the
+         swept range is reflected instead. */
+      if (flipped) {
+        const s = out.startParam, e = out.endParam;
+        out.startParam = -e;
+        out.endParam = -s;
+      }
       return out;
     case 'point':
     case 'text':
@@ -190,7 +200,19 @@ export const toWcs = (ent: Entity): Entity => {
       return out;
     case 'insert':
       out.position = p(out.position);
-      if (spin) out.rotation = (out.rotation ?? 0) + spin;
+      /* A negated normal is a REFLECTION, not a half turn. The placement
+         M·(P + R(rot)·S·q) is R(-rot)·diag(-sx, sy)·q about the mapped
+         point, so the reference comes out mirrored and turned the other
+         way — adding pi to the rotation instead flipped it about the wrong
+         axis and put the block's contents on the other side of it.
+         Checked against AutoCAD 2027, which frames one such reference in
+         this file at (269.28, 180.05) where the half turn had it at
+         (349.41, -18.49). */
+      if (flipped) {
+        out.rotation = -(out.rotation ?? 0);
+        const s = out.scale ?? { x: 1, y: 1, z: 1 };
+        out.scale = { x: -s.x, y: s.y, z: s.z };
+      } else if (spin) out.rotation = (out.rotation ?? 0) + spin;
       return out;
     case 'solid':
     case 'face3d':
@@ -231,11 +253,30 @@ export const toWcs = (ent: Entity): Entity => {
  * bulges and arcs
  * ------------------------------------------------------------------ */
 
+/** Below this a bulge is arc-fit junk, not curvature: |b| is the sagitta
+ *  over half the chord, so 1e-8 puts the bow 5e-9 of the chord off the
+ *  straight line — an implied radius of 1e8 chords. AutoCAD draws the
+ *  chord; sampling the "arc" only spreads the rounding noise of a
+ *  centre a hundred million chords away over the segment. */
+const BULGE_EPS = 1e-8;
+
+/** Signed CCW sweep from `start` to `end`, the way AutoCAD reads an arc:
+ *  a whole turn only when the file really spells one out. Equal angles are
+ *  a zero-length arc — the degenerate leftover of an arc-fit — and NOT the
+ *  full circle that `(end - start) mod 2pi` alone would make of them. */
+export const arcSweep = (start: number, end: number): number => {
+  const raw = end - start;
+  if (Math.abs(raw) >= TAU - 1e-9) return TAU;
+  const s = raw % TAU;
+  if (Math.abs(s) < 1e-12) return 0;
+  return s < 0 ? s + TAU : s;
+};
+
 /** Sample a bulged polyline segment (excluding the start point). */
 export const sampleBulge = (
   p1: Point2, p2: Point2, bulge: number, maxSeg = 32
 ): Point2[] => {
-  if (!bulge) return [{ x: p2.x, y: p2.y }];
+  if (!bulge || Math.abs(bulge) < BULGE_EPS) return [{ x: p2.x, y: p2.y }];
   const theta = 4 * Math.atan(bulge);
   const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
   if (dist < 1e-12) return [{ x: p2.x, y: p2.y }];
@@ -328,7 +369,16 @@ const sweepOf = (a0: number, a1: number, ccw: boolean): number => {
   let sweep = (a1 - a0) % TAU;
   if (ccw && sweep <= 0) sweep += TAU;
   if (!ccw && sweep >= 0) sweep -= TAU;
-  return sweep || TAU;
+  if (!sweep) return TAU;
+  /* A boundary edge that wraps all but a hair of a full turn is arc-fit
+     junk: its two ends are a hairline apart, and the direction flag sends
+     the sampler the long way round, which turns a 5-unit sliver of a
+     chair outline into a 4000-unit disc. AutoCAD draws the hair, so the
+     complement is what the loop means. An island that really is a whole
+     circle spells the turn exactly and is left alone. */
+  const gap = TAU - Math.abs(sweep);
+  if (gap > 1e-9 && gap < 0.1) return sweep > 0 ? sweep - TAU : sweep + TAU;
+  return sweep;
 };
 
 /* ------------------------------------------------------------------ *
@@ -359,12 +409,36 @@ export const entityBounds = (
     case 'line': growAll(b, [ent.start, ent.end]); break;
     case 'point': growAll(b, [ent.position]); break;
     case 'circle':
-    case 'arc':
       growAll(b, [
         { x: ent.center.x - ent.radius, y: ent.center.y - ent.radius },
         { x: ent.center.x + ent.radius, y: ent.center.y + ent.radius }
       ]);
       break;
+    case 'arc': {
+      /* the run it draws, not the circle it was cut from: files carry
+         arc-fit slivers of megaunit radius, and boxing those as whole
+         circles put a 0.07-unit hairline on a 56000000-unit page */
+      const sweep = arcSweep(ent.startAngle, ent.endAngle);
+      const at = (a: number): Point2 => ({
+        x: ent.center.x + ent.radius * Math.cos(a),
+        y: ent.center.y + ent.radius * Math.sin(a)
+      });
+      if (sweep >= TAU) {
+        growAll(b, [
+          { x: ent.center.x - ent.radius, y: ent.center.y - ent.radius },
+          { x: ent.center.x + ent.radius, y: ent.center.y + ent.radius }
+        ]);
+        break;
+      }
+      growAll(b, [at(ent.startAngle), at(ent.startAngle + sweep)]);
+      for (let q = 0; q < 4; q++) {
+        const a = q * (Math.PI / 2);
+        let d = (a - ent.startAngle) % TAU;
+        if (d < 0) d += TAU;
+        if (d <= sweep) growAll(b, [at(a)]);
+      }
+      break;
+    }
     case 'ellipse': {
       const rr = Math.hypot(ent.majorAxis.x, ent.majorAxis.y);
       growAll(b, [
