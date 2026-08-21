@@ -197,7 +197,7 @@ downloaded, and `npm test` reproduces every fixture it asserts on.
 | HATCH | ✅ | exact edge paths, polyline paths w/ bulges, deflines, seeds, gradient (R2004+) |
 | MLINE, TOLERANCE, LEADER (full), VIEWPORT | ✅ | |
 | IMAGE / WIPEOUT (+IMAGEDEF path) | ✅ | clip (an open ring — the DXF reader drops the closing duplicate so both codecs agree), the R2010+ inverted-clip bit, brightness/contrast/fade |
-| REGION / 3DSOLID / BODY (ACIS) | ✅ SAT (v1) inline, SAB (v2) inline, and R2013+ payloads from the AcDs section — all 6 containers verified |
+| REGION / 3DSOLID / BODY (ACIS) | ✅ SAT (v1) inline, SAB (v2) inline, and R2013+ payloads from the AcDs section — all 6 containers verified; `acisWires` turns the payload into the wireframe curves AutoCAD draws it with |
 | LIGHT | ✅ | name, type, position/target, intensity, colour |
 | MULTILEADER | ✅ | leader lines, dogleg, landing, text or block content |
 | ACAD_TABLE (all containers) | ✅ | full grid, widths/heights, placement and cell text; the R2010+ linked-table structure decodes to the same table as the pre-2010 record, verified across four containers of one drawing |
@@ -329,10 +329,90 @@ text, leader/mleader/mline → polylines, tolerance → text) and the rest
 | SVG export (all entity families, Arabic RTL) | ✅ |
 | GeoJSON export (all geometric types) | ✅ georeferenced to WGS84 lon/lat through the GEODATA anchor when the drawing carries one |
 | JSON lossless round-trip | ✅ |
+| ACIS/ASM wireframe extraction | ✅ `acisWires(entity)` — a solid's kernel stream turned into the polylines a CAD program draws it with. Measured against AutoCAD's own XEDGES below |
 | Thumbnail extraction (BMP/PNG) | ✅ |
 | .pat hatch pattern files | ✅ read + write, verified on a real library |
 | CLI tools (info, convert, layers, grep, thumb) | ✅ convert targets .dwg .dxf .dxb .svg .pdf .json .geojson; `convert --verify` re-reads the written file and reports the round trip; `layers` lists names, colors, linetypes and state flags |
 | PDF export | ✅ standalone single-page PDF 1.4, real vector paths, no dependencies: every entity family incl. nested inserts, hatch fills, arcs as exact cubics, tables and mesh faces; text it cannot draw with a standard font is reported, never dropped. Plot control: explicit sheet (`width`/`height`), fixed `scale`, `offset`, window `clip` and `monochrome`. Both exporters frame `contentBounds`, so a georeferenced drawing is not printed as a speck |
+
+
+### Solid wireframes: what the extractor does, and what it does not
+
+A 3DSOLID stores surfaces, not lines. What a CAD program draws for it in
+wireframe is its EDGES — the curves where two faces meet — and that is what
+`acisWires(entity)` returns: `Point3[][]` in model coordinates, computed on
+first use and remembered against the entity, so opening a drawing costs
+nothing until something asks to see the solids.
+
+```ts
+import { readDwg, acisWires } from 'nasjidwg';
+const drawing = readDwg(bytes);
+for (const e of drawing.entities) {
+  for (const polyline of acisWires(e)) draw(polyline);  // [] for anything else
+}
+```
+
+`parseSab` / `parseSat` expose the layer beneath: the whole stream as a flat
+record graph (`AcisRecords`), fields in parallel typed arrays because a
+drawing's solids can carry a quarter of a million records between them.
+`acisWiresFromPayload(bytes | text)` skips the entity wrapper.
+
+**Reads.** Both dialects — modern ASM/ACIS binary (SAB) and the classic
+SAT text — from the same grammar. Topology: body → lump → shell → face →
+loop → coedge → edge, with the tolerant variants (`tedge`, `tcoedge`,
+`tvertex`) and the body `transform`. Pointers resolve by what they point AT
+rather than by slot number, so the field-layout drift between kernel
+versions does not move the geometry. A stream still sealed inside a DWG
+record is found at whatever BIT offset the record's own fields left it.
+
+**Evaluates.** `straight` (the direction is used exactly as stored — ACIS
+does not keep it unit, and the edge's parameters are measured against the
+length it has), `ellipse` (circles, arcs and true ellipses), and `intcurve`
+in its `exact_int_cur`, `int_int_cur` and `par_int_cur` forms through their
+approximating B-spline — de Boor, rational or not, with ACIS's own knot
+convention where the end multiplicities are written one short of clamped.
+An intcurve read against its spline (negated parameters) and a periodic one
+whose parameters wrap past the knot end are both handled, detected from the
+numbers rather than from a flag the two dialects spell differently.
+
+**Approximates.** Curves are tessellated to a chord tolerance keyed to the
+body's own size (and never more than 45° of arc a segment), so a handrail
+fillet and a ramp deck get the same smoothness rather than the same segment
+count. Edge ends are snapped to the kernel's own vertex points, so
+neighbouring edges close on a shared point.
+
+**Drops.** Zero-length edges. An `intcurve` whose definition is a `{ ref N }`
+reference to another subtype object in the stream is drawn as the chord
+between its (exact) vertices — the ordinal space those references address is
+not yet resolved; it is 134 of 30,351 edges, 0.44%, in the corpus below.
+Faces, surfaces and shading are not produced at all: this is a wireframe,
+which is what a 2D CAD viewer draws.
+
+**Measured against AutoCAD.** A 19.5 MB R2007 architectural drawing (1,660
+3DSOLID/REGION/SURFACE entities in model space, ASM 225.1) put through
+AutoCAD 2027's own **XEDGES** command, its output written to DXF at 16
+decimals and compared entity for entity:
+
+| | AutoCAD XEDGES | nasjidwg | |
+|---|---|---|---|
+| straight edges | 23,650 LINE | 23,650 | every one matched endpoint-for-endpoint within 1e-4 units; **zero unmatched on either side** |
+| circles/arcs/ellipses | 4,574 ARC + 1,160 CIRCLE + 769 ELLIPSE = 6,503 | 6,503 | |
+| spline edges | 1,596 SPLINE | 1,600 | |
+| **total edges** | **31,749** | **31,753** | +0.013% |
+| curved-edge endpoints | 13,860 | 13,416 matched, **none unmatched** | mean error 1.7e-6, max 5.1e-4 on coordinates of ~7×10⁵ — the kernel's own approximation tolerance |
+| closed rings | 1,169 | all 1,169 matched | max centre error 5.7e-4 |
+
+Extraction of all 1,916 bodies takes **~700 ms** — measurable beside the
+1.9 s the file's own read costs, which is why it is lazy and memoized rather
+than a field populated at read time.
+
+**One record type stays sealed.** That drawing's 256 `SURFACE` (AcDbSurface)
+records are not modelled as `acis` entities, because the writers have no
+SURFACE class record to emit them through and turning them into a modelled
+entity would lose them on write, where today they pass through byte-exact.
+They *do* carry ASM payloads — at bit offset 4 inside the retained record —
+and `acisWires` reads them straight out of the sealed bits, so nothing is
+undrawable for the sake of the seal.
 
 
 ## Capability summary

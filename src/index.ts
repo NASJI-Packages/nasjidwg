@@ -38,8 +38,11 @@ export { toGeoJSON } from './export/geojson.js';
 export type { GeoJSONOptions } from './export/geojson.js';
 export { writeJson, readJson } from './export/json.js';
 
-/* ACIS kernel payloads */
-export { sabToSat } from './acis/sab.js';
+/* ACIS kernel payloads: the stream as text, as a record graph, and as
+ * the wireframe curves a CAD program draws a solid with. */
+export { sabToSat, parseSab, parseSat, acisBase } from './acis/sab.js';
+export type { AcisRecords } from './acis/sab.js';
+export { acisWires, acisWiresFromPayload, wiresOfRecords } from './acis/wires.js';
 
 /* hatch patterns */
 export { readPatternFile, writePatternFile, explodeHatch } from './hatch/pattern.js';

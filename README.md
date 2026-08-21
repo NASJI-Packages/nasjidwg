@@ -369,6 +369,43 @@ stored in its own plane with a negated normal, and its coordinates are
 meaningless until they are mapped out of it. The bounds functions and all
 three exporters do this for you; the helper is there for your own code.
 
+## Solids you can actually draw
+
+A 3DSOLID carries no lines — only the modelling kernel's own stream of
+surfaces. Most readers stop there, and a real drawing opens nearly empty:
+one architectural file in the corpus is 1,660 solids and barely a
+thousand of anything else.
+
+`acisWires` walks that stream — body, lump, shell, face, loop, coedge,
+edge — evaluates the curve behind every edge, and hands back polylines in
+model coordinates. It is the same set of curves AutoCAD's own XEDGES
+command extracts.
+
+```ts
+import { readDwg, acisWires } from 'nasjidwg';
+
+const drawing = readDwg(bytes);
+for (const e of drawing.entities) {
+  for (const polyline of acisWires(e)) draw(polyline);   // [] if it has none
+}
+```
+
+Both dialects are read: the modern ASM binary form (SAB) and the classic
+SAT text. Straight, circular, elliptical and B-spline (`intcurve`) edges
+are all evaluated, tessellated to a chord tolerance keyed to the body's
+own size, and placed by the body's transform. The work happens on first
+use and is remembered against the entity, so a drawing opens as fast as
+it always did.
+
+On that architectural file — 31,753 edges against AutoCAD's 31,749 —
+every one of AutoCAD's 23,650 straight edges matches ours
+endpoint-for-endpoint, and every curved endpoint we produce matches one of
+AutoCAD's to a mean of 1.7e-6 units on coordinates of 7×10⁵. PARITY.md has
+the full table and the honest list of what is approximated and dropped.
+
+`parseSab` and `parseSat` expose the stream itself as a record graph, for
+when lines are not enough.
+
 ## API sketch
 
 ```ts
@@ -400,6 +437,9 @@ decodeCadText, encodeCadSymbols, escapeUnicode, stripMtextCodes
 parseMtext, mtextPlainText, decodeMif, encodeMif
 
 // other
+acisWires(entity)                  // a solid's wireframe curves, memoized
+acisWiresFromPayload(sab | sat)    // the same, from a bare kernel payload
+parseSab(sab) / parseSat(text)     // the kernel stream as a record graph
 sabToSat(sab)                      // binary ACIS payload to its text form
 readPatternFile / writePatternFile // AutoCAD .pat hatch patterns
 detectVersion(bytes)               // the release a file claims
@@ -420,7 +460,7 @@ src/
   dxf/      DXF readers and writers, ASCII and binary            (3.5k lines)
   export/   SVG, PDF, GeoJSON, JSON                              (1.3k lines)
   text/     Arabic, escapes, codepages, MTEXT                    (1.1k lines)
-  acis/     binary kernel payload conversion                     (0.2k lines)
+  acis/     kernel payload: record graph, text form, wireframes  (0.7k lines)
   hatch/    .pat pattern files                                   (0.2k lines)
 ```
 
