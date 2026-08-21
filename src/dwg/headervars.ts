@@ -163,7 +163,13 @@ const readHeaderVarsWith = (
     if (v <= 14) r.bs();                  /* PICKSTYLE */
     if (v >= 2004) { r.bl(); r.bl(); r.bl(); }
     for (let i = 0; i < 5; i++) r.bs();   /* USERI */
-    for (let i = 0; i < 14; i++) r.bs();  /* SPLINESEGS..TEXTQLTY */
+    /* SPLINESEGS..TEXTQLTY. The twelfth is ISOLINES: how many
+       tessellation lines a curved face of a solid is drawn across, which
+       is most of what a wireframe view of a tube consists of. */
+    for (let i = 0; i < 14; i++) {
+      const val = r.bs();
+      if (i === 11) out.vars.ISOLINES = val;
+    }
     out.ltScale = r.bd();
     out.textSize = r.bd();
     r.bd(); r.bd(); r.bd(); r.bd();       /* TRACEWID..THICKNESS */
