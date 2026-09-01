@@ -736,7 +736,7 @@ const decodeTextLike = (
     const elevation = r.bd();
     const [ix, iy] = r.rd2();
     const [ax, ay] = r.rd2();
-    r.bd3();                              /* extrusion */
+    const r14Ext = extrusionOf(r.bd3());
     r.bd();                               /* thickness */
     const oblique = r.bd();
     const rotation = r.bd();
@@ -754,7 +754,8 @@ const decodeTextLike = (
       widthFactor: widthFactor !== 1 ? widthFactor : undefined,
       oblique: oblique || undefined,
       halign: H_ALIGN[ha] ?? 'left',
-      valign: V_ALIGN[va] ?? 'baseline'
+      valign: V_ALIGN[va] ?? 'baseline',
+      ...(r14Ext ? { extrusion: r14Ext } : {})
     });
     x.styleHandle = x.handle(x.selfHandle);   /* style */
     return ent;
@@ -860,30 +861,39 @@ const decodeEntitySpecific = (
         const y1 = r.rd(); const y2 = r.dd(y1);
         let z1 = 0, z2 = 0;
         if (!zIsZero) { z1 = r.rd(); z2 = r.dd(z1); }
-        r.bt(); r.be();
+        r.bt();
+        const ext = extrusionOf(r.be());
         return {
           type: 'line', layer: '0', color: { kind: 'byLayer' },
-          start: pt3(x1, y1, z1), end: pt3(x2, y2, z2)
+          start: pt3(x1, y1, z1), end: pt3(x2, y2, z2),
+          ...(ext ? { extrusion: ext } : {})
         };
       }
       const [sx2, sy2, sz2] = r.bd3();
       const [ex, ey, ez] = r.bd3();
       /* R13/R14 spell thickness/extrusion in full (BD + 3BD); the one-bit
          BT/BE shortcuts arrived with R2000 */
-      if (v <= 14) { r.bd(); r.bd3(); }
-      else { r.bt(); r.be(); }
+      let lineExt: Point3 | undefined;
+      if (v <= 14) { r.bd(); lineExt = extrusionOf(r.bd3()); }
+      else { r.bt(); lineExt = extrusionOf(r.be()); }
       return {
         type: 'line', layer: '0', color: { kind: 'byLayer' },
-        start: pt3(sx2, sy2, sz2), end: pt3(ex, ey, ez)
+        start: pt3(sx2, sy2, sz2), end: pt3(ex, ey, ez),
+        ...(lineExt ? { extrusion: lineExt } : {})
       };
     }
 
     case 'POINT': {
       const px = r.bd(), py = r.bd(), pz = r.bd();
-      if (v <= 14) { r.bd(); r.bd3(); }   /* thickness, extrusion (full) */
-      else { r.bt(); r.be(); }
+      const ptExt = v <= 14
+        ? (r.bd(), extrusionOf(r.bd3()))
+        : (r.bt(), extrusionOf(r.be()));
       r.bd();                             /* x-axis angle */
-      return { type: 'point', layer: '0', color: { kind: 'byLayer' }, position: pt3(px, py, pz) };
+      return {
+        type: 'point', layer: '0', color: { kind: 'byLayer' },
+        position: pt3(px, py, pz),
+        ...(ptExt ? { extrusion: ptExt } : {})
+      };
     }
 
     case 'CIRCLE': {
@@ -939,13 +949,14 @@ const decodeEntitySpecific = (
       if (v <= 14) r.bd(); else r.bt();   /* thickness */
       const elev = r.bd();
       const c1 = r.rd2(), c2 = r.rd2(), c3 = r.rd2(), c4 = r.rd2();
-      if (v <= 14) r.bd3(); else r.be();  /* extrusion */
+      const sldExt = extrusionOf(v <= 14 ? r.bd3() : r.be());
       return {
         type: 'solid', layer: '0', color: { kind: 'byLayer' },
         corners: [
           pt3(c1[0], c1[1], elev), pt3(c2[0], c2[1], elev),
           pt3(c3[0], c3[1], elev), pt3(c4[0], c4[1], elev)
-        ]
+        ],
+        ...(sldExt ? { extrusion: sldExt } : {})
       };
     }
 
@@ -1176,7 +1187,7 @@ const decodeEntitySpecific = (
         vertices.push(pt3(px, py, pz));
       }
       r.bd3();                            /* origin */
-      r.bd3();                            /* extrusion */
+      const ldrExt = extrusionOf(r.bd3());
       r.bd3();                            /* x direction */
       r.bd3();                            /* inspt offset */
       /* Tail layout. All versions keep endptproj (R13c3+); the box
@@ -1216,7 +1227,8 @@ const decodeEntitySpecific = (
         type: 'leader', layer: '0', color: { kind: 'byLayer' }, vertices,
         hasArrowhead: arrowheadOn ? undefined : false,
         pathType: pathType || undefined,
-        annotationType: annotationType !== 3 ? annotationType : undefined
+        annotationType: annotationType !== 3 ? annotationType : undefined,
+        ...(ldrExt ? { extrusion: ldrExt } : {})
       };
     }
 
@@ -1269,13 +1281,14 @@ const decodeEntitySpecific = (
       const oblique = r.bd();
       r.bd();                             /* thickness */
       const styleId = r.bs();
-      r.bd3();                            /* extrusion */
+      const shpExt = extrusionOf(r.bd3());
       x.hr.h();                           /* style handle */
       return {
         type: 'shape', layer: '0', color: { kind: 'byLayer' },
         position: pt3(ix, iy, iz), size, rotation,
         widthFactor: widthFactor !== 1 ? widthFactor : undefined,
-        oblique: oblique || undefined, styleId
+        oblique: oblique || undefined, styleId,
+        ...(shpExt ? { extrusion: shpExt } : {})
       };
     }
 
@@ -1283,12 +1296,13 @@ const decodeEntitySpecific = (
       if (v <= 14) { r.bs(); r.bd(); r.bd(); }   /* unknown, height, dimgap */
       const [ix, iy, iz] = r.bd3();
       const [dx2, dy2, dz2] = r.bd3();
-      r.bd3();                            /* extrusion */
+      const tolExt = extrusionOf(r.bd3());
       const text = x.text();
       x.hr.h();                           /* dimstyle */
       return {
         type: 'tolerance', layer: '0', color: { kind: 'byLayer' },
-        position: pt3(ix, iy, iz), xDirection: pt3(dx2, dy2, dz2), text
+        position: pt3(ix, iy, iz), xDirection: pt3(dx2, dy2, dz2), text,
+        ...(tolExt ? { extrusion: tolExt } : {})
       };
     }
 
@@ -1296,7 +1310,7 @@ const decodeEntitySpecific = (
       const scale = r.bd();
       const justification = r.rc();
       const [bx, by, bz] = r.bd3();
-      r.bd3();                            /* extrusion */
+      const mlExt = extrusionOf(r.bd3());
       const flags = r.bs();
       const numLines = r.rc();
       const numVerts = r.bs();
@@ -1332,7 +1346,8 @@ const decodeEntitySpecific = (
       return {
         type: 'mline', layer: '0', color: { kind: 'byLayer' },
         scale, justification, basePoint: pt3(bx, by, bz),
-        closed: (flags & 2) !== 0 || undefined, vertices
+        closed: (flags & 2) !== 0 || undefined, vertices,
+        ...(mlExt ? { extrusion: mlExt } : {})
       };
     }
 
@@ -1843,7 +1858,7 @@ const decodeDimension = (
   const { r, v } = x;
   const [kind, baseType] = DIM_KIND[typeName];
   if (v >= 2010) r.rc();                  /* class version */
-  r.bd3();                                /* extrusion */
+  const dimExt = extrusionOf(r.bd3());
   const tmX = r.rd(), tmY = r.rd();       /* text midpoint (2RD) */
   const elevation = r.bd();
   const flag1 = r.rc();
@@ -1877,7 +1892,8 @@ const decodeDimension = (
     text: text || undefined,
     textRotation: textRotation || undefined,
     horizDirection: horizDirection || undefined,
-    attachment, lineSpacingStyle, lineSpacingFactor, measurement
+    attachment, lineSpacingStyle, lineSpacingFactor, measurement,
+    ...(dimExt ? { extrusion: dimExt } : {})
   };
   if (ciX || ciY) e.insertionPoint = pt3(ciX, ciY, 0);
 
@@ -1975,7 +1991,7 @@ const decodeHatch = (x: Ctx): Entity => {
     }
   }
   const elevation = r.bd();
-  r.bd3();                                /* extrusion */
+  const hatchExt = extrusionOf(r.bd3());
   const name = x.text();
   const solid = r.b() === 1;
   const associative = r.b() === 1;
@@ -2081,8 +2097,15 @@ const decodeHatch = (x: Ctx): Entity => {
     boundaryHandleCounts.push(nBoundary);
   }
   /* boundary handles live in the handle stream, in path order */
-  for (const n of boundaryHandleCounts) {
-    for (let i = 0; i < n; i++) x.hr.h();
+  for (let i = 0; i < loops.length; i++) {
+    const n = boundaryHandleCounts[i] ?? 0;
+    if (!n) continue;
+    const hs: string[] = [];
+    for (let j = 0; j < n; j++) {
+      const h = x.hr.h();
+      if (h.value) hs.push(h.value.toString(16).toUpperCase());
+    }
+    if (hs.length) loops[i].boundaryHandles = hs;
   }
   const styleFlag = r.bs();
   const patternType = r.bs();
@@ -2124,6 +2147,7 @@ const decodeHatch = (x: Ctx): Entity => {
     loops,
     elevation: elevation || undefined,
     associative: associative || undefined,
+    ...(hatchExt ? { extrusion: hatchExt } : {}),
     styleFlag: styleFlag || undefined,
     patternType,
     doubled: doubled || undefined,
@@ -2540,7 +2564,7 @@ const decodeTable = (x: Ctx, raw: RawObject): Entity => {
       else if (sf === 2) { r.rd(); }
       else if (sf !== 3) { const sx = r.rd(); r.dd(sx); r.dd(sx); }
       r.bd();                             /* rotation */
-      r.bd3();                            /* extrusion */
+      const tblExt = extrusionOf(r.bd3());
       const hasAttribs = r.b() === 1;
       let numOwned = 0;
       if (hasAttribs) numOwned = r.bl();
@@ -2563,7 +2587,8 @@ const decodeTable = (x: Ctx, raw: RawObject): Entity => {
         direction: grid.direction ?? pt3(1, 0, 0),
         numRows: grid.numRows, numColumns: grid.numColumns,
         rowHeights: grid.rowHeights, columnWidths: grid.columnWidths,
-        cells: grid.cells
+        cells: grid.cells,
+        ...(tblExt ? { extrusion: tblExt } : {})
       };
     } catch {
       r.pos = dpos;
@@ -2586,7 +2611,7 @@ const decodeTable = (x: Ctx, raw: RawObject): Entity => {
   else if (sf === 2) { r.rd(); }
   else { const sx = r.rd(); r.dd(sx); r.dd(sx); }
   r.bd();                                 /* rotation */
-  r.bd3();                                /* extrusion */
+  const tblExtOld = extrusionOf(r.bd3());
   const hasAttribs = r.b() === 1;
   let numOwned = 0;
   if (v >= 2004 && hasAttribs) numOwned = r.bl();
@@ -2725,7 +2750,8 @@ const decodeTable = (x: Ctx, raw: RawObject): Entity => {
        the only defensible fallback (readTableContent already guards) */
     direction: isFinite(dx2) && isFinite(dy2) && isFinite(dz2)
       ? pt3(dx2, dy2, dz2) : pt3(1, 0, 0),
-    numRows, numColumns, rowHeights, columnWidths, cells
+    numRows, numColumns, rowHeights, columnWidths, cells,
+    ...(tblExtOld ? { extrusion: tblExtOld } : {})
   };
 };
 

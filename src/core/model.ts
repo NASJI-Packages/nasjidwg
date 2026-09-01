@@ -239,6 +239,10 @@ export interface HatchLoopFlags {
   derived?: boolean;
   /** DXF 92 bit 16: outermost loop. */
   outermost?: boolean;
+  /** Soft-pointer handles (DXF 330) of the entities that generated this
+   *  loop. Written back only when the hatch is associative — AutoCAD
+   *  audits associative-with-no-boundary as an error on every such hatch. */
+  boundaryHandles?: string[];
 }
 
 export type HatchBoundary = (

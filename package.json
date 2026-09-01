@@ -1,6 +1,6 @@
 {
   "name": "nasjidwg",
-  "version": "0.15.1",
+  "version": "0.16.0",
   "description": "Pure-TypeScript DWG/DXF library with first-class Arabic and RTL text support. Runs in the browser, Node, and Electron with zero native dependencies. Every writable DWG release from R2.6 to R2018 — AC1021 included — and the ASCII DXF writer are validated externally in AutoCAD 2027 (opens clean, AUDIT 0 errors).",
   "type": "module",
   "sideEffects": false,

@@ -146,8 +146,10 @@ export const sampleDrawing = (): Drawing => {
     { type: 'line', layer: '0', color: byLayer, start: { x: 1, y: 2, z: 3 }, end: { x: 4, y: 5, z: 6 } },
     { type: 'line', layer: 'Étage€', color: { kind: 'aci', index: 1 }, linetype: 'DASHED', start: { x: 0, y: 0, z: 0 }, end: { x: 10, y: 0, z: 0 } },
     { type: 'point', layer: '0', color: byLayer, position: { x: 7, y: 8, z: 9 } },
-    { type: 'circle', layer: '0', color: byLayer, center: { x: 5, y: 5, z: 1 }, radius: 2.5 },
-    { type: 'arc', layer: '0', color: byLayer, center: { x: 0, y: 0, z: 0 }, radius: 3, startAngle: 0.5, endAngle: 2.5 },
+    { type: 'circle', layer: '0', color: byLayer, center: { x: 5, y: 5, z: 1 }, radius: 2.5,
+      extrusion: { x: 0, y: 0, z: -1 } },
+    { type: 'arc', layer: '0', color: byLayer, center: { x: 0, y: 0, z: 0 }, radius: 3, startAngle: 0.5, endAngle: 2.5,
+      extrusion: { x: 0, y: 0, z: -1 } },
     { type: 'solid', layer: '0', color: byLayer, corners: [{ x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }, { x: 0, y: 1, z: 0 }, { x: 1, y: 1, z: 0 }] },
     {
       type: 'face3d', layer: '0', color: byLayer, invisibleEdges: 5,
@@ -157,24 +159,29 @@ export const sampleDrawing = (): Drawing => {
       type: 'text', layer: '0', color: byLayer, text: 'مرحبا 45° Plain',
       position: { x: 1, y: 1, z: 0 }, alignmentPoint: { x: 2, y: 1, z: 0 },
       height: 0.5, rotation: 0.25, widthFactor: 0.8, oblique: 0.1,
-      style: 'Arabic', halign: 'center', valign: 'top'
+      style: 'Arabic', halign: 'center', valign: 'top',
+      extrusion: { x: 0, y: 0, z: -1 }
     },
     {
       type: 'mtext', layer: 'حوائط', color: byLayer, position: { x: 0, y: 20, z: 0 },
-      text: 'first line\nسطر عربي', height: 0.4, rotation: 0, width: 12
+      text: 'first line\nسطر عربي', height: 0.4, rotation: 0, width: 12,
+      extrusion: { x: 0, y: 0, z: -1 }
     },
     {
       type: 'polyline', layer: '0', color: byLayer, closed: true,
       vertices: [{ x: 0, y: 0, bulge: 0.5 }, { x: 4, y: 0, startWidth: 0.1, endWidth: 0.2 }, { x: 4, y: 4 }],
-      elevation: 2
+      elevation: 2, extrusion: { x: 0, y: 0, z: -1 }
     },
     {
       type: 'insert', layer: '0', color: byLayer, blockName: 'DOOR',
       position: { x: 10, y: 10, z: 0 }, scale: { x: 2, y: 3, z: 1 }, rotation: 0.7,
       columnCount: 2, rowCount: 3, columnSpacing: 5, rowSpacing: 6,
+      extrusion: { x: 0, y: 0, z: -1 },
       attributes: [{
         type: 'text', layer: '0', color: byLayer, text: 'A-101',
-        position: { x: 10.5, y: 10.5, z: 0 }, height: 0.2, rotation: 0
+        position: { x: 10.5, y: 10.5, z: 0 }, height: 0.2, rotation: 0,
+        alignmentPoint: { x: 11, y: 10.6, z: 0 },
+        halign: 'center', valign: 'middle', handle: '32'
       }]
     },
     {
@@ -195,7 +202,8 @@ export const sampleDrawing = (): Drawing => {
       dimensionType: 0, definitionPoint: { x: 5, y: 1, z: 0 },
       textMidpoint: { x: 2.5, y: 1.2, z: 0 }, insertionPoint: { x: 2.5, y: 1, z: 0 },
       point13: { x: 0, y: 0, z: 0 }, point14: { x: 5, y: 0, z: 0 },
-      rotation: 0, text: '5.00', style: 'S1'
+      rotation: 0, text: '5.00', style: 'S1',
+      extrusion: { x: 0, y: 0, z: -1 }
     },
     {
       type: 'ellipse', layer: '0', color: byLayer, center: { x: 0, y: 0, z: 0 },

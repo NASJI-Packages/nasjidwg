@@ -137,7 +137,11 @@ means width ÷ height, and DXF header extents re-derived from entities so
 that two invisible strays framed 99.96% blank paper — were found because
 the mechanisms exist, not because the model was careful. The last two
 came in as [a field report](https://github.com/NASJI-Packages/nasjidwg/issues/1),
-the most valuable kind of issue this project receives.
+the most valuable kind of issue this project receives. The next one,
+[issue #2](https://github.com/NASJI-Packages/nasjidwg/issues/2), was the
+same 72 MB drawing's write-side losses: a forged +Z extrusion on every
+OCS entity but ELLIPSE, XDATA dropped with no warning, ATTRIB alignment
+and handles discarded, and HATCH associativity arriving undefined.
 
 ---
 

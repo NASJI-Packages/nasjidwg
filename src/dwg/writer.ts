@@ -21,7 +21,8 @@ import { buildAcDs } from './meta.js';
 import { sabToSat } from '../acis/sab.js';
 import { nearestAci } from '../core/color.js';
 import type {
-  DimStyle, Drawing, Entity, Layer, Linetype, Point2, Point3, TextStyle
+  DimStyle, Drawing, Entity, Layer, Linetype, Point2, Point3, TextEntity,
+  TextStyle, XdataValue
 } from '../core/model.js';
 import { shapeArabic, mirrorBrackets, hasComplexScript } from '../text/arabic.js';
 import { encodeCadSymbols } from '../text/escapes.js';
@@ -641,6 +642,66 @@ const colorIndex = (e: Entity): number =>
   : e.color.kind === 'aci' ? (e.color.index & 0xff)
   : e.color.kind === 'rgb' ? 7 : 256;
 
+/** Inverse of parseEed: typed XDATA values as a raw EED payload. */
+const encodeEedValues = (values: XdataValue[], v: number): Uint8Array => {
+  const w = new BitWriter();
+  for (const val of values) {
+    if ('point' in val && val.point) {
+      const code = val.code >= 1000 ? val.code - 1000 : val.code;
+      w.rc(code);
+      w.rd(val.point.x); w.rd(val.point.y); w.rd(val.point.z ?? 0);
+      continue;
+    }
+    const raw = val.code >= 1000 ? val.code - 1000 : val.code;
+    const value = 'value' in val ? val.value : '';
+    if (raw === 0) {
+      const s = String(value);
+      w.rc(0);
+      if (v >= 2007) {
+        w.rs(s.length);
+        for (let i = 0; i < s.length; i++) w.rs(s.charCodeAt(i));
+      } else {
+        const bytes: number[] = [];
+        for (let i = 0; i < s.length; i++) bytes.push(s.charCodeAt(i) & 0xff);
+        w.rc(bytes.length);
+        w.rs(30);                         /* ANSI_1252, matching the file */
+        w.raw(bytes);
+      }
+    } else if (raw === 2) {
+      w.rc(2);
+      w.rc(value === '}' ? 1 : 0);
+    } else if (raw === 3 || raw === 5) {
+      w.rc(raw);
+      let n = typeof value === 'number' ? value : parseInt(String(value), 16);
+      if (!Number.isFinite(n) || n < 0) n = 0;
+      const bytes = [0, 0, 0, 0, 0, 0, 0, 0];
+      for (let i = 7; i >= 0; i--) {
+        bytes[i] = n % 256;
+        n = Math.floor(n / 256);
+      }
+      w.raw(bytes);
+    } else if (raw === 4) {
+      const hex = String(value).replace(/[^0-9a-fA-F]/g, '');
+      const n = Math.min(255, hex.length >> 1);
+      w.rc(4);
+      w.rc(n);
+      for (let i = 0; i < n; i++) {
+        w.rc(parseInt(hex.slice(i * 2, i * 2 + 2), 16));
+      }
+    } else if (raw >= 40 && raw <= 42) {
+      w.rc(raw);
+      w.rd(typeof value === 'number' ? value : 0);
+    } else if (raw === 70) {
+      w.rc(70);
+      w.rs(typeof value === 'number' ? value : 0);
+    } else if (raw === 71) {
+      w.rc(71);
+      w.rl(typeof value === 'number' ? value : 0);
+    }
+  }
+  return w.bytes();
+};
+
 /** Writer-side text: shape Arabic so any reader draws it joined. */
 const outText = (s: string): string => {
   let v = encodeCadSymbols(s).replace(/\r\n?/g, '\n');
@@ -787,10 +848,16 @@ const writeDwgImpl = (
       const v = h ? parseInt(h, 16) : NaN;
       if (Number.isFinite(v) && v > 0) maxSrc = Math.max(maxSrc, v);
     };
-    for (const e of drawing.entities) scanH(e.handle);
-    for (const e of drawing.paperSpace ?? []) scanH(e.handle);
+    const scanEnt = (e: Entity): void => {
+      scanH(e.handle);
+      if (e.type === 'insert') {
+        for (const a of e.attributes ?? []) scanH(a.handle);
+      }
+    };
+    for (const e of drawing.entities) scanEnt(e);
+    for (const e of drawing.paperSpace ?? []) scanEnt(e);
     for (const b of Object.values(drawing.blocks)) {
-      for (const e of b.entities) scanH(e.handle);
+      for (const e of b.entities) scanEnt(e);
     }
     for (const p of drawing.proxyObjects ?? []) scanH(p.handle);
     for (const p of drawing.unknownObjects ?? []) scanH(p.handle);
@@ -987,6 +1054,89 @@ const writeDwgImpl = (
   const psEntH = allocEnts(paperEnts);
   const blockEntH = new Map<string, number[]>();
   for (const nm of userBlocks) blockEntH.set(nm, allocEnts(blockEnts.get(nm)!));
+  /* INSERT attributes are owned sub-entities: preserveHandles has to
+     reach them the same way it reaches the insert, or every rewrite
+     mints a fresh number (issue #2). */
+  const attribH = new Map<TextEntity, number>();
+  const allocAttribs = (list: Entity[]): void => {
+    for (const e of list) {
+      if (e.type !== 'insert') continue;
+      for (const a of (e.attributes ?? []).filter((x) => x.type === 'text')) {
+        attribH.set(a, keepH(a.handle));
+      }
+    }
+  };
+  allocAttribs(modelEnts);
+  allocAttribs(paperEnts);
+  for (const nm of userBlocks) allocAttribs(blockEnts.get(nm)!);
+  const srcToOut = new Map<string, number>();
+  const remember = (src: string | undefined, h: number): void => {
+    if (src) srcToOut.set(src.toUpperCase(), h);
+  };
+  for (const [e, h] of entH) remember(e.handle, h);
+  for (const [a, h] of attribH) remember(a.handle, h);
+
+  /* Associative HATCH → boundary is a pair of links: soft pointers on
+     the hatch, and a reactor on each boundary entity pointing back.
+     AutoCAD 2027 AUDIT ("Boundary Missing a Reactor — Remove
+     Associativity") strips the flag when the back-link is absent. The
+     reader does not model reactors, so they are rebuilt from the hatch. */
+  const hatchLink = new Map<Entity, { associative: boolean; loopBounds: number[][] }>();
+  const reactorsFor = new Map<number, number[]>();
+  for (const [e, hatchH] of entH) {
+    if (e.type !== 'hatch') continue;
+    const loopBounds = e.loops.map((lp) =>
+      (lp.boundaryHandles ?? [])
+        .map((src) => srcToOut.get(src.toUpperCase()) ?? 0)
+        .filter((h) => h > 0)
+    );
+    const associative = !!(e.associative && loopBounds.some((hs) => hs.length));
+    hatchLink.set(e, { associative, loopBounds });
+    if (!associative) continue;
+    for (const hs of loopBounds) {
+      for (const tgt of hs) {
+        const list = reactorsFor.get(tgt) ?? [];
+        list.push(hatchH);
+        reactorsFor.set(tgt, list);
+      }
+    }
+  }
+
+  /* Every APPID an entity's XDATA names has to exist in the table —
+     EED points at it by handle, and a missing one is silent data loss. */
+  const appidH = new Map<string, number>();
+  appidH.set('ACAD', appidAcad);
+  const extraAppids: { name: string; handle: number }[] = [];
+  {
+    const seen = new Set<string>(['ACAD']);
+    const addApp = (name?: string): void => {
+      if (!name) return;
+      const key = name.toUpperCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      const h = H();
+      appidH.set(key, h);
+      extraAppids.push({ name, handle: h });
+    };
+    for (const n of drawing.appIds ?? []) addApp(n);
+    const walkXd = (list: Entity[]): void => {
+      for (const e of list) {
+        for (const g of e.xdata ?? []) {
+          addApp(g.appName || (g.appHandle ? 'APP_' + g.appHandle.toUpperCase() : undefined));
+        }
+        if (e.type === 'insert') {
+          for (const a of e.attributes ?? []) {
+            for (const g of a.xdata ?? []) {
+              addApp(g.appName || (g.appHandle ? 'APP_' + g.appHandle.toUpperCase() : undefined));
+            }
+          }
+        }
+      }
+    };
+    walkXd(modelEnts);
+    walkXd(paperEnts);
+    for (const nm of userBlocks) walkXd(blockEnts.get(nm)!);
+  }
   const msBlockEnt = H(), msEndblk = H();
   const psBlockEnt = H(), psEndblk = H();
   const blockBeginH = new Map<string, number>();
@@ -1086,7 +1236,12 @@ const writeDwgImpl = (
   if (preserve) {
     const addRef = (h?: string): void => { if (h) keptRefs.add(h.toUpperCase()); };
     const scanRefs = (list?: Entity[]): void => {
-      for (const e of list ?? []) addRef(e.handle);
+      for (const e of list ?? []) {
+        addRef(e.handle);
+        if (e.type === 'insert') {
+          for (const a of e.attributes ?? []) addRef(a.handle);
+        }
+      }
     };
     scanRefs(drawing.entities); scanRefs(drawing.paperSpace);
     for (const b of Object.values(drawing.blocks)) {
@@ -1291,7 +1446,7 @@ const writeDwgImpl = (
     let sizePos = objectPrologue(w, type);
     const sw = withStrings(w);
     w.h(0, handle);
-    w.bs(0);                              /* EED */
+    writeEed(w, e);
     if (graphics && graphics.length) {
       /* cached display list (proxy graphics), byte for byte */
       w.b(1);
@@ -1304,7 +1459,8 @@ const writeDwgImpl = (
      * cached-display-list flag and before anything else. */
     if (V <= 14) { sizePos = w.pos; w.rl(0); }
     w.bb(ctx.entmode);
-    w.bl(0);                              /* reactors */
+    const reactors = reactorsFor.get(handle) ?? [];
+    w.bl(reactors.length);
     const ltFlags = e.linetype && !/^bylayer$/i.test(e.linetype)
       ? (/^byblock$/i.test(e.linetype) ? 1
         : /^continuous$/i.test(e.linetype) ? 2 : 3)
@@ -1344,6 +1500,7 @@ const writeDwgImpl = (
     const layerHandle = layerH.get(e.layer)
       ?? layerH.get('0') ?? [...layerH.values()][0];
     if (ctx.entmode === 0 && ctx.owner !== undefined) w.h(4, ctx.owner);
+    for (const rh of reactors) w.h(4, rh);  /* hatch back-link, etc. */
     if (V < 2004) w.h(3, 0);              /* null xdict (2004+: missing) */
     if (V <= 14) {
       /* R13/R14 name the layer and linetype first, then the sibling
@@ -1378,6 +1535,92 @@ const writeDwgImpl = (
     if (V <= 14) w.bd3(x, y, z);
     else w.be(x, y, z);
   };
+  /** The entity's OCS normal. Forging +Z here relocates every mirrored
+   *  entity to its mirror image — the ellipse case already learned this
+   *  against AutoCAD 2027 (ErrorStatus 53). */
+  const ext3 = (e: { extrusion?: Point3 }): [number, number, number] => {
+    const n = e.extrusion;
+    return n ? [n.x, n.y, n.z ?? 1] : [0, 0, 1];
+  };
+
+  const HA: Record<string, number> = {
+    left: 0, center: 1, right: 2, aligned: 3, middle: 4, fit: 5
+  };
+  const VA: Record<string, number> = {
+    baseline: 0, bottom: 1, middle: 2, top: 3
+  };
+
+  /** TEXT / ATTRIB / ATTDEF body through valign. Callers append their
+   *  own tail (tag, flags, prompt). */
+  const writeTextBody = (w: BitWriter, e: TextEntity): void => {
+    const ha = HA[e.halign ?? 'left'] ?? 0;
+    const va = VA[e.valign ?? 'baseline'] ?? 0;
+    const elev = e.position.z ?? 0;
+    const wf = e.widthFactor ?? 1;
+    const [ex, ey, ez] = ext3(e);
+    if (V <= 14) {
+      const ap0 = e.alignmentPoint ?? e.position;
+      w.bd(elev);
+      w.rd(e.position.x); w.rd(e.position.y);
+      w.rd(ap0.x); w.rd(ap0.y);
+      w.bd3(ex, ey, ez);
+      w.bd(0);                          /* thickness */
+      w.bd(e.oblique ?? 0);
+      w.bd(e.rotation);
+      w.bd(e.height > 0 ? e.height : 5);
+      w.bd(wf);
+      w.t(outText(e.text));
+      w.bs(0);                          /* generation */
+      w.bs(ha); w.bs(va);
+      return;
+    }
+    let df = 0;
+    if (elev === 0) df |= 0x01;
+    const ap = e.alignmentPoint;
+    if (!ap || (ap.x === e.position.x && ap.y === e.position.y)) df |= 0x02;
+    if (!e.oblique) df |= 0x04;
+    if (!e.rotation) df |= 0x08;
+    if (wf === 1) df |= 0x10;
+    df |= 0x20;                         /* generation default */
+    if (!ha) df |= 0x40;
+    if (!va) df |= 0x80;
+    w.rc(df);
+    if (!(df & 0x01)) w.rd(elev);
+    w.rd(e.position.x); w.rd(e.position.y);
+    if (!(df & 0x02)) { w.dd(ap!.x, e.position.x); w.dd(ap!.y, e.position.y); }
+    w.be(ex, ey, ez);
+    w.bt(0);
+    if (!(df & 0x04)) w.rd(e.oblique ?? 0);
+    if (!(df & 0x08)) w.rd(e.rotation);
+    w.rd(e.height > 0 ? e.height : 5);
+    if (!(df & 0x10)) w.rd(wf);
+    w.t(outText(e.text));
+    if (!(df & 0x40)) w.bs(ha);
+    if (!(df & 0x80)) w.bs(va);
+  };
+
+  const remapXdValue = (val: XdataValue): XdataValue => {
+    if (!('value' in val) || (val.code !== 1005 && val.code !== 1003)) return val;
+    const src = String(val.value).toUpperCase();
+    const out = srcToOut.get(src);
+    return { code: val.code, value: out !== undefined ? out.toString(16).toUpperCase() : '0' };
+  };
+
+  const writeEed = (w: BitWriter, e: Entity): void => {
+    for (const g of e.xdata ?? []) {
+      const name = (g.appName
+        || (g.appHandle ? 'APP_' + g.appHandle.toUpperCase() : 'ACAD')).toUpperCase();
+      const app = appidH.get(name) ?? appidAcad;
+      const payload = encodeEedValues(g.values.map(remapXdValue), V);
+      /* A zero-size chunk is the EED terminator — an empty group would
+         cut off every group after it. */
+      if (!payload.length) continue;
+      w.bs(payload.length);
+      w.h(5, app);
+      w.raw(payload);
+    }
+    w.bs(0);
+  };
 
   /* ---- entity-specific encoders (mirror of the decoders) ---- */
   let attdefSeq = 0;                      /* invented ATTDEF tags */
@@ -1392,7 +1635,7 @@ const writeDwgImpl = (
                the delta encoding for the far end arrived with R2000. */
             w.bd3(e.start.x, e.start.y, e.start.z ?? 0);
             w.bd3(e.end.x, e.end.y, e.end.z ?? 0);
-            wbt(w, 0); wbe(w, 0, 0, 1);
+            wbt(w, 0); wbe(w, ...ext3(e));
             return;
           }
           const zZero = (e.start.z ?? 0) === 0 && (e.end.z ?? 0) === 0;
@@ -1400,27 +1643,27 @@ const writeDwgImpl = (
           w.rd(e.start.x); w.dd(e.end.x, e.start.x);
           w.rd(e.start.y); w.dd(e.end.y, e.start.y);
           if (!zZero) { w.rd(e.start.z ?? 0); w.dd(e.end.z ?? 0, e.start.z ?? 0); }
-          wbt(w, 0); wbe(w, 0, 0, 1);
+          wbt(w, 0); wbe(w, ...ext3(e));
         });
         return;
       case 'point':
         makeEntity(27, handle, e, ctx, (w) => {
           w.bd3(e.position.x, e.position.y, e.position.z ?? 0);
-          wbt(w, 0); wbe(w, 0, 0, 1); w.bd(0);
+          wbt(w, 0); wbe(w, ...ext3(e)); w.bd(0);
         });
         return;
       case 'circle':
         makeEntity(18, handle, e, ctx, (w) => {
           w.bd3(e.center.x, e.center.y, e.center.z ?? 0);
           w.bd(e.radius);
-          wbt(w, 0); wbe(w, 0, 0, 1);
+          wbt(w, 0); wbe(w, ...ext3(e));
         });
         return;
       case 'arc':
         makeEntity(17, handle, e, ctx, (w) => {
           w.bd3(e.center.x, e.center.y, e.center.z ?? 0);
           w.bd(e.radius);
-          wbt(w, 0); wbe(w, 0, 0, 1);
+          wbt(w, 0); wbe(w, ...ext3(e));
           w.bd(e.startAngle); w.bd(e.endAngle);
         });
         return;
@@ -1454,7 +1697,7 @@ const writeDwgImpl = (
           wbt(w, 0);
           w.bd(e.corners[0].z ?? 0);
           for (const c of e.corners) { w.rd(c.x); w.rd(c.y); }
-          wbe(w, 0, 0, 1);
+          wbe(w, ...ext3(e));
         });
         return;
       case 'face3d':
@@ -1491,9 +1734,11 @@ const writeDwgImpl = (
           if (hasBulges) flag |= 16;
           if (hasWidths) flag |= 32;
           if (e.closed) flag |= 512;
+          if (e.extrusion) flag |= 1;
           w.bs(flag);
           if (e.constantWidth) w.bd(e.constantWidth);
           if (e.elevation) w.bd(e.elevation);
+          if (e.extrusion) w.bd3(...ext3(e));
           w.bl(e.vertices.length);
           if (hasBulges) w.bl(e.vertices.length);
           if (hasWidths) w.bl(e.vertices.length);
@@ -1529,52 +1774,7 @@ const writeDwgImpl = (
           w.t('');                          /* prompt */
         };
         makeEntity(attdef ? 3 : 1, handle, e, ctx, (w) => {
-          const ha = { left: 0, center: 1, right: 2, aligned: 3, middle: 4, fit: 5 }[e.halign ?? 'left'] ?? 0;
-          const va = { baseline: 0, bottom: 1, middle: 2, top: 3 }[e.valign ?? 'baseline'] ?? 0;
-          const elev = e.position.z ?? 0;
-          const wf = e.widthFactor ?? 1;
-          if (V <= 14) {
-            /* R13/R14 write every field out. The dataflags byte that lets
-               R2000 omit the defaults did not exist yet. */
-            const ap0 = e.alignmentPoint ?? e.position;
-            w.bd(elev);
-            w.rd(e.position.x); w.rd(e.position.y);
-            w.rd(ap0.x); w.rd(ap0.y);
-            w.bd3(0, 0, 1);                 /* extrusion */
-            w.bd(0);                        /* thickness */
-            w.bd(e.oblique ?? 0);
-            w.bd(e.rotation);
-            w.bd(e.height > 0 ? e.height : 5);
-            w.bd(wf);
-            w.t(outText(e.text));
-            w.bs(0);                        /* generation */
-            w.bs(ha); w.bs(va);
-            attdefTail(w);
-            return;
-          }
-          let df = 0;
-          if (elev === 0) df |= 0x01;
-          const ap = e.alignmentPoint;
-          if (!ap || (ap.x === e.position.x && ap.y === e.position.y)) df |= 0x02;
-          if (!e.oblique) df |= 0x04;
-          if (!e.rotation) df |= 0x08;
-          if (wf === 1) df |= 0x10;
-          df |= 0x20;                     /* generation default */
-          if (!ha) df |= 0x40;
-          if (!va) df |= 0x80;
-          w.rc(df);
-          if (!(df & 0x01)) w.rd(elev);
-          w.rd(e.position.x); w.rd(e.position.y);
-          if (!(df & 0x02)) { w.dd(ap!.x, e.position.x); w.dd(ap!.y, e.position.y); }
-          w.be(0, 0, 1);
-          w.bt(0);
-          if (!(df & 0x04)) w.rd(e.oblique ?? 0);
-          if (!(df & 0x08)) w.rd(e.rotation);
-          w.rd(e.height > 0 ? e.height : 5);
-          if (!(df & 0x10)) w.rd(wf);
-          w.t(outText(e.text));
-          if (!(df & 0x40)) w.bs(ha);
-          if (!(df & 0x80)) w.bs(va);
+          writeTextBody(w, e);
           attdefTail(w);
         }, (w) => {
           w.h(5, styleH.get(e.style ?? '') ?? styleH.get('Standard') ?? [...styleH.values()][0]);
@@ -1584,7 +1784,7 @@ const writeDwgImpl = (
       case 'mtext': {
         makeEntity(44, handle, e, ctx, (w) => {
           w.bd3(e.position.x, e.position.y, e.position.z ?? 0);
-          w.bd3(0, 0, 1);                 /* extrusion */
+          w.bd3(...ext3(e));              /* extrusion */
           const rot = e.rotation || 0;
           w.bd(Math.cos(rot)); w.bd(Math.sin(rot)); w.bd(0);
           w.bd(e.width ?? 0);
@@ -1625,7 +1825,7 @@ const writeDwgImpl = (
         let defH = underlayDefH.get(key);
         if (defH === undefined) underlayDefH.set(key, defH = H());
         makeEntity(underlayCls.get(e.underlayKind)!.ent, handle, e, ctx, (w) => {
-          w.bd3(0, 0, 1);                 /* normal */
+          w.bd3(...ext3(e));              /* normal */
           w.bd3(e.position.x, e.position.y, e.position.z ?? 0);
           w.bd(e.rotation || 0);
           w.bd(e.scale.x || 1); w.bd(e.scale.y || 1); w.bd(e.scale.z || 1);
@@ -1645,7 +1845,7 @@ const writeDwgImpl = (
         const bh = blockH.get(e.blockName);
         if (bh === undefined) { skipped.push('insert:' + e.blockName); return; }
         const attrs = (e.attributes ?? []).filter((a) => a.type === 'text');
-        const attrHs = attrs.map(() => H());
+        const attrHs = attrs.map((a) => attribH.get(a) ?? H());
         const seqH = attrs.length ? H() : 0;
         const isMinsert = (e.columnCount ?? 1) > 1 || (e.rowCount ?? 1) > 1;
         makeEntity(isMinsert ? 8 : 7, handle, e, ctx, (w) => {
@@ -1661,7 +1861,7 @@ const writeDwgImpl = (
           else { w.bb(0); w.rd(sx); w.dd(sy, sx); w.dd(sz, sx); }
 
           w.bd(e.rotation);
-          w.bd3(0, 0, 1);
+          w.bd3(...ext3(e));
           w.b(attrs.length ? 1 : 0);
           if (V >= 2004 && attrs.length) w.bl(attrs.length);
           if (isMinsert) {
@@ -1685,45 +1885,7 @@ const writeDwgImpl = (
             entmode: 0, owner: handle,
             prev: attrHs[i - 1] ?? 0, next: attrHs[i + 1] ?? 0
           }, (w) => {
-            const elev = a.position.z ?? 0;
-            if (V <= 14) {
-              /* R13/R14 ATTRIB: every field explicit, like R13/R14 TEXT —
-                 the dataflags byte below is an R2000 invention */
-              w.bd(elev);
-              w.rd(a.position.x); w.rd(a.position.y);
-              w.rd(a.position.x); w.rd(a.position.y);   /* alignment pt */
-              w.bd3(0, 0, 1);               /* extrusion */
-              w.bd(0);                      /* thickness */
-              w.bd(a.oblique ?? 0);
-              w.bd(a.rotation);
-              w.bd(a.height > 0 ? a.height : 5);
-              w.bd(a.widthFactor ?? 1);
-              w.t(outText(a.text));
-              w.bs(0);                      /* generation */
-              w.bs(0); w.bs(0);             /* halign, valign */
-              /* ATTRIB closes with tag + field length + flags; the prompt
-                 text exists only in ATTDEF */
-              w.t(outText(r14Str('ATTR' + (i + 1))));   /* tag */
-              w.bs(0);                      /* field length */
-              w.rc((a.invisible ? 1 : 0) | (a.constant ? 2 : 0));
-              return;
-            }
-            let df = 0x20 | 0x40 | 0x80;  /* default gen/halign/valign */
-            if (elev === 0) df |= 0x01;
-            df |= 0x02;                   /* alignment = position */
-            if (!a.oblique) df |= 0x04;
-            if (!a.rotation) df |= 0x08;
-            if ((a.widthFactor ?? 1) === 1) df |= 0x10;
-            w.rc(df);
-            if (!(df & 0x01)) w.rd(elev);
-            w.rd(a.position.x); w.rd(a.position.y);
-            w.be(0, 0, 1);
-            w.bt(0);
-            if (!(df & 0x04)) w.rd(a.oblique ?? 0);
-            if (!(df & 0x08)) w.rd(a.rotation);
-            w.rd(a.height > 0 ? a.height : 5);
-            if (!(df & 0x10)) w.rd(a.widthFactor ?? 1);
-            w.t(outText(a.text));
+            writeTextBody(w, a);
             if (V >= 2018) {
               /* R2010 added a class-version byte, R2018 the attribute
                  type (1 = single-line) — both sit before the tag, and
@@ -1732,7 +1894,7 @@ const writeDwgImpl = (
               w.rc(0);                    /* class version */
               w.rc(1);                    /* attribute type: single-line */
             }
-            w.t('ATTR' + (i + 1));        /* tag */
+            w.t(V <= 14 ? outText(r14Str('ATTR' + (i + 1))) : 'ATTR' + (i + 1));
             w.bs(0);                      /* field length */
             w.rc((a.invisible ? 1 : 0) | (a.constant ? 2 : 0));
             if (V >= 2007) w.b(0);        /* lock-position flag */
@@ -1759,7 +1921,7 @@ const writeDwgImpl = (
         const kind = e.kind && e.kind !== 'arc' ? e.kind : 'linear';
         makeEntity(KIND_TYPE[kind], handle, e, ctx, (w) => {
           if (V >= 2018) w.rc(0);         /* class version (2010+) */
-          w.bd3(0, 0, 1);                 /* extrusion */
+          w.bd3(...ext3(e));              /* extrusion */
           const tm = e.textMidpoint ?? e.definitionPoint;
           w.rd(tm.x); w.rd(tm.y);
           w.bd(e.elevation ?? 0);
@@ -1819,6 +1981,8 @@ const writeDwgImpl = (
       }
 
       case 'hatch': {
+        const { associative, loopBounds } = hatchLink.get(e)
+          ?? { associative: false, loopBounds: e.loops.map(() => []) };
         makeEntity(78, handle, e, ctx, (w) => {
           const TAU = Math.PI * 2;
           if (V >= 2004) {
@@ -1841,14 +2005,14 @@ const writeDwgImpl = (
             w.t(outText(g?.name ?? ''));
           }
           w.bd(e.elevation ?? 0);
-          w.bd3(0, 0, 1);
+          w.bd3(...ext3(e));
           w.t(outText(e.patternName || (e.solid ? 'SOLID' : 'ANSI31')));
           w.b(e.solid ? 1 : 0);
-          /* No boundary entity handles are written below, so the
-             associativity flag has to say so: associative-with-no-
-             boundary is audited on every such hatch ("Boundary
-             Undefined — Remove Associativity"). */
-          w.b(0);
+          /* Associative-with-no-boundary is audited on every such hatch
+             ("Boundary Undefined — Remove Associativity"), so the flag
+             is only written when the loop's generating handles remapped
+             onto entities that are actually in this file. */
+          w.b(associative ? 1 : 0);
           w.bl(e.loops.length);
           /* The loop-type bits ride with each loop: external(1),
              derived(4), outermost(16) — audit erases a style-1/2 hatch
@@ -1861,7 +2025,7 @@ const writeDwgImpl = (
             | (lp.outermost ? 16 : 0);
           const anyDerived = e.loops.some(
             (lp) => lp.derived && e.pixelSize !== undefined);
-          for (const loop of e.loops) {
+          e.loops.forEach((loop, li) => {
             if (loop.kind === 'polyline') {
               w.bl(2 | loopBits(loop));   /* polyline path */
               const bulges = loop.vertices.some((p) => p.bulge);
@@ -1931,8 +2095,8 @@ const writeDwgImpl = (
                 }
               }
             }
-            w.bl(0);                      /* boundary object handles */
-          }
+            w.bl(associative ? (loopBounds[li]?.length ?? 0) : 0);
+          });
           w.bs(e.styleFlag ?? 0);
           w.bs(e.patternType ?? 1);
           if (!e.solid) {
@@ -1953,6 +2117,11 @@ const writeDwgImpl = (
           const seeds = e.seeds ?? [];
           w.bl(seeds.length);
           for (const s of seeds) { w.rd(s.x); w.rd(s.y); }
+        }, (w) => {
+          if (!associative) return;
+          for (const hs of loopBounds) {
+            for (const h of hs) w.h(4, h);
+          }
         });
         return;
       }
@@ -1962,7 +2131,7 @@ const writeDwgImpl = (
           w.bd(e.scale || 1);
           w.rc(e.justification & 0xff);
           w.bd3(e.basePoint.x, e.basePoint.y, e.basePoint.z ?? 0);
-          w.bd3(0, 0, 1);
+          w.bd3(...ext3(e));
           w.bs(1 | (e.closed ? 2 : 0));
           const numLines = e.vertices[0]?.lines.length ?? 0;
           w.rc(numLines);
@@ -1996,7 +2165,7 @@ const writeDwgImpl = (
           }
           w.bd3(e.position.x, e.position.y, e.position.z ?? 0);
           w.bd3(e.xDirection.x, e.xDirection.y, e.xDirection.z ?? 0);
-          w.bd3(0, 0, 1);
+          w.bd3(...ext3(e));
           w.t(outText(e.text));
         }, (w) => {
           w.h(5, dimStandardH);           /* dimstyle */
@@ -2012,7 +2181,7 @@ const writeDwgImpl = (
           w.bd(e.oblique ?? 0);
           w.bd(0);                        /* thickness */
           w.bs(e.styleId ?? 0);
-          w.bd3(0, 0, 1);
+          w.bd3(...ext3(e));
         }, (w) => {
           w.h(5, styleH.get(e.style ?? '') ?? [...styleH.values()][0]);
         });
@@ -2027,7 +2196,7 @@ const writeDwgImpl = (
           for (const p of e.vertices) w.bd3(p.x, p.y, p.z ?? 0);
           const last = e.vertices[e.vertices.length - 1] ?? { x: 0, y: 0, z: 0 };
           w.bd3(last.x, last.y, last.z ?? 0);   /* origin */
-          w.bd3(0, 0, 1);                 /* extrusion */
+          w.bd3(...ext3(e));              /* extrusion */
           w.bd3(1, 0, 0);                 /* x direction */
           w.bd3(0, 0, 0);                 /* inspt offset */
           /* endptproj: R13c3 and every later version (AutoCAD 2027 keeps
@@ -2184,7 +2353,7 @@ const writeDwgImpl = (
           w.b(hasText ? 1 : 0);
           if (hasText) {
             w.t(outText(e.text!));
-            w.bd3(0, 0, 1);               /* normal */
+            w.bd3(...ext3(e));            /* normal */
             const p = e.textPosition!;
             w.bd3(p.x, p.y, p.z ?? 0);
             w.bd3(1, 0, 0);               /* direction */
@@ -2205,7 +2374,7 @@ const writeDwgImpl = (
           } else {
             w.b(hasBlock ? 1 : 0);
             if (hasBlock) {
-              w.bd3(0, 0, 1);             /* normal */
+              w.bd3(...ext3(e));          /* normal */
               const p = e.blockPosition!;
               w.bd3(p.x, p.y, p.z ?? 0);
               const s = e.blockScale ?? { x: 1, y: 1, z: 1 };
@@ -2314,7 +2483,7 @@ const writeDwgImpl = (
             w.bd3(e.position.x, e.position.y, e.position.z ?? 0);
             w.bb(3);                      /* unit scale */
             w.bd(0);                      /* rotation */
-            w.bd3(0, 0, 1);               /* extrusion */
+            w.bd3(...ext3(e));            /* extrusion */
             w.b(0);                       /* no attribs */
             w.rc(0); w.bl(0); w.bl(0);    /* the twelve constant bits */
             w.t(''); w.t('');             /* linked data name, description */
@@ -2397,7 +2566,7 @@ const writeDwgImpl = (
           if (V >= 2000) w.bb(3);         /* scale flag: all ones */
           else { w.bd(1); w.bd(1); w.bd(1); }
           w.bd(0);                        /* rotation */
-          w.bd3(0, 0, 1);                 /* extrusion */
+          w.bd3(...ext3(e));              /* extrusion */
           w.b(0);                         /* no attribs */
           if (V >= 2004) { /* no owned attribs to count */ }
           w.bs(22);                       /* flags for table value (AutoCAD: 22) */
@@ -2983,9 +3152,9 @@ const writeDwgImpl = (
     });
   };
 
-  const makeAppid = (): void => {
-    makeObject(67, appidAcad, (w) => {
-      tableFlags(w, 'ACAD');
+  const makeAppid = (name: string, handle: number): void => {
+    makeObject(67, handle, (w) => {
+      tableFlags(w, name);
       w.rc(0);                            /* unknown */
     }, (w) => {
       w.h(4, appidControl);
@@ -3445,7 +3614,7 @@ const writeDwgImpl = (
   makeControl(60, viewControl, []);
   makeControl(62, ucsControl, []);
   makeControl(64, vportControl, [vportActive]);
-  makeControl(66, appidControl, [appidAcad]);
+  makeControl(66, appidControl, [appidAcad, ...extraAppids.map((a) => a.handle)]);
   makeControl(68, dimstyleControl,
     dimStyles.map((ds) => dimStyleH.get(ds.name.toLowerCase())!));
   /* the VX table died with R2000; AutoCAD's own later files omit it */
@@ -3674,7 +3843,8 @@ const writeDwgImpl = (
   makeLtype('ByLayer', ltBylayer);
   makeLtype('ByBlock', ltByblock);
   for (const lt of userLtypes) makeLtype(lt.name, ltypeH.get(lt.name)!, lt);
-  makeAppid();
+  makeAppid('ACAD', appidAcad);
+  for (const a of extraAppids) makeAppid(a.name, a.handle);
   for (const ds of dimStyles) makeDimStyle(ds);
   makeMlineStandard();
 

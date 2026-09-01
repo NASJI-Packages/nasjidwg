@@ -186,7 +186,7 @@ downloaded, and `npm test` reproduces every fixture it asserts on.
 | Entity | Status | Notes |
 |---|---|---|
 | LINE, POINT, CIRCLE, ARC, ELLIPSE | ✅ | oracle-verified geometry |
-| TEXT, ATTRIB/ATTDEF (as text), MTEXT | ✅ | R13/14 explicit form + R2000+ dataflags form. ATTRIB/ATTDEF carry their marker (`attribute`) and their 70-flags — bit 1 sets `invisible`, bit 2 `constant` — verified against a field drawing whose 150-unit invisible ATTDEFs used to paint as plain visible text. Each of the four resolves the STYLE record it points at, so `style` names the font, width factor and slant the file asked for: the pointer used to be read and dropped, and a 72 MB drawing whose 59 styles mix TTF and SHX handed back all 1,652 of its text objects with no style at all |
+| TEXT, ATTRIB/ATTDEF (as text), MTEXT | ✅ | R13/14 explicit form + R2000+ dataflags form. ATTRIB/ATTDEF carry their marker (`attribute`) and their 70-flags — bit 1 sets `invisible`, bit 2 `constant` — verified against a field drawing whose 150-unit invisible ATTDEFs used to paint as plain visible text. Justification (`halign` / `valign` / `alignmentPoint`) survives a rewrite, and `preserveHandles` keeps the attrib's own handle rather than minting a fresh one. Each of the four resolves the STYLE record it points at, so `style` names the font, width factor and slant the file asked for: the pointer used to be read and dropped, and a 72 MB drawing whose 59 styles mix TTF and SHX handed back all 1,652 of its text objects with no style at all |
 | LWPOLYLINE (bulges, widths, ids) | ✅ | |
 | POLYLINE_2D/3D + vertex folding | ✅ | chain (≤R2000) and owned (R2004+) forms |
 | POLYLINE_MESH / POLYLINE_PFACE + faces | ✅ | mesh entity; 1–2 index faces kept |
@@ -194,7 +194,7 @@ downloaded, and `npm test` reproduces every fixture it asserts on.
 | SPLINE (both scenarios) | ✅ | fit-point + control-point forms |
 | SOLID/TRACE, RAY/XLINE, 3DFACE, SHAPE | ✅ | |
 | DIMENSION ×7 + ARC_DIMENSION | ✅ | all kinds, full point sets, oracle-verified |
-| HATCH | ✅ | exact edge paths, polyline paths w/ bulges, deflines, seeds, gradient (R2004+) |
+| HATCH | ✅ | exact edge paths, polyline paths w/ bulges, deflines, seeds, gradient (R2004+). Associativity and the generating-entity handles (DXF 330) survive a rewrite when those handles remap; the writer rebuilds the reactor on each boundary — AutoCAD 2027 AUDIT reports "Boundary Missing a Reactor — Remove Associativity" without it. Associative-with-no-boundary is never written |
 | MLINE, TOLERANCE, LEADER (full), VIEWPORT | ✅ | |
 | IMAGE / WIPEOUT (+IMAGEDEF path) | ✅ | clip (an open ring — the DXF reader drops the closing duplicate so both codecs agree), the R2010+ inverted-clip bit, brightness/contrast/fade |
 | REGION / 3DSOLID / BODY (ACIS) | ✅ SAT (v1) inline, SAB (v2) inline, and R2013+ payloads from the AcDs section — all 6 containers verified; `acisWires` turns the payload into the wireframe curves AutoCAD draws it with |
@@ -227,7 +227,7 @@ the entity is retained with its source type name — verified per version.
 | Dynamic-block parameters + actions | ✅ linear/rotation/flip/alignment/base-point parameters with names, labels, descriptions, points and value sets ("Door Size" [24,28,32,36,40] decodes from the fixture), plus the action kinds (move/stretch/scale/flip/rotate/…) |
 | Remaining dynamic-block records (lookup tables, constraint parameters, grips) | 🚧 retained as objects; they carry no geometry of their own |
 | PDF/DGN/DWF underlays + definitions | ✅ read and write, DWG and DXF both; verified against a reference DWG/DXF pair |
-| EED/XDATA retention (entities, app-resolved) | ✅ |
+| EED/XDATA retention (entities, app-resolved) | ✅ | read and written (R13–R2018). The writer encodes the DXF 1000-range, mints an APPID record for every named application, and remaps 1005/1003 through the file's own handles. A 72 MB field drawing's insert/line/dimension XDATA — including two ACAD DSTYLE overrides — used to vanish with no warning |
 | GEODATA (geographic placement) | ✅ DWG (all three version forms) + DXF read, DXF write, GeoRSS lat/long parsed — DWG and DXF readers agree field-for-field on the reference pair |
 
 ## DWG write
@@ -267,7 +267,8 @@ ellipse, lwpolyline, text (+Arabic shaping), mtext, insert/minsert with
 attribs + SEQEND, spline (both scenarios), solid, ray/xline, 3dface,
 shape, tolerance, leader, viewport, mline, polygon/polyface meshes with
 their vertex chains, images (+CLASSES and IMAGEDEF objects), hatch
-(exact edges, deflines, seeds, gradient), all 8 dimension kinds, LIGHT,
+(exact edges, deflines, seeds, gradient, associativity with remapped
+boundary handles), all 8 dimension kinds, LIGHT,
 MULTILEADER (its own AcDbMLeader record in every container), ACAD_TABLE
 (its own record everywhere — through R2007 as the inline grid, from
 R2010 as the placed entity plus its paired TABLECONTENT object),
@@ -442,7 +443,7 @@ The axes a DWG/DXF library is judged on, and where this one stands:
 | Codepages | ✅ 29 single-byte + 5 CJK + MIF escapes |
 | Underlays (PDF/DGN/DWF) | ✅ all three kinds, read and write, DWG and DXF |
 | Dynamic-block parameters + actions | ✅ visibility states and nine parameter kinds with their labels and value sets |
-| OCS / arbitrary-axis handling | ✅ extrusion retained, round-tripped, and resolved in bounds and every export (`toWcs`). A negated normal is a reflection: a reference comes out mirrored (negative X scale, rotation reversed), not turned by pi. ELLIPSE is the format's exception — its centre and major axis are spelled in WCS, so a negated normal turns its sweep and moves nothing |
+| OCS / arbitrary-axis handling | ✅ extrusion retained, round-tripped, and resolved in bounds and every export (`toWcs`). The writer used to forge +Z on every OCS entity but ELLIPSE — 698 arcs, 20 circles, 23 inserts and 50 polylines in a 72 MB field drawing landed displaced. A negated normal is a reflection: a reference comes out mirrored (negative X scale, rotation reversed), not turned by pi. ELLIPSE is the format's exception — its centre and major axis are spelled in WCS, so a negated normal turns its sweep and moves nothing |
 | Degenerate curvature (arc-fit leftovers) | ✅ a bulge under 1e-8, an ARC whose two angles are bit-identical, and a hatch edge that wraps all but a hair of a turn the wrong way round collapse to what AutoCAD draws — the chord, nothing, and the hair — in bounds, in boundaries and in every export; an arc is boxed by the run it draws, not by the circle it was cut from |
 | Rotated layouts (VIEWTWIST + header UCS) | ✅ read, written, DXF both ways, and `viewTwistTransform` / `ucsTransform` for consumers |
 | Adversarial-file corpus | ✅ 18 regression cases covering the structural quirks real-world producers emit |
