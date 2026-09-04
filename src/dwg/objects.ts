@@ -1255,13 +1255,15 @@ const decodeEntitySpecific = (
            point — the vintage reference runs dimgap straight on */
         tail(v > 13, true);
       }
-      x.hr.h();                           /* associated annotation */
+      const annotation = x.hr.h();        /* associated annotation */
       x.hr.h();                           /* dimstyle */
       return {
         type: 'leader', layer: '0', color: { kind: 'byLayer' }, vertices,
         hasArrowhead: arrowheadOn ? undefined : false,
         pathType: pathType || undefined,
         annotationType: annotationType !== 3 ? annotationType : undefined,
+        annotation: annotationType !== 3 && annotation.value > 0
+          ? annotation.value.toString(16).toUpperCase() : undefined,
         ...(ldrExt ? { extrusion: ldrExt } : {})
       };
     }

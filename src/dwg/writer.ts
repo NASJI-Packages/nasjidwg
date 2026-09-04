@@ -958,6 +958,13 @@ const writeDwgImpl = (
     if (Number.isFinite(old) && old > 0 && !oldToNew.has(old)) oldToNew.set(old, n);
     return n;
   };
+  /** The handle a leader's annotation got in this file, or 0 when the
+   *  entity it annotates is not being written. */
+  const leaderAnnotationH = (e: { annotation?: string }): number => {
+    if (!e.annotation) return 0;
+    const old = parseInt(e.annotation, 16);
+    return Number.isFinite(old) && old > 0 ? (oldToNew.get(old) ?? 0) : 0;
+  };
   const mapRef = (value: string): number => {
     const old = parseInt(value, 16);
     if (!Number.isFinite(old) || old <= 0) return 0;
@@ -2353,11 +2360,11 @@ const writeDwgImpl = (
       case 'leader': {
         makeEntity(45, handle, e, ctx, (w) => {
           w.b(0);
-          /* the annotation itself (the MTEXT, tolerance or block the leader
-             points at) is not modelled yet, and the reference audits a
-             leader that claims one while naming none ("Bad mtext id") — so
-             the type says none until the reference can be written too */
-          w.bs(3);
+          /* the annotation the leader points at, when that entity is in
+             this file; a leader that claims one while naming none is
+             audited by the reference ("Bad mtext id"), so an annotation
+             that stayed home makes the leader annotate nothing */
+          w.bs(leaderAnnotationH(e) ? (e.annotationType ?? 0) : 3);
           w.bs(e.pathType ?? 0);
           w.bl(e.vertices.length);
           for (const p of e.vertices) w.bd3(p.x, p.y, p.z ?? 0);
@@ -2384,7 +2391,7 @@ const writeDwgImpl = (
             w.b(0); w.b(0);               /* two unknown bits (2000+) */
           }
         }, (w) => {
-          w.h(2, 0);                      /* associated annotation */
+          w.h(2, leaderAnnotationH(e));   /* associated annotation */
           w.h(5, dimStandardH);           /* dimstyle */
         });
         return;

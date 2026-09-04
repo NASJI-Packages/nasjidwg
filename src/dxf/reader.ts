@@ -1198,6 +1198,12 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
           if (vertices.length < 2) return null;
           const e: LeaderEntity = { ...baseProps(q), type: 'leader', vertices };
           if (q.int(71, 1) === 0) e.hasArrowhead = false;
+          const annType = q.int(73, 3);
+          const ann = q.str(340, '');
+          if (annType !== 3 && ann && ann !== '0') {
+            e.annotationType = annType;
+            e.annotation = ann.toUpperCase();
+          }
           return e;
         }
 

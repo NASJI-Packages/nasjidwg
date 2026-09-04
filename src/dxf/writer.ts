@@ -716,8 +716,26 @@ export const writeDxf = (drawing: Drawing): string => {
      point at nothing (every object here is renumbered) and AUDIT strips
      each one as "not an entity". */
   const newHandleOf = new Map<string, string>();
+  /* a leader's annotation (group 340) must name the entity it annotates
+     under the number that entity gets HERE, whichever of the two is
+     written first: those targets are numbered ahead of time */
+  const allWritten = (): Entity[] => {
+    const out = [...drawing.entities, ...(drawing.paperSpace ?? [])];
+    for (const nm of blockNames) out.push(...blocks[nm].entities);
+    return out;
+  };
+  {
+    const present = new Set(allWritten().map((e) => e.handle?.toUpperCase()).filter((h): h is string => !!h));
+    for (const e of allWritten()) {
+      if (e.type === 'leader' && e.annotation && present.has(e.annotation.toUpperCase())
+          && !newHandleOf.has(e.annotation.toUpperCase())) {
+        newHandleOf.set(e.annotation.toUpperCase(), handle());
+      }
+    }
+  }
   const entStart = (dxfName: string, ent: Entity, subclass?: string): void => {
-    const h = handle();
+    const pre = ent.handle ? newHandleOf.get(ent.handle.toUpperCase()) : undefined;
+    const h = pre ?? handle();
     w(0, dxfName); w(5, h);
     if (ent.handle) newHandleOf.set(ent.handle.toUpperCase(), h);
     w(330, currentOwner);
@@ -1417,10 +1435,14 @@ export const writeDxf = (drawing: Drawing): string => {
         w(3, 'Standard');
         w(71, ent.hasArrowhead === false ? 0 : 1);
         w(72, 0);                            /* straight segments */
-        w(73, 3);                            /* no annotation */
-        w(76, ent.vertices.length);
-        for (const p of ent.vertices) {
-          w(10, fmt(p.x)); w(20, fmt(p.y)); w(30, fmt(p.z ?? 0));
+        {
+          const ann = ent.annotation ? newHandleOf.get(ent.annotation.toUpperCase()) : undefined;
+          w(73, ann ? (ent.annotationType ?? 0) : 3);
+          w(76, ent.vertices.length);
+          for (const p of ent.vertices) {
+            w(10, fmt(p.x)); w(20, fmt(p.y)); w(30, fmt(p.z ?? 0));
+          }
+          if (ann) w(340, ann);
         }
         return;
 

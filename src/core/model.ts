@@ -311,6 +311,11 @@ export interface LeaderEntity extends EntityCommon {
   pathType?: number;
   /** 0 text, 1 tolerance, 2 insert, 3 none. */
   annotationType?: number;
+  /** Handle of the entity the leader annotates (an MTEXT, a TOLERANCE
+   *  or an INSERT) — the association a CAD keeps when the text moves.
+   *  Written when that entity is in the drawing; a leader whose
+   *  annotation is gone goes out as annotating nothing. */
+  annotation?: string;
 }
 
 export type DimensionKind =
