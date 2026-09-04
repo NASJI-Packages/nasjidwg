@@ -107,7 +107,9 @@ export function assemble2004(
    *  everything built above — pure recontainerization for splice tests. */
   rawSections?: { name: string; data: Uint8Array }[],
   /** R2018: an AcDb:AcDsPrototype_1b image (solid-modeling payloads). */
-  acds?: Uint8Array
+  acds?: Uint8Array,
+  /** The preview image: PNG for R2013+ (2018 here), DIB for R2004. */
+  preview?: { png?: Uint8Array; bmp?: Uint8Array }
 ): Uint8Array {
   const out = new ByteSink();
   const push = (b: Uint8Array | readonly number[]): void => { out.append(b); };
@@ -247,6 +249,16 @@ export function assemble2004(
   }
   if (acds) sections.push({ name: 'AcDb:AcDsPrototype_1b', data: acds });
 
+  /* The preview: a stored (never compressed) page, first in the file —
+   * the reference puts it at 0x1A0 behind SummaryInfo, this writer at
+   * 0x100 — so the seeker at 0x0D, an absolute offset, can point at raw
+   * sentinel bytes. PNG is R2013+ only; 2004 takes the DIB. */
+  const previewImage: { type: 2 | 6; data: Uint8Array } | null =
+    preview?.png && version === 2018 ? { type: 6, data: preview.png }
+      : preview?.bmp ? { type: 2, data: asDib(preview.bmp) } : null;
+  const PREVIEW_DATA_AT = 0x100 + 32;
+  if (previewImage) sections.push({ name: 'AcDb:Preview', data: previewBlock(PREVIEW_DATA_AT, [previewImage]) });
+
   /* ------------------------------------------------------------ *
    * The page container. AutoCAD verifies far more of this than any
    * third-party reader: the encrypted header's CRC32, the Adler-style
@@ -325,8 +337,14 @@ export function assemble2004(
     'AcDb:Header': 1, 'AcDb:AuxHeader': 2, 'AcDb:Classes': 3,
     'AcDb:Handles': 4, 'AcDb:Template': 5, 'AcDb:ObjFreeSpace': 6,
     'AcDb:AcDbObjects': 7, 'AcDb:RevHistory': 8,
-    'AcDb:AcDsPrototype_1b': 9
+    'AcDb:AcDsPrototype_1b': 9, 'AcDb:Preview': 10
   };
+  /* The preview is the one section stored rather than compressed, on a
+   * page whose window is its own length rounded up to 1 KiB — what the
+   * reference declares for it — so the seeker finds raw bytes. */
+  const STORED: Record<string, true> = { 'AcDb:Preview': true };
+  const capOf = (sec: { name: string; data: Uint8Array }): number =>
+    STORED[sec.name] ? Math.max(0x400, (sec.data.length + 0x3ff) & ~0x3ff) : PAGE_CAP;
 
   /* Data sections are cut into pages holding this many decompressed
    * bytes each. Every page inflates to the full page size: the last
@@ -337,7 +355,7 @@ export function assemble2004(
   /* Stream order (what sits where in the file) mirrors real files:
    * objects first, header last, then the two system pages. The section
    * map lists them in the same order, ids descending to 1. */
-  const streamOrder = ['AcDb:AcDsPrototype_1b', 'AcDb:RevHistory',
+  const streamOrder = ['AcDb:Preview', 'AcDb:AcDsPrototype_1b', 'AcDb:RevHistory',
     'AcDb:AcDbObjects',
     'AcDb:ObjFreeSpace', 'AcDb:Template', 'AcDb:Handles', 'AcDb:Classes',
     'AcDb:AuxHeader', 'AcDb:Header'];
@@ -384,27 +402,32 @@ export function assemble2004(
   /* -- plan the layout -- */
   interface PagePlan {
     number: number; address: number; diskSize: number;
-    payload: Uint8Array;                        /* compressed slice */
+    payload: Uint8Array;                        /* compressed slice, or the raw window */
     secIdx: number; chunk: number;              /* which slice of which section */
+    cap: number;                                /* the window this section's pages hold */
   }
   const dataPages: PagePlan[] = [];
   let cursor = 0x100;
   let nextPage = 1;
   ordered.forEach((sec, secIdx) => {
-    const pageCount = Math.max(1, Math.ceil(sec.data.length / PAGE_CAP));
+    const cap = capOf(sec);
+    const pageCount = Math.max(1, Math.ceil(sec.data.length / cap));
     for (let k = 0; k < pageCount; k++) {
       /* the whole window, zero-padded: AutoCAD inflates full pages */
-      const window = new Uint8Array(PAGE_CAP);
-      window.set(sec.data.subarray(k * PAGE_CAP,
-        Math.min((k + 1) * PAGE_CAP, sec.data.length)));
-      const payload = compressR2004(window);
+      const window = new Uint8Array(cap);
+      window.set(sec.data.subarray(k * cap,
+        Math.min((k + 1) * cap, sec.data.length)));
+      const payload = STORED[sec.name] ? window : compressR2004(window);
       const diskSize = align32(32 + payload.length);
       dataPages.push({
-        number: nextPage++, address: cursor, diskSize, payload, secIdx, chunk: k
+        number: nextPage++, address: cursor, diskSize, payload, secIdx, chunk: k, cap
       });
       cursor += diskSize;
     }
   });
+  /* the preview, when there is one, is the first page: its bytes begin
+   * right after that page's 32-byte header */
+  const previewSeeker = ordered[0]?.name === 'AcDb:Preview' ? PREVIEW_DATA_AT : 0;
   const dataPageCount = dataPages.length;
   /* The header's section-page count includes the two system pages, and
    * their page numbers sit ABOVE that count — real files leave a gap of
@@ -420,7 +443,7 @@ export function assemble2004(
   push([0, 0, 0, 0, 0]);                        /* 0x06 five zero bytes */
   out.push(0x00);                               /* 0x0B maintenance version */
   out.push(0x03);                               /* 0x0C one of 0/1/3 */
-  u32(0);                                       /* 0x0D preview address (none) */
+  u32(previewSeeker);                           /* 0x0D preview address (0 = none) */
   const dwgVer = version === 2018 ? 0x21 : 0x19; /* release byte: 2004=0x19 */
   out.push(dwgVer);                             /* 0x11 dwg version */
   out.push(0x00);                               /* 0x12 maintenance */
@@ -465,7 +488,7 @@ export function assemble2004(
     hv.setUint32(4, secIdOf(p.secIdx), true);   /* section id */
     hv.setUint32(8, p.payload.length, true);    /* compressed size */
     hv.setUint32(12, p.diskSize, true);         /* on-disk page size */
-    hv.setUint32(16, p.chunk * PAGE_CAP, true); /* start offset (64-bit) */
+    hv.setUint32(16, p.chunk * p.cap, true);    /* start offset (64-bit) */
     hv.setUint32(20, 0, true);
     hv.setUint32(28, dataCrc, true);
     hv.setUint32(24, pageChecksum(dataCrc, hdr), true);
@@ -498,13 +521,14 @@ export function assemble2004(
   smU32(numDesc);                               /* descriptor count again */
   const descFor = (
     name: string, size: number, typeId: number,
-    pages: { number: number; size: number; offset: number }[]
+    pages: { number: number; size: number; offset: number }[],
+    cap = PAGE_CAP, stored = false
   ): void => {
     smU64(size);                                /* logical section size */
     smU32(pages.length);                        /* page count */
-    smU32(PAGE_CAP);                            /* max decompressed page size */
+    smU32(cap);                                 /* max decompressed page size */
     smU32(1);                                   /* unknown, always 1 */
-    smU32(2);                                   /* compression: 2 = LZ77 */
+    smU32(stored ? 1 : 2);                      /* compression: 1 = stored, 2 = LZ77 */
     smU32(typeId);                              /* positional section id */
     smU32(0);                                   /* not encrypted */
     const nameBytes = new Uint8Array(64);
@@ -522,8 +546,8 @@ export function assemble2004(
   ordered.forEach((sec, secIdx) => {
     descFor(sec.name, sec.data.length, secIdOf(secIdx),
       dataPages.filter((p) => p.secIdx === secIdx).map((p) => ({
-        number: p.number, size: p.payload.length, offset: p.chunk * PAGE_CAP
-      })));
+        number: p.number, size: p.payload.length, offset: p.chunk * p.cap
+      })), capOf(sec), !!STORED[sec.name]);
   });
 
   /* system page = 20-byte header + LZ-packed body; its checksum is
@@ -794,7 +818,50 @@ export interface DwgWriteOptions {
    *     the record, so there verbatim emission additionally requires that
    *     every entity in the drawing kept its own handle. */
   verbatimRecords?: boolean;
+
+  /** The preview image the file carries for file managers and open
+   *  dialogs — the picture a thumbnail handler or a CAD's Open dialog
+   *  shows before the drawing is read. Two encodings, because releases
+   *  differ in what they accept: `png` is written into R2013+ files
+   *  (AC1032 here), `bmp` — a Windows DIB, with or without its 14-byte
+   *  file header — into every earlier release. A file gets whichever of
+   *  the two its version can hold; supply both to cover any target. The
+   *  R2007 container carries no preview from this writer yet. */
+  preview?: { png?: Uint8Array; bmp?: Uint8Array };
 }
+
+/** The preview block as every release lays it out: the sentinel, the
+ *  overall size, the image count, one (type, address, size) row per
+ *  image and then the images. Type 1 is an 80-byte header block the
+ *  reference writes as zeros, type 2 a DIB, type 6 a PNG. Addresses are
+ *  absolute file offsets, so the block needs to know where it will sit. */
+const previewBlock = (
+  base: number, images: { type: 2 | 6; data: Uint8Array }[]
+): Uint8Array => {
+  const HEADER = 80;
+  const rows = 1 + images.length;
+  const dataStart = base + 16 + 4 + 1 + rows * 9;
+  const overall = 1 + rows * 9 + HEADER + images.reduce((n, i) => n + i.data.length, 0);
+  const out: number[] = [];
+  const u32 = (v: number): void => { out.push(v & 0xff, (v >>> 8) & 0xff, (v >>> 16) & 0xff, (v >>> 24) & 0xff); };
+  out.push(...SN_PREVIEW_BEGIN);
+  u32(overall);
+  out.push(rows);
+  out.push(1); u32(dataStart); u32(HEADER);
+  let at = dataStart + HEADER;
+  for (const img of images) { out.push(img.type); u32(at); u32(img.data.length); at += img.data.length; }
+  for (let i = 0; i < HEADER; i++) out.push(0);
+  const bytes = new Uint8Array(out.length + images.reduce((n, i) => n + i.data.length, 0));
+  bytes.set(out);
+  let p = out.length;
+  for (const img of images) { bytes.set(img.data, p); p += img.data.length; }
+  return bytes;
+};
+
+/** A DIB from what the caller gave: a whole .bmp file loses its 14-byte
+ *  file header, a bare DIB passes through. */
+const asDib = (bmp: Uint8Array): Uint8Array =>
+  bmp.length > 14 && bmp[0] === 0x42 && bmp[1] === 0x4D ? bmp.subarray(14) : bmp;
 
 export const writeDwg2000 = (
   drawing: Drawing, opts?: DwgWriteOptions
@@ -4431,7 +4498,7 @@ const writeDwgImpl = (
     return {
       data: assemble2004(hvBytes(), clsBytes(), objects, handseed,
         V === 2018 ? 2018 : V === 2007 ? 2007 : 2004, undefined,
-        acdsSection),
+        acdsSection, opts.preview),
       downgraded,
       skipped
     };
@@ -4479,11 +4546,16 @@ const writeDwgImpl = (
   pushRS(0);                                    /* CRC patched later */
   push(SN_HEADER_END);
 
-  /* preview (empty) */
+  /* preview: the DIB when one was given (these releases predate PNG
+   * previews), else the empty block every file carries */
   const previewAddr = out.length;
-  push(SN_PREVIEW_BEGIN);
-  pushRL(5);
-  out.push(0);                                  /* zero images */
+  if (opts.preview?.bmp) {
+    push(previewBlock(previewAddr, [{ type: 2, data: asDib(opts.preview.bmp) }]));
+  } else {
+    push(SN_PREVIEW_BEGIN);
+    pushRL(5);
+    out.push(0);                                /* zero images */
+  }
   push(SN_PREVIEW_END);
 
   /* header vars section (0) */

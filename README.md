@@ -288,6 +288,12 @@ for:
   must `delete entity.record`** — the writer trusts the seal instead of
   diffing it, because diffing honestly would cost as much as
   re-encoding.
+- **A preview image.** `writeDwg2018(drawing, { preview: { png, bmp } })`
+  puts the picture file managers and Open dialogs show into the file: a
+  PNG into R2013+ files, a Windows DIB (with or without its 14-byte file
+  header) into every earlier release, whichever the target can hold. The
+  seeker at 0x0D points at it exactly as the reference lays it out, so
+  the reference's own dialogs and any thumbnail handler find it.
 - **Self-audit.** `auditDrawing(drawing)` is the built-in AUDIT pass:
   duplicate handles, dangling references, non-finite geometry,
   extents mismatches — errors first, and it never throws.
