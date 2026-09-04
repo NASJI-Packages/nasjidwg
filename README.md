@@ -294,6 +294,13 @@ for:
   header) into every earlier release, whichever the target can hold. The
   seeker at 0x0D points at it exactly as the reference lays it out, so
   the reference's own dialogs and any thumbnail handler find it.
+- **Proven on the reference's own drawings.** `node tools/conformance.mjs`
+  runs every drawing the reference CAD ships (96 of them) both ways: our
+  reader against the reference's own census of entities, layers and
+  blocks, and every writer back through the reference — open, AUDIT,
+  census again. The sealed-record envelope, the kinds a file must leave
+  home and why, and the leader fix in 0.17.1 all came out of it; the
+  report names, per drawing and per release, whatever is not yet exact.
 - **Self-audit.** `auditDrawing(drawing)` is the built-in AUDIT pass:
   duplicate handles, dangling references, non-finite geometry,
   extents mismatches — errors first, and it never throws.
