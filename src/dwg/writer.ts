@@ -940,15 +940,32 @@ const writeDwgImpl = (
   const H = (): number => ++nextHandle;
   const usedH = new Set<number>();
   /** The entity's own handle when preserving and it is free, else fresh. */
+  /** Every source handle that got a number in this file, and which one:
+   *  what a retained reference is rewritten through, so a sealed record
+   *  points at the object it pointed at whether the numbering stayed or
+   *  moved, and at nothing (0) when its target stayed home. */
+  const oldToNew = new Map<number, number>();
   const keepH = (h?: string): number => {
+    const old = h ? parseInt(h, 16) : NaN;
     if (preserve && h) {
-      const v = parseInt(h, 16);
-      if (Number.isFinite(v) && v > 0 && !usedH.has(v)) {
-        usedH.add(v);
-        return v;
+      if (Number.isFinite(old) && old > 0 && !usedH.has(old)) {
+        usedH.add(old);
+        oldToNew.set(old, old);
+        return old;
       }
     }
-    return H();
+    const n = H();
+    if (Number.isFinite(old) && old > 0 && !oldToNew.has(old)) oldToNew.set(old, n);
+    return n;
+  };
+  const mapRef = (value: string): number => {
+    const old = parseInt(value, 16);
+    if (!Number.isFinite(old) || old <= 0) return 0;
+    /* a target this file numbered is followed to its new number; any
+       other reference keeps the number it was, code-for-code, the way the
+       proxy contract always promised (a hard reference to an object that
+       stayed home never gets this far: its record was skipped above) */
+    return oldToNew.get(old) ?? old;
   };
   /** True while every symbol-table record kept its source handle. A
    *  retained entity record names its layer, linetype, style and owning
@@ -1299,8 +1316,55 @@ const writeDwgImpl = (
    *  drawing over one dangler (ErrorStatus 53, externally proven — the
    *  field corpus was refused for its plot-style dictionary, whose
    *  default names an ACDBPLACEHOLDER this library does not retain). */
+  /** Why a sealed object stays out of this file, or null when it goes.
+   *  Decided before the kept references are counted, so nothing counts
+   *  on an object that will not be there. */
+  const ORPHAN_FATAL = new Set(['VISUALSTYLE', 'MLEADERSTYLE',
+    'ACDB_BLOCKREPRESENTATION_DATA', 'ACDB_DYNAMICBLOCKPURGEPREVENTER_VERSION',
+    'ACAD_EVALUATION_GRAPH', 'BLOCKVISIBILITYPARAMETER', 'BLOCKGRIPLOCATIONCOMPONENT',
+    /* a table's geometry cache lives in the table entity's extension
+       dictionary; the reference rebuilds it on open and refuses the file
+       when it turns up ownerless (the sheet-set samples, 2018) */
+    'TABLEGEOMETRY', 'TABLECONTENT', 'LINKEDTABLEDATA', 'FORMATTEDTABLEDATA',
+    /* the drawing's list of fields hangs off the NOD's ACAD_FIELDLIST and
+       names every FIELD; the reference rebuilds it and refuses it ownerless
+       (the sheet-set samples, 2018) — the FIELD objects themselves travel */
+    'FIELDLIST']);
+  type Sealed = NonNullable<Drawing['unknownObjects']>[number];
+  const staysHome = (p: Sealed): string | null => {
+    const kind = (p.appClass?.dxfName ?? p.sourceType ?? '').toUpperCase();
+    const foreign = p.data !== undefined && p.encoding !== encodingGroup(V);
+    /* A foreign-generation seal rides inside a proxy object. The envelope
+       the reference accepts is measured for R2000 and R2007+ (see
+       sealBody); in R2004 and R13/R14 files every spelling tried so far
+       is refused outright (ErrorStatus 53), and a drawing that opens
+       without its sealed objects beats one that does not open at all. */
+    if (foreign && (V === 2004 || V < 2000)) return p.sourceType ?? p.name ?? 'sealed object';
+    /* Objects whose owner is a dictionary this writer does not re-create
+       — the visual-style and mleader-style tables, the dynamic-block
+       machinery hanging off a block record's extension dictionary, a
+       table's caches. Re-emitted on their own they are refused outright
+       or open with an AUDIT error per object; measured on the reference's
+       own samples. Until the owning chain travels with them they stay
+       home, reported by kind. */
+    if (ORPHAN_FATAL.has(kind) || /^BLOCK[A-Z]*GRIP/.test(kind)) return p.sourceType ?? kind;
+    /* the annotative context records of a later generation, wrapped for
+       R2007: refused as a group by the reference (an AC1024 sample's 27 of
+       them, each alone accepted at R2018) */
+    if (V === 2007 && foreign && /OBJECTCONTEXTDATA/.test(kind)) return p.sourceType ?? kind;
+    /* The AcDbAssoc* framework — constraint/array actions with their
+       dependency graph — names specific entity handles inside bits a
+       renumbering rewrite cannot update. AutoCAD resolves that graph
+       while opening and refuses the whole drawing over one stale
+       network (ErrorStatus 53, externally proven: the field corpus
+       opened the moment its two ACDBASSOCNETWORKs stayed home).
+       Under preserveHandles every number the graph names stays real,
+       so the family travels; a default write reports the honest skip. */
+    if (!preserve && kind.startsWith('ACDBASSOC')) return p.sourceType ?? kind;
+    return null;
+  };
   const keptRefs = new Set<string>(['0']);
-  if (preserve) {
+  {
     const addRef = (h?: string): void => { if (h) keptRefs.add(h.toUpperCase()); };
     const scanRefs = (list?: Entity[]): void => {
       for (const e of list ?? []) {
@@ -1314,77 +1378,28 @@ const writeDwgImpl = (
     for (const b of Object.values(drawing.blocks)) {
       addRef(b.handle); scanRefs(b.entities);
     }
-    for (const u of drawing.unknownObjects ?? []) addRef(u.handle);
+    for (const u of drawing.unknownObjects ?? []) {
+      if ((u.data || u.typeCode !== undefined) && staysHome(u) === null) addRef(u.handle);
+    }
     for (const x of drawing.xrecords ?? []) addRef(x.handle);
     for (const p of drawing.proxyObjects ?? []) addRef(p.handle);
     for (const ly of drawing.layers) addRef(ly.handle);
     for (const lt of drawing.linetypes) addRef(lt.handle);
     for (const st of drawing.textStyles) addRef(st.handle);
   }
-  const ORPHAN_FATAL = new Set(['VISUALSTYLE', 'MLEADERSTYLE',
-    'ACDB_BLOCKREPRESENTATION_DATA', 'ACDB_DYNAMICBLOCKPURGEPREVENTER_VERSION',
-    'ACAD_EVALUATION_GRAPH', 'BLOCKVISIBILITYPARAMETER', 'BLOCKGRIPLOCATIONCOMPONENT']);
   const unknownObjs = (drawing.unknownObjects ?? [])
     .filter((p) => p.data || p.typeCode !== undefined)
     .filter((p) => {
-      if (preserve) {
-        /* the record's own spelling survives, so only danglers go */
-        const ok = (p.refs ?? []).every((r) =>
-          (r.code !== 3 && r.code !== 5)
-          || r.value === '0' || keptRefs.has(r.value.toUpperCase()));
-        if (!ok) skipped.push(p.sourceType ?? 'sealed object');
-        return ok;
-      }
-      /* The AcDbAssoc* framework — constraint/array actions with their
-         dependency graph — names specific entity handles inside bits a
-         renumbering rewrite cannot update. AutoCAD resolves that graph
-         while opening and refuses the whole drawing over one stale
-         network (ErrorStatus 53, externally proven: the field corpus
-         opened the moment its two ACDBASSOCNETWORKs stayed home).
-         Under preserveHandles every number the graph names stays real,
-         so the family travels; a default write reports the honest
-         skip. */
-      const t = (p.appClass?.dxfName ?? p.sourceType ?? '').toUpperCase();
-      if (!t.startsWith('ACDBASSOC')) return true;
-      skipped.push(p.sourceType ?? t);
-      return false;
-    })
-    .filter((p) => {
-      /* A foreign-generation seal rides inside a proxy object. The envelope
-         the reference accepts is measured for R2000 and R2007+ (see
-         sealBody); in R2004 and R13/R14 files every spelling tried so far
-         is refused outright (ErrorStatus 53), and a drawing that opens
-         without its sealed objects beats one that does not open at all.
-         So there they stay home, and the skip is reported by name. */
-      if (p.data !== undefined && p.encoding !== encodingGroup(V)
-          && (V === 2004 || V < 2000)) {
-        skipped.push(p.sourceType ?? p.name ?? 'sealed object');
-        return false;
-      }
-      /* Objects whose owner is a dictionary this writer does not
-         re-create — the visual-style and mleader-style tables, and the
-         dynamic-block machinery hanging off a block record's extension
-         dictionary. Re-emitted on their own they are refused outright
-         (VISUALSTYLE, MLEADERSTYLE, ACDB_BLOCKREPRESENTATION_DATA,
-         ACDB_DYNAMICBLOCKPURGEPREVENTER_VERSION) or open with an AUDIT
-         error per object (the grips, the evaluation graph). Measured on
-         the reference's own annotation samples; until the owning chain
-         travels with them they stay home, reported by kind. */
-      const kind = (p.appClass?.dxfName ?? p.sourceType ?? '').toUpperCase();
-      if (ORPHAN_FATAL.has(kind) || /^BLOCK[A-Z]*GRIP/.test(kind)) {
-        skipped.push(p.sourceType ?? kind);
-        return false;
-      }
-      /* the annotative context records of a later generation, wrapped
-         for R2007: refused as a group by the reference (an AC1024 sample's
-         27 of them, each alone accepted at R2018), so at R2007 they stay
-         home too */
-      if (V === 2007 && p.data !== undefined && p.encoding !== encodingGroup(V)
-          && /OBJECTCONTEXTDATA/.test(kind)) {
-        skipped.push(p.sourceType ?? kind);
-        return false;
-      }
-      return true;
+      const why = staysHome(p);
+      if (why !== null) { skipped.push(why); return false; }
+      /* a sealed record's HARD references (owner/pointer codes 3 and 5)
+         must land on something in this file: the reference resolves them
+         while opening and refuses the whole drawing over one dangler */
+      const ok = (p.refs ?? []).every((r) =>
+        (r.code !== 3 && r.code !== 5)
+        || r.value === '0' || keptRefs.has(r.value.toUpperCase()));
+      if (!ok) skipped.push(p.sourceType ?? 'sealed object');
+      return ok;
     });
   for (const p of unknownObjs) {
     if (p.typeCode === undefined) {
@@ -2338,7 +2353,11 @@ const writeDwgImpl = (
       case 'leader': {
         makeEntity(45, handle, e, ctx, (w) => {
           w.b(0);
-          w.bs(e.annotationType ?? 3);
+          /* the annotation itself (the MTEXT, tolerance or block the leader
+             points at) is not modelled yet, and the reference audits a
+             leader that claims one while naming none ("Bad mtext id") — so
+             the type says none until the reference can be written too */
+          w.bs(3);
           w.bs(e.pathType ?? 0);
           w.bl(e.vertices.length);
           for (const p of e.vertices) w.bd3(p.x, p.y, p.z ?? 0);
@@ -3068,7 +3087,7 @@ const writeDwgImpl = (
           if (e.data && e.dataBits) w.putBits(fromBase64(e.data), e.dataBits);
         }, (w) => {
           for (const ref of e.refs ?? []) {
-            w.h(ref.code, parseInt(ref.value, 16) || 0);
+            w.h(ref.code, mapRef(ref.value));
           }
         }, e.graphicsData ? fromBase64(e.graphicsData) : undefined);
         return;
@@ -3085,7 +3104,7 @@ const writeDwgImpl = (
         const graphics = e.graphicsData ? fromBase64(e.graphicsData) : undefined;
         const refs = (w: BitWriter): void => {
           for (const ref of e.refs ?? []) {
-            w.h(ref.code, parseInt(ref.value, 16) || 0);
+            w.h(ref.code, mapRef(ref.value));
           }
         };
         const key = e.appClass?.dxfName ?? e.sourceType;
@@ -3950,7 +3969,7 @@ const writeDwgImpl = (
       w.h(4, nod);                        /* owner: the root dictionary */
       if (V < 2004) w.h(3, 0);
       for (const ref of p.refs ?? []) {
-        w.h(ref.code, parseInt(ref.value, 16) || 0);
+        w.h(ref.code, mapRef(ref.value));
       }
     });
   });
@@ -3965,7 +3984,7 @@ const writeDwgImpl = (
       w.h(4, nod);                        /* owner: the root dictionary */
       if (V < 2004) w.h(3, 0);
       for (const ref of p.refs ?? []) {
-        w.h(ref.code, parseInt(ref.value, 16) || 0);
+        w.h(ref.code, mapRef(ref.value));
       }
     };
     if (p.encoding === encodingGroup(V) || p.data === undefined) {
