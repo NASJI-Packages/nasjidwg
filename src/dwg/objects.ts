@@ -828,6 +828,40 @@ const captureProxyTail = (x: Ctx): {
  *  content bit-exact. This is the universal-passthrough capture — any
  *  record the semantic layer cannot (or fails to) model is retained whole
  *  and re-emitted, so nothing in a drawing is ever lost to ignorance. */
+/** The seal's payload as the writer's sealBody lays it out (writer.ts):
+ *  from R2004 a 16-bit zero word precedes the data, and from R2007 the
+ *  strings are the record's own string stream rather than inline bits. */
+const readSealBody = (x: Ctx): {
+  dataBits: number; blob: Uint8Array; strBits: number; strBlob: Uint8Array;
+} => {
+  const { r, v } = x;
+  if (v >= 2004) r.rs();
+  const dataBits = r.rl();
+  const blob = new Uint8Array((dataBits + 7) >> 3);
+  for (let i = 0; i < dataBits; i++) {
+    if (r.b()) blob[i >> 3] |= 0x80 >> (i & 7);
+  }
+  let strBits = 0;
+  let strBlob = new Uint8Array(0);
+  if (v >= 2007) {
+    if (x.sr && x.srBits > 0) {
+      const sr = new BitReader(x.r.data, x.srStart, x.srStart + x.srBits);
+      strBits = x.srBits;
+      strBlob = new Uint8Array((strBits + 7) >> 3);
+      for (let i = 0; i < strBits; i++) {
+        if (sr.b()) strBlob[i >> 3] |= 0x80 >> (i & 7);
+      }
+    }
+  } else {
+    strBits = r.rl();
+    strBlob = new Uint8Array((strBits + 7) >> 3);
+    for (let i = 0; i < strBits; i++) {
+      if (r.b()) strBlob[i >> 3] |= 0x80 >> (i & 7);
+    }
+  }
+  return { dataBits, blob, strBits, strBlob };
+};
+
 const captureSealed = (x: Ctx): {
   data?: string; dataBits?: number; strData?: string; strBits?: number;
   refs?: { code: number; value: string }[];
@@ -1527,16 +1561,7 @@ const decodeEntitySpecific = (
            the format's own idiom for "data the host release cannot hold".
            Unwrapped here so it can go native again when the target
            generation matches (the A→B→A round trip). */
-        const dataBits = r.rl();
-        const blob = new Uint8Array((dataBits + 7) >> 3);
-        for (let i = 0; i < dataBits; i++) {
-          if (r.b()) blob[i >> 3] |= 0x80 >> (i & 7);
-        }
-        const strBits = r.rl();
-        const strBlob = new Uint8Array((strBits + 7) >> 3);
-        for (let i = 0; i < strBits; i++) {
-          if (r.b()) strBlob[i >> 3] |= 0x80 >> (i & 7);
-        }
+        const { dataBits, blob, strBits, strBlob } = readSealBody(x);
         const tail = captureProxyTail(x);
         return {
           type: 'unknown', layer: '0', color: { kind: 'byLayer' },
@@ -2793,16 +2818,7 @@ const decodeObjectSpecific = (x: Ctx, typeName: string, raw: RawObject): void =>
       const cls = x.c.classes.get(classId);
       if (((proxyVersion & 0xffff0000) >>> 0) === SEAL_MAGIC) {
         /* seal-wrap: unwrap to a sealed unknown object (see entity twin) */
-        const dataBits = r.rl();
-        const blob = new Uint8Array((dataBits + 7) >> 3);
-        for (let i = 0; i < dataBits; i++) {
-          if (r.b()) blob[i >> 3] |= 0x80 >> (i & 7);
-        }
-        const strBits = r.rl();
-        const strBlob = new Uint8Array((strBits + 7) >> 3);
-        for (let i = 0; i < strBits; i++) {
-          if (r.b()) strBlob[i >> 3] |= 0x80 >> (i & 7);
-        }
+        const { dataBits, blob, strBits, strBlob } = readSealBody(x);
         const tail = captureProxyTail(x);
         raw.unknownObject = {
           sourceType: cls?.dxfName ?? typeName,

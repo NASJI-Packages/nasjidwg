@@ -1321,6 +1321,9 @@ const writeDwgImpl = (
     for (const lt of drawing.linetypes) addRef(lt.handle);
     for (const st of drawing.textStyles) addRef(st.handle);
   }
+  const ORPHAN_FATAL = new Set(['VISUALSTYLE', 'MLEADERSTYLE',
+    'ACDB_BLOCKREPRESENTATION_DATA', 'ACDB_DYNAMICBLOCKPURGEPREVENTER_VERSION',
+    'ACAD_EVALUATION_GRAPH', 'BLOCKVISIBILITYPARAMETER', 'BLOCKGRIPLOCATIONCOMPONENT']);
   const unknownObjs = (drawing.unknownObjects ?? [])
     .filter((p) => p.data || p.typeCode !== undefined)
     .filter((p) => {
@@ -1345,6 +1348,43 @@ const writeDwgImpl = (
       if (!t.startsWith('ACDBASSOC')) return true;
       skipped.push(p.sourceType ?? t);
       return false;
+    })
+    .filter((p) => {
+      /* A foreign-generation seal rides inside a proxy object. The envelope
+         the reference accepts is measured for R2000 and R2007+ (see
+         sealBody); in R2004 and R13/R14 files every spelling tried so far
+         is refused outright (ErrorStatus 53), and a drawing that opens
+         without its sealed objects beats one that does not open at all.
+         So there they stay home, and the skip is reported by name. */
+      if (p.data !== undefined && p.encoding !== encodingGroup(V)
+          && (V === 2004 || V < 2000)) {
+        skipped.push(p.sourceType ?? p.name ?? 'sealed object');
+        return false;
+      }
+      /* Objects whose owner is a dictionary this writer does not
+         re-create — the visual-style and mleader-style tables, and the
+         dynamic-block machinery hanging off a block record's extension
+         dictionary. Re-emitted on their own they are refused outright
+         (VISUALSTYLE, MLEADERSTYLE, ACDB_BLOCKREPRESENTATION_DATA,
+         ACDB_DYNAMICBLOCKPURGEPREVENTER_VERSION) or open with an AUDIT
+         error per object (the grips, the evaluation graph). Measured on
+         the reference's own annotation samples; until the owning chain
+         travels with them they stay home, reported by kind. */
+      const kind = (p.appClass?.dxfName ?? p.sourceType ?? '').toUpperCase();
+      if (ORPHAN_FATAL.has(kind) || /^BLOCK[A-Z]*GRIP/.test(kind)) {
+        skipped.push(p.sourceType ?? kind);
+        return false;
+      }
+      /* the annotative context records of a later generation, wrapped
+         for R2007: refused as a group by the reference (an AC1024 sample's
+         27 of them, each alone accepted at R2018), so at R2007 they stay
+         home too */
+      if (V === 2007 && p.data !== undefined && p.encoding !== encodingGroup(V)
+          && /OBJECTCONTEXTDATA/.test(kind)) {
+        skipped.push(p.sourceType ?? kind);
+        return false;
+      }
+      return true;
     });
   for (const p of unknownObjs) {
     if (p.typeCode === undefined) {
@@ -1355,8 +1395,27 @@ const writeDwgImpl = (
   /* dynamic blocks: the visibility parameter — the one member of the
      family that changes what a viewer draws — is written back as its own
      class object. R13/R14 cannot name classes, so there it is reported. */
-  const dynBlocks = userBlocks.filter(
-    (nm) => drawing.blocks[nm]?.visibilityStates?.length);
+  /* A drawing that still carries the reference's own dynamic-block
+     graph as sealed objects (the evaluation graph, the representation
+     data, the grips — none of which travel, above) came from a file the
+     reference wrote; beside that graph's remnants the visibility object
+     this writer builds is refused in every release, so those blocks go
+     out static and the loss is reported. A drawing without that graph —
+     one this library wrote, or one the caller authored — keeps the
+     feature and round-trips it. */
+  const genuineDynGraph = (drawing.unknownObjects ?? []).some((p) => {
+    const k = (p.appClass?.dxfName ?? p.sourceType ?? '').toUpperCase();
+    return k === 'ACAD_EVALUATION_GRAPH' || k === 'ACDB_BLOCKREPRESENTATION_DATA';
+  });
+  const dynBlocks = userBlocks.filter((nm) => {
+    const def = drawing.blocks[nm];
+    if (!def?.visibilityStates?.length) return false;
+    if (genuineDynGraph && def.isDynamic) {
+      downgraded.push(`dynamic block ${nm} written static`);
+      return false;
+    }
+    return true;
+  });
   const usesDynBlocks = dynBlocks.length > 0 && V >= 2000;
   const CLS_BLOCKVIS = usesDynBlocks ? clsNext++ : 0;
   /* Draw order. A default write needs nothing: fresh handles ascend in
@@ -1393,6 +1452,28 @@ const writeDwgImpl = (
 
   /* ---------------- object encoding ---------------- */
   const objects: Obj[] = [];
+  /** The seal's payload inside a proxy record, in the envelope the
+   *  reference gives a proxy of its own: from R2004 a 16-bit zero word
+   *  precedes the proxy data, and from R2007 the record's strings live in
+   *  its string stream, not among the data bits. Both were measured on
+   *  the reference's re-save of a file of ours: R2000 files carrying this
+   *  seal inline opened, every R2004+ file was refused (ErrorStatus 53)
+   *  until the payload took this shape — then all of them opened at AUDIT
+   *  zero. The reader's unwrap (objects.ts) mirrors it. */
+  const sealBody = (
+    w: BitWriter,
+    s: { data?: string; dataBits?: number; strData?: string; strBits?: number }
+  ): void => {
+    if (V >= 2004) w.rs(0);
+    w.rl(s.dataBits ?? 0);
+    if (s.data && s.dataBits) w.putBits(fromBase64(s.data), s.dataBits);
+    if (V >= 2007) {
+      if (s.strData && s.strBits) w.strTarget?.putBits(fromBase64(s.strData), s.strBits);
+    } else {
+      w.rl(s.strBits ?? 0);
+      if (s.strData && s.strBits) w.putBits(fromBase64(s.strData), s.strBits);
+    }
+  };
 
   /** Object type + (pre-R2010) the inline bitsize field. R2010+ moves the
    *  handle-stream position out of the record into the size prefix, so
@@ -3022,12 +3103,7 @@ const writeDwgImpl = (
             w.bl((SEAL_MAGIC | (e.encoding ?? 0)) >>> 0);
             if (V >= 2018) w.bl(0);
             if (V >= 2000) w.b(0);
-            w.rl(e.dataBits ?? 0);
-            if (e.data && e.dataBits) w.putBits(fromBase64(e.data), e.dataBits);
-            w.rl(e.strBits ?? 0);
-            if (e.strData && e.strBits) {
-              w.putBits(fromBase64(e.strData), e.strBits);
-            }
+            sealBody(w, e);
           }, refs, graphics);
         }
         return;
@@ -3687,7 +3763,7 @@ const writeDwgImpl = (
   /* the VX table died with R2000; AutoCAD's own later files omit it */
   if (V <= 2000) makeControl(70, vxControl, []);
 
-  makeDictionary(nod, 0, [
+  makeDictionary(nod, 0, ([
     ...(V >= 2000 ? [['ACAD_LAYOUT', layoutDict] as [string, number]] : []),
     ['ACAD_GROUP', groupDict],
     ['ACAD_MLINESTYLE', mlineDict],
@@ -3700,7 +3776,16 @@ const writeDwgImpl = (
       [p.name ?? `PROXY_OBJECT_${i + 1}`, proxyObjH[i]]),
     ...unknownObjs.map((p, i): [string, number] =>
       [p.name ?? `SEALED_OBJECT_${i + 1}`, unknownObjH[i]])
-  ]);
+  ] as [string, number][]).reduce<[string, number][]>((out, [name, h]) => {
+    /* one key per entry: sealed objects that shared a name in their
+       source (27 annotation contexts all called *A1, say) would put the
+       same key into the dictionary 27 times over, and the reference
+       refuses a dictionary with a repeated key */
+    let key = name;
+    for (let n = 2; out.some(([k]) => k === key); n++) key = `${name}~${n}`;
+    out.push([key, h]);
+    return out;
+  }, []));
   makeDictionary(groupDict, nod, []);
   /* the dictionary names the STANDARD style in every release */
   makeDictionary(mlineDict, nod, [['STANDARD', mlineStandardH]]);
@@ -3897,10 +3982,7 @@ const writeDwgImpl = (
         w.bl((SEAL_MAGIC | (p.encoding ?? 0)) >>> 0);
         if (V >= 2018) w.bl(0);
         if (V >= 2000) w.b(0);
-        w.rl(p.dataBits ?? 0);
-        if (p.data && p.dataBits) w.putBits(fromBase64(p.data), p.dataBits);
-        w.rl(p.strBits ?? 0);
-        if (p.strData && p.strBits) w.putBits(fromBase64(p.strData), p.strBits);
+        sealBody(w, p);
       }, refs);
     }
   });
