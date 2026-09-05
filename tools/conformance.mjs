@@ -234,14 +234,16 @@ for (const src of corpus) {
        the further layouts' viewports and those polylines */
     const expected = { ...ref.ents };
     if (v === 'R14') {
-      const extraVp = Object.entries(drawing.blocks ?? {})
+      /* every entity of the further layouts, since R14 cannot hold them */
+      const extraEnts = Object.entries(drawing.blocks ?? {})
         .filter(([nm]) => /^\*paper_space.+$/i.test(nm))
-        .reduce((n, [, b]) => n + b.entities.filter((e) => e.type === 'viewport').length, 0);
+        .flatMap(([, b]) => b.entities);
+      const extraCounts = ourCounts({ entities: extraEnts, paperSpace: [], blocks: {} });
       /* the layouts only — the census walks no block definition */
       const plain2d = [drawing.entities, drawing.paperSpace ?? [],
         ...Object.entries(drawing.blocks ?? {}).filter(([nm]) => /^\*paper_space.+$/i.test(nm)).map(([, b]) => b.entities)]
         .flat().filter((e) => e.type === 'polyline' && e.heavy === '2d' && !e.fit && !e.vertices.some((x) => x.z !== undefined)).length;
-      if (extraVp) expected.VIEWPORT = (expected.VIEWPORT ?? 0) - extraVp;
+      for (const [k, n] of Object.entries(extraCounts)) expected[k] = (expected[k] ?? 0) - n;
       if (plain2d) { expected.POLYLINE = (expected.POLYLINE ?? 0) - plain2d; expected.LWPOLYLINE = (expected.LWPOLYLINE ?? 0) + plain2d; }
       for (const k of Object.keys(expected)) if (expected[k] <= 0) delete expected[k];
     }
