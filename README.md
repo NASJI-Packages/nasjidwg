@@ -278,12 +278,22 @@ target is not written). The DXF reader captures the same facts a DWG
 read carries — the `{ACAD_XDICTIONARY` and `{ACAD_REACTORS` fences, the
 dictionaries with their entries, each XRECORD sealed under its owner —
 so a chain read from a DXF rides into a DWG the way a DWG-read one
-does. Proven on the reference: its own DXF of A-01 (102 fields, the
-"Drawing Title" graph), Site Grading Plan (SPATIAL_FILTER, 83 fields)
-and Structural - Metric (three evaluation graphs with their draw-order
-tables) through `readDxf` and `writeDxf` in both handle modes all
-reopen at AUDIT 0 with the chains intact — `(entget (handent "26EFC"))`
-shows the MTEXT's `360`, the ACAD_FIELD dictionary, the FIELD.
+does. A record sealed as DWG bits — a FIELD, a graph node, a spatial
+filter, a data link, a constraint network read from a DWG — leaves as
+the `ACAD_PROXY_OBJECT` of its class carrying its data area verbatim
+under the version word of the filer that wrote it: the reference's own
+form for an object whose enabler was absent, which it unwraps to the
+native object on open (and `readDxf` unwraps back to the seal). The
+drawing's variables (`drawing.variables`, the root's
+AcDbVariableDictionary) and every mline style go out natively too.
+Proven on the reference, every leg AUDIT 0 with the source's census:
+A-01.dwg, Site Grading Plan.dwg, Data Extraction.dwg and Structural -
+Metric.dwg through `writeDxf` in both handle modes — `(entget (handent
+"26EFF"))` answers FIELD, `277F2` ACAD_EVALUATION_GRAPH, `26E`
+SPATIAL_FILTER, `8E99` DATALINK, `50B` ACDBASSOCNETWORK, and the
+reference's own DXFOUT of our files lists 102 FIELDs, the whole graphs
+and the eight constraint networks natively; the reference's own DXF of
+each through `readDxf` and `writeDxf` reopens the same way.
 
 **Proxies and the unknown** — a proxy entity or proxy object keeps its
 application payload bit-for-bit, its cached display list byte-for-byte

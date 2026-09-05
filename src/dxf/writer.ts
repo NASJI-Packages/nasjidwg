@@ -7,7 +7,7 @@
  */
 
 import type {
-  BlockDefinition, Color, Drawing, Entity, HatchBoundary, Layer, Layout,
+  BlockDefinition, Color, Drawing, DrawingVariable, Entity, HatchBoundary, Layer, Layout,
   MLeaderEntity, MLeaderStyle, MTextEntity, Point3, ProxyEntity, TableEntity,
   TableStyle, TableStyleCell, TextEntity, UnknownObject, XRecord
 } from '../core/model.js';
@@ -158,8 +158,17 @@ export const writeDxf = (drawing: Drawing, options: DxfWriteOptions = {}): strin
     noteEnts(drawing.entities); noteEnts(drawing.paperSpace);
     for (const b of Object.values(blocks)) { if (b) { note(b.handle); noteEnts(b.entities); } }
     for (const l of drawing.layouts ?? []) { note(l.handle); note(l.blockHandle); }
+    /* every record that carries a source number, whether or not this
+       writer keeps it: the counter must clear them all, or a fresh
+       number lands on a kept one (the drawing variables hold the
+       highest numbers of the reference's own files) */
+    const noteRec = (r: { handle?: string; xdict?: string }): void => { note(r.handle); note(r.xdict); };
     for (const r of [...drawing.layers, ...drawing.linetypes, ...drawing.textStyles,
-      ...(drawing.tableStyles ?? []), ...(drawing.mleaderStyles ?? [])]) note(r.handle);
+      ...(drawing.tableStyles ?? []), ...(drawing.mleaderStyles ?? []),
+      ...(drawing.mlineStyles ?? []), ...(drawing.variables ?? []), ...(drawing.views ?? []),
+      ...(drawing.vports ?? []), ...(drawing.dimStyles ?? []), ...(drawing.groups ?? []),
+      ...(drawing.ucs ?? []), ...(drawing.layouts ?? [])]) noteRec(r);
+    for (const h of Object.values(drawing.structureHandles ?? {})) note(h);
     for (const p of drawing.proxyObjects ?? []) note(p.handle);
     for (const o of drawing.unknownObjects ?? []) note(o.handle);
     for (const x of drawing.xrecords ?? []) note(x.handle);
@@ -310,7 +319,7 @@ export const writeDxf = (drawing: Drawing, options: DxfWriteOptions = {}): strin
           { offset: -0.5, color: { kind: 'byLayer' } as Color }]
       }]
       : [];
-  const mlStyleHandles = mlStyles.map(() => handle());
+  const mlStyleHandles = mlStyles.map((m) => claim((m as { handle?: string }).handle));
   const mlStyleIndex = new Map<string, number>();
   mlStyles.forEach((m, i) => mlStyleIndex.set(m.name.toLowerCase(), i));
   /* Table and multileader records name their style by hard handle (342 /
@@ -484,12 +493,42 @@ export const writeDxf = (drawing: Drawing, options: DxfWriteOptions = {}): strin
   const BUILT_NOD = new Set(['ACAD_PLOTSTYLENAME', 'ACAD_GROUP', 'ACAD_LAYOUT',
     'ACAD_MLINESTYLE', 'ACAD_TABLESTYLE', 'ACAD_MLEADERSTYLE', 'ACAD_IMAGE_DICT',
     'ACAD_PDFDEFINITIONS', 'ACAD_DGNDEFINITIONS', 'ACAD_DWFDEFINITIONS',
-    'ACAD_GEOGRAPHICDATA', 'ACDB_RECOMPOSE_DATA']);
+    'ACAD_GEOGRAPHICDATA', 'ACDB_RECOMPOSE_DATA', 'ACDBVARIABLEDICTIONARY']);
   /* the source's named objects dictionary: what a record listed straight
      under it (dictPath []) is owned by — written under this file's root */
-  const nodSrc = sealedAll.find((o) => o.dictPath?.length === 0 && o.ownerHandle)?.ownerHandle;
+  const nodSrc = sealedAll.find((o) => o.dictPath?.length === 0 && o.ownerHandle)?.ownerHandle
+    ?? drawing.structureHandles?.NOD;
   const rootHandle = fixed('C');
   if (nodSrc) outMap.set(up(nodSrc), rootHandle);
+  /* ---- the drawing's variable dictionary (the root's
+     AcDbVariableDictionary → one DICTIONARYVAR per variable: CANNOSCALE,
+     CTABLESTYLE, CMLEADERSTYLE, DIMASSOC, LIGHTINGUNITS …): the model's
+     own `variables`, and beside them a DICTIONARYVAR that arrived sealed
+     as tags under that dictionary (consumed here, the DWG writer's
+     rule), one record per name. Written natively in the reference's
+     R2000 spelling below; their numbers are claimed here so a sealed
+     extension dictionary of one re-attaches. ---- */
+  const variablesOut: DrawingVariable[] = [];
+  const hasVar = (name: string): boolean =>
+    variablesOut.some((v) => v.name.toLowerCase() === name.toLowerCase());
+  for (const v of drawing.variables ?? []) if (v.name && !hasVar(v.name)) variablesOut.push(v);
+  const consumedVars = new Set<Sealed>();
+  for (const o of sealedAll) {
+    if (kindOf(o) !== 'DICTIONARYVAR' || !o.name || !o.tags?.length) continue;
+    if (o.dictPath?.length !== 1 || up(o.dictPath[0]) !== 'ACDBVARIABLEDICTIONARY') continue;
+    const value = o.tags.find((t) => t[0] === 1)?.[1];
+    if (value === undefined) continue;
+    consumedVars.add(o);
+    if (hasVar(o.name)) continue;
+    const schema = Number(o.tags.find((t) => t[0] === 280)?.[1] ?? 0);
+    variablesOut.push({
+      name: o.name, value, ...(schema ? { schema } : {}),
+      ...(o.handle ? { handle: o.handle } : {}), ...(o.xdict ? { xdict: o.xdict } : {})
+    });
+  }
+  const varHandles = variablesOut.map((v) => claim(v.handle));
+  const varDictSrc = drawing.structureHandles?.ACDBVARIABLEDICTIONARY;
+  const varDictHandle = variablesOut.length ? claim(varDictSrc) : '';
 
   /* ---- every natively written record claims its number now, so the
      settle below knows what is in the file, and every pointer at it — a
@@ -606,6 +645,12 @@ export const writeDxf = (drawing: Drawing, options: DxfWriteOptions = {}): strin
   const travel = new Set<Sealed>();
   for (const o of sealedAll) {
     const kind = kindOf(o) || 'sealed object';
+    if (consumedVars.has(o)) {
+      /* a drawing variable rebuilt natively from its tags (above) */
+      whyNot.set(o, `${kind} (written natively as a drawing variable)`);
+      silent.add(o);
+      continue;
+    }
     if (kind === 'ACDBPLACEHOLDER') {
       /* the plot-style placeholder: this writer's own goes, as always */
       whyNot.set(o, `${kind} (this writer builds its own)`);
@@ -892,6 +937,8 @@ export const writeDxf = (drawing: Drawing, options: DxfWriteOptions = {}): strin
   }
   /* the draw-order tables this writer adds under preserveHandles */
   if (sortPlans.length) declareClass({ dxf: 'SORTENTSTABLE', cpp: 'AcDbSortentsTable', app: 'ObjectDBX Classes', flags: 0, wasProxy: false, ent: false });
+  /* the drawing variables' class, as the reference declares it */
+  if (variablesOut.length) declareClass({ dxf: 'DICTIONARYVAR', cpp: 'AcDbDictionaryVar', app: 'ObjectDBX Classes', flags: 0, wasProxy: false, ent: false });
   const proxyClassId = new Map<string, number>();
   for (const key of proxyClasses.keys()) proxyClassId.set(key, classIdOf(key));
 
@@ -3249,6 +3296,7 @@ export const writeDxf = (drawing: Drawing, options: DxfWriteOptions = {}): strin
     synth('ACAD_GROUP', groupDictHandle, groups.map((g) => g.name));
     synth('ACAD_LAYOUT', layoutDictHandle, outLayouts.map(({ l }) => l.name));
     synth('ACAD_MLINESTYLE', mlDictHandle, mlStyles.map((m) => m.name));
+    synth('ACDBVARIABLEDICTIONARY', varDictHandle, variablesOut.map((v) => v.name));
     synth('ACAD_TABLESTYLE', tableStyleDictHandle, tableStylesOut.map((s) => s.name));
     synth('ACAD_MLEADERSTYLE', mleaderStyleDictHandle, mleaderStylesOut.map((s) => s.name));
     synth('ACAD_IMAGE_DICT', imgDictHandle,
@@ -3366,6 +3414,7 @@ export const writeDxf = (drawing: Drawing, options: DxfWriteOptions = {}): strin
     if (layoutDictHandle) { w(3, 'ACAD_LAYOUT'); w(350, layoutDictHandle); }
     if (mlDictHandle) { w(3, 'ACAD_MLINESTYLE'); w(350, mlDictHandle); }
     if (tableStyleDictHandle) { w(3, 'ACAD_TABLESTYLE'); w(350, tableStyleDictHandle); }
+    if (varDictHandle) { w(3, 'AcDbVariableDictionary'); w(350, varDictHandle); }
     if (mleaderStyleDictHandle) { w(3, 'ACAD_MLEADERSTYLE'); w(350, mleaderStyleDictHandle); }
     if (imgDictHandle) { w(3, 'ACAD_IMAGE_DICT'); w(350, imgDictHandle); }
     if (geoHandle) { w(3, 'ACAD_GEOGRAPHICDATA'); w(350, geoHandle); }
@@ -3608,20 +3657,48 @@ export const writeDxf = (drawing: Drawing, options: DxfWriteOptions = {}): strin
       w(100, 'AcDbDictionary'); w(281, 1);
       mlStyles.forEach((m, i) => { w(3, m.name); w(350, mlHandles[i]); });
       extraEntries('ACAD_MLINESTYLE');
+      /* every style of the drawing, its extension dictionary re-attached
+         when the sealed one travels; an element's colour as its ACI
+         (the nearest for a true colour), a fill colour the same way */
+      const mlAci = (c: Color | undefined, dflt: number): number =>
+        c?.kind === 'aci' ? c.index : c?.kind === 'rgb' ? nearestAci(c.rgb) : dflt;
       mlStyles.forEach((m, i) => {
-        w(0, 'MLINESTYLE'); w(5, mlHandles[i]); w(330, mlDictHandle);
+        const src = (m as { handle?: string }).handle;
+        w(0, 'MLINESTYLE'); w(5, mlHandles[i]);
+        writeFences(src, undefined, mlHandles[i]);
+        w(330, mlDictHandle);
         w(100, 'AcDbMlineStyle');
         w(2, m.name); w(70, m.flags ?? 0);
         w(3, m.description ?? '');
-        w(62, m.fillColor?.kind === 'aci' ? m.fillColor.index : 256);
+        w(62, mlAci(m.fillColor, 256));
         w(51, fmt((m.startAngle ?? Math.PI / 2) * DEG));
         w(52, fmt((m.endAngle ?? Math.PI / 2) * DEG));
         w(71, m.elements.length);
         for (const el of m.elements) {
           w(49, fmt(el.offset));
-          w(62, el.color.kind === 'aci' ? el.color.index : 0);
+          w(62, el.color.kind === 'byBlock' ? 0 : mlAci(el.color, 256));
           w(6, el.linetype ?? 'BYLAYER');
         }
+      });
+    }
+    if (varDictHandle) {
+      /* the variable dictionary in the reference's R2000 spelling: each
+         DICTIONARYVAR with the dictionary as owner and reactor, its
+         schema byte and its value as text */
+      w(0, 'DICTIONARY'); w(5, varDictHandle);
+      writeFences(varDictSrc, undefined, varDictHandle);
+      w(330, rootHandle);
+      w(100, 'AcDbDictionary'); w(281, 1);
+      variablesOut.forEach((v, i) => { w(3, v.name); w(350, varHandles[i]); });
+      extraEntries('ACDBVARIABLEDICTIONARY');
+      variablesOut.forEach((v, i) => {
+        w(0, 'DICTIONARYVAR'); w(5, varHandles[i]);
+        writeFences(v.handle, undefined, varHandles[i]);
+        w(102, '{ACAD_REACTORS'); w(330, varDictHandle); w(102, '}');
+        w(330, varDictHandle);
+        w(100, 'DictionaryVariables');
+        w(280, v.schema ?? 0);
+        w(1, v.value);
       });
     }
     if (tableStyleDictHandle) {

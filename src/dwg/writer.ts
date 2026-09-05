@@ -2077,7 +2077,17 @@ const writeDwgImpl = (
           why = `${p.sourceType ?? 'sealed object'} (its owner stays home)`;
           quiet = true;
         } else if (isDict(p)) {
-          if (!(p.entries ?? []).some((en) => listable(p, en))) {
+          /* A dictionary that came empty is a fact of the source, not a
+             loss: the reference's own pre-2013 saves decompose the data
+             store into `AcDsDecomposeData` = { AcDsRecords, AcDsSchemas }
+             and refuse the file on open when the (empty) AcDsRecords is
+             gone — measured on its 2000, 2004 and R14 saves of a
+             three-MTEXT probe, refused at every target with the key
+             dropped, AUDIT 0 with it. It travels with its owner like any
+             other record; only a dictionary that LOST every entry here
+             has nothing left to say. */
+          const cameEmpty = !(p.entries ?? []).length;
+          if (!cameEmpty && !(p.entries ?? []).some((en) => listable(p, en))) {
             why = `${p.sourceType ?? kind} (nothing it lists is written)`;
             quiet = true;
           } else if (!ownerIn) {
@@ -2239,6 +2249,13 @@ const writeDwgImpl = (
    *  dictionary (home). */
   const underNod = (p: { handle?: string; ownerHandle?: string }): boolean => {
     const o = ownerOut(p);
+    /* the root's own extension dictionary hangs off the root's xdict
+       pointer (xdictByOwner, below); it is not an entry of the root.
+       Listed as well, its key pointed at an object the reference had
+       consumed on open ("SEALED_OBJECT_138 eWasErased, Delete Entry" —
+       its R14 save of a probe gives the root an ACAD_XREC_ROUNDTRIP
+       dictionary) */
+    if (o === nod && p.handle && xdictByOwner.get(nod)?.p.handle === p.handle) return false;
     return o === undefined || o === nod;
   };
   /** The sealed extension dictionaries that go out under their owner, by
@@ -2248,6 +2265,16 @@ const writeDwgImpl = (
   const xdictByOwner = new Map<number, { p: Sealed; h: number }>();
   unknownObjs.forEach((p, i) => {
     if (!isDict(p) || !p.ownerHandle) return;
+    /* A dictionary the named-objects tree LISTS (`dictPath` set — the
+       reader gives it only to a listed record) is an entry of the
+       dictionary that lists it, never that owner's extension dictionary.
+       The root is built here, not sealed, so the entries check below
+       cannot see its listing: without this the last tree dictionary the
+       root listed became the root's extension dictionary — harmless
+       while its target lived, an AUDIT finding ("Extension dictionary
+       19C Cannot access, Removed") once the reference consumed the
+       target on open (its own AcDsDecomposeData). */
+    if (p.dictPath !== undefined) return;
     const os = sealedByH.get(p.ownerHandle.toUpperCase());
     if (os && isDict(os)
       && (os.entries ?? []).some((en) => en.handle.toUpperCase() === p.handle?.toUpperCase())) return;

@@ -8,7 +8,7 @@
 
 import type {
   AcisEntity, BlockDefinition, Color, DimensionEntity, DimensionKind,
-  Drawing, Entity,
+  Drawing, DrawingVariable, Entity,
   Face3DEntity, FileVersion, GeoData, HatchBoundary, HatchDefLine, HatchEdge,
   HatchEntity, HatchGradient, HatchLoopFlags, ImageEntity, Layer, LeaderEntity, Linetype,
   Group as EntityGroup, Layout, MeshEntity, MLeaderAttribute, MLeaderEntity,
@@ -434,6 +434,17 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
      waiting to be linked to theirs once every section is in. */
   const blockNameByRecord = new Map<string, string>();
   const pendingLayouts: { l: Layout; recH: string }[] = [];
+  /* MLINEs naming their style by hard pointer, and the MLINESTYLE
+     records' names by handle, so the pointer resolves to a name */
+  const pendingMlines: { e: MLineEntity; styleHandle: string }[] = [];
+  const mlStyleNameByHandle = new Map<string, string>();
+  /* DICTIONARYVAR records, placed in the tree pass: the root's
+     AcDbVariableDictionary's are the drawing's variables, any other
+     stays sealed as tags */
+  const dictVarRecords: {
+    rec: { g: Group[] }; com: { handle?: string; owner?: string; xdict?: string; reactors?: string[] };
+    value?: string; schema: number; type: string;
+  }[] = [];
   /* style names that resolve through a dictionary (TABLESTYLE and
      MLEADERSTYLE are listed by name under the NOD), settled at the end:
      an entity inside a BLOCK is converted before OBJECTS is read */
@@ -1495,6 +1506,10 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
             vertices
           };
           if ((q.int(71, 0) & 2) !== 0) e.closed = true;
+          /* the hard pointer at the style (340) names it when group 2
+             does not — resolved once the OBJECTS section is in */
+          const sh = q.str(340, '').trim().toUpperCase();
+          if (sh && sh !== '0') pendingMlines.push({ e, styleHandle: sh });
           return e;
         }
 
@@ -2562,6 +2577,7 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
         } else if (type === 'MLINESTYLE') {
           const elements: MLineStyleElement[] = [];
           let cur: MLineStyleElement | null = null;
+          let fill: number | null = null;
           for (const [c, v] of rec.g) {
             const nv = parseFloat(v);
             if (c === 49) {
@@ -2571,6 +2587,9 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
               const aci = parseInt(v, 10);
               cur.color = aci >= 1 && aci <= 255
                 ? { kind: 'aci', index: aci } : { kind: 'byBlock' };
+            } else if (c === 62 && fill === null) {
+              /* the style's own 62, ahead of the elements: the fill colour */
+              fill = parseInt(v, 10);
             } else if (c === 6 && cur) {
               const lt = v.trim();
               if (lt && !/^bylayer$/i.test(lt)) cur.linetype = lt;
@@ -2584,10 +2603,34 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
           if (desc) m.description = desc;
           const fl = q.int(70, 0);
           if (fl) m.flags = fl;
+          if (fill !== null && fill >= 1 && fill <= 255) m.fillColor = { kind: 'aci', index: fill };
           const sa = q.numOr(51), ea = q.numOr(52);
           if (sa != null) m.startAngle = sa * RAD;
           if (ea != null) m.endAngle = ea * RAD;
+          /* the record's own number and extension dictionary, facts a
+             handle-stable rewrite keeps; the name by handle for the
+             MLINEs that point here */
+          const com = commonOf(rec.g);
+          if (com.handle) { m.handle = com.handle; mlStyleNameByHandle.set(com.handle, m.name); }
+          if (com.xdict) m.xdict = com.xdict;
           (drawing.mlineStyles ??= []).push(m);
+        } else if (type === 'DICTIONARYVAR') {
+          /* a drawing variable (CANNOSCALE, CTABLESTYLE, DIMASSOC …): the
+             model's own when the root's AcDbVariableDictionary lists it
+             — decided in the placement pass, where the tree is known —
+             sealed as tags anywhere else. Past the marker: 280 the
+             schema, 1 the value as the reference stores it */
+          const com = commonOf(rec.g);
+          let value: string | undefined;
+          let schema = 0;
+          let past = false;
+          for (const [c, v] of rec.g) {
+            if (c === 100) { past = /DictionaryVariables/i.test(v); continue; }
+            if (!past) continue;
+            if (c === 1 && value === undefined) value = decodeCadText(v);
+            else if (c === 280) schema = parseInt(v, 10) || 0;
+          }
+          dictVarRecords.push({ rec, com, value, schema, type });
         } else if (type === 'SORTENTSTABLE') {
           /* Draw order: 331 names an entity, the 5 that follows it the
              sort key. THE TRAP: the object's own handle is a group 5 too,
@@ -2726,6 +2769,15 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
       const path = imageDefPaths.get(defHandle);
       if (path) e.path = path;
     }
+    /* an MLINE's style: the name group 2 gives when a style of that
+       name is here, else the one its hard pointer names */
+    for (const { e, styleHandle } of pendingMlines) {
+      const nm = mlStyleNameByHandle.get(styleHandle);
+      if (!nm) continue;
+      const named = e.styleName
+        && drawing.mlineStyles?.some((m) => m.name.toLowerCase() === e.styleName!.toLowerCase());
+      if (!named) e.styleName = nm;
+    }
     for (const { e, defHandle } of pendingUnderlays) {
       const def = underlayDefs.get(defHandle);
       if (def?.path) e.path = def.path;
@@ -2794,6 +2846,48 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
         const ownerPath = owner ? dictPathOf.get(owner) : undefined;
         return ownerPath ? { dictPath: ownerPath } : {};
       };
+      /* the structural dictionaries the writers rebuild, by their source
+         numbers — the root and the branches the model consumes — as the
+         DWG reader records them, so a handle-stable rewrite keeps them */
+      {
+        const structure: Record<string, string> = {};
+        if (nod) structure.NOD = nod;
+        const MODELED = new Set(['ACAD_LAYOUT', 'ACAD_GROUP', 'ACAD_MLINESTYLE',
+          'ACAD_TABLESTYLE', 'ACAD_MLEADERSTYLE', 'ACDBVARIABLEDICTIONARY']);
+        for (const [h, path] of dictPathOf) {
+          const key = path.length === 1 ? path[0].toUpperCase() : '';
+          if (key && MODELED.has(key) && !structure[key]) structure[key] = h;
+        }
+        if (Object.keys(structure).length) drawing.structureHandles = structure;
+      }
+      /* the DICTIONARYVARs: the root's variable dictionary's are the
+         drawing's variables, named by the key each is listed under; one
+         anywhere else is sealed as tags, as any unmodeled record is */
+      for (const { rec, com, value, schema, type } of dictVarRecords) {
+        const ownerPath = com.owner ? dictPathOf.get(com.owner) : undefined;
+        const key = com.handle ? dictEntryName.get(com.handle) : undefined;
+        if (ownerPath?.length === 1 && ownerPath[0].toUpperCase() === 'ACDBVARIABLEDICTIONARY'
+          && key && value !== undefined) {
+          const dv: DrawingVariable = { name: key, value };
+          if (schema) dv.schema = schema;
+          if (com.handle) dv.handle = com.handle;
+          if (com.xdict) dv.xdict = com.xdict;
+          (drawing.variables ??= []).push(dv);
+          continue;
+        }
+        const uo: UnknownObject = { sourceType: type };
+        if (com.handle) uo.handle = com.handle;
+        const cls = classByDxfName.get(type);
+        if (cls) uo.appClass = { ...cls };
+        if (com.owner) uo.ownerHandle = com.owner;
+        if (com.xdict) uo.xdict = com.xdict;
+        if (com.reactors) uo.reactors = com.reactors;
+        if (rec.g.length) uo.tags = rec.g.map(([c, v]): Group => [c, v]);
+        const xd = parseXdata(rec.g);
+        if (xd) uo.xdata = xd;
+        if (uo.handle) { const nm = dictEntryName.get(uo.handle); if (nm) uo.name = nm; }
+        (drawing.unknownObjects ??= []).push(uo);
+      }
       for (const uo of drawing.unknownObjects ?? []) {
         const at = placeOf(uo.handle, uo.ownerHandle);
         if (at.dictPath) uo.dictPath = at.dictPath;
@@ -2809,7 +2903,7 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
          dictionary carries the fixed DWG type, so the DWG writers
          re-encode it from its entries. ---- */
       const CONSUMED = new Set(['ACAD_LAYOUT', 'ACAD_GROUP', 'ACAD_MLINESTYLE',
-        'ACAD_TABLESTYLE', 'ACAD_MLEADERSTYLE', 'ACAD_PLOTSTYLENAME']);
+        'ACAD_TABLESTYLE', 'ACAD_MLEADERSTYLE', 'ACAD_PLOTSTYLENAME', 'ACDBVARIABLEDICTIONARY']);
       for (const [h, d] of dictRecords) {
         if (h === nod) continue;
         const path = dictPathOf.get(h);
