@@ -532,8 +532,17 @@ four independent mechanisms:
    into R14, 2000, 2004, 2007, 2010, 2013, 2018 and DXF and checks our
    reader against its census in all eight. Rounds of it are what
    produced the R14 viewport grammar, the proxy envelope's class-name
-   field, the xref-dependent record rule, the pre-2018 MLEADER tail and
-   the pre-2010 table cell grammar in this release.
+   field, the xref-dependent record rule, the pre-2018 MLEADER tail, the
+   pre-2010 table cell grammar and the dynamic-block evaluation chain in
+   this release. Where the campaign stands (2026-09-05, 96 drawings):
+   every one of them reads exactly in all eight encodings; written back
+   as 2000, 2004, 2007, 2010, 2013 and 2018, every one reopens with
+   **zero AUDIT errors and the reference's own entity census**; written as
+   R14, every one reopens with zero AUDIT errors (R14 knows a single
+   layout, and the reference converts plain 2D heavy polylines to light
+   ones as it opens an R14 file, so the census is compared with that in
+   mind); the reference's DXF of each, read and re-emitted as 2018,
+   reopens clean with the same census.
 4. **Real drawings** — during development the reader was run over 317
    real files (139 MB, 1982→2027: AutoCAD's sample libraries, field
    drawings, vintage releases) with CRC verification on: zero throws,
