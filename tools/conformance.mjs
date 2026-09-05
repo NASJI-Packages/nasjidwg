@@ -265,6 +265,15 @@ for (const src of corpus) {
       } catch (err) { row.dxf = { error: String(err.message ?? err) }; line(`  dxf: FAILED ${row.dxf.error}`); }
     }
   }
+  /* 5. our own DXF of the drawing, opened by the reference */
+  try {
+    const ours = join(OUT, `${name.replace(/\.[^.]+$/, '')}.ours.dxf`);
+    const res = lib.writeDxf(drawing);
+    writeFileSync(ours, typeof res === 'string' ? res : res.data ?? res);
+    const back = parseProbe(runAcad(ours, scr));
+    row.ourDxf = { opened: back.opened, why: back.why, audit: back.audit, diff: back.opened ? diffCounts(ref.ents, back.ents) : [] };
+    line(`  our dxf: ${back.opened ? `open, audit ${back.audit?.join('/')}, ${row.ourDxf.diff.length ? 'DIFF ' + row.ourDxf.diff.join(', ') : 'entities match'}` : 'REJECTED ' + back.why}`);
+  } catch (err) { row.ourDxf = { error: String(err.message ?? err) }; line(`  our dxf: WRITER THREW ${row.ourDxf.error}`); }
 }
 writeFileSync(join(OUT, 'report.json'), JSON.stringify(report, null, 2));
 /* the summary: what is not yet exact */
@@ -283,6 +292,9 @@ for (const r of report) {
     else if (w.diff.length) problems.push(`write ${v} diff`);
   }
   if (r.dxf && (r.dxf.error || !r.dxf.opened || r.dxf.readDiff?.length || r.dxf.diff?.length)) problems.push('dxf');
+  if (r.ourDxf && (r.ourDxf.error || !r.ourDxf.opened)) problems.push('our dxf rejected');
+  else if (r.ourDxf?.audit && r.ourDxf.audit[0] > 0) problems.push(`our dxf audit ${r.ourDxf.audit[0]}`);
+  else if (r.ourDxf?.diff?.length) problems.push('our dxf diff');
   if (problems.length) bad++;
   line(`${problems.length ? 'FAIL' : 'ok  '} ${r.file}${problems.length ? ': ' + problems.join('; ') : ''}`);
 }
