@@ -218,8 +218,10 @@ itself.
 
 ## What survives a round trip
 
-**Entities** — line, point, circle, arc, ellipse, lwpolyline, polyline
-2D/3D, polygon/polyface/subdivision meshes, text, mtext, attributes
+**Entities** — line, point, circle, arc, ellipse, lwpolyline (vertex
+identifiers included), polyline 2D/3D kept heavy — Z on every vertex,
+curve- and spline-fit polylines with their frame and fit type, tangents,
+plinegen — polygon/polyface/subdivision meshes, text, mtext, attributes
 (with their invisible and constant flags — a hidden attribute stays
 hidden), insert and minsert, spline (both fit-point and control-point forms),
 solid, trace, 3dface, shape, ray, xline, leader, multileader, tolerance,
@@ -233,12 +235,19 @@ that path is written from the format description rather than proven
 against a file. [PARITY.md](PARITY.md) marks it, and everything else
 like it, honestly.
 
-**Tables and objects** — layers, linetypes, text styles, block
-definitions including dynamic-block visibility states (read *and*
-written back as a real BLOCKVISIBILITYPARAMETER) and parameters,
-layouts, groups, mline styles, UCS, views, viewports, appids, dimension
-styles, image and underlay definitions, geographic placement, XRECORDs
-and XDATA. Draw order too: a SORTENTSTABLE reorders its space's entity
+**Tables and objects** — layers, linetypes, text styles (shape-file
+styles keep their flag), block definitions including dynamic-block
+visibility states (read *and* written back as a real
+BLOCKVISIBILITYPARAMETER) and parameters — a dynamic block's definition
+comes back under its true name, as the reference shows it — every
+layout (the further paper spaces travel as `*Paper_Space<n>` blocks with
+their LAYOUT objects, through DXF too), groups, mline styles, UCS, views,
+viewports, appids, dimension styles, image and underlay definitions,
+geographic placement, XRECORDs and XDATA. An external reference's block
+is read with its path and overlay flag (`BlockDefinition.xref`); the
+layers, linetypes and styles that belong to it (`xref|name`) are read
+with `xrefDependent` set and left home by every writer, because they
+exist only while that file is attached. Draw order too: a SORTENTSTABLE reorders its space's entity
 array on read — the array a consumer walks IS the order AutoCAD paints —
 and a handle-preserving rewrite writes the table back whenever the array
 no longer matches handle order.
@@ -514,6 +523,17 @@ four independent mechanisms:
    the harness fails if any of them regresses. This is what found the
    defects no self-consistent test could: a reader and a writer can share
    the same wrong belief and still round-trip perfectly.
+   `node tools/conformance.mjs` is the wider campaign: every drawing of
+   the reference's own sample library (96 files, 1982→2027 releases) is
+   censused by the reference itself (`ssget "X"`, its tables, its AUDIT),
+   read by us, written back by every writer from R14 to 2018 and reopened
+   by the reference, and its DXF export read and re-emitted as 2018.
+   `node tools/reader-versions.mjs` has the reference re-save each sample
+   into R14, 2000, 2004, 2007, 2010, 2013, 2018 and DXF and checks our
+   reader against its census in all eight. Rounds of it are what
+   produced the R14 viewport grammar, the proxy envelope's class-name
+   field, the xref-dependent record rule, the pre-2018 MLEADER tail and
+   the pre-2010 table cell grammar in this release.
 4. **Real drawings** — during development the reader was run over 317
    real files (139 MB, 1982→2027: AutoCAD's sample libraries, field
    drawings, vintage releases) with CRC verification on: zero throws,

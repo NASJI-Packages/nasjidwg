@@ -1108,7 +1108,12 @@ const writeDwgImpl = (
     'underlay', 'proxy', 'ole'
   ]);
   /** Entities that exist only as application classes. */
-  const CLASS_ONLY = new Set(['table', 'mleader', 'light', 'underlay']);
+  /* LIGHT and the underlays are application classes younger than R14's
+     kernel; ACAD_TABLE and MULTILEADER are classes too, but the reference
+     itself writes them into an R14 save (CLASSES 508/520 in its own
+     re-saves), and ours reopen there at AUDIT 0 with the census intact —
+     so those two travel. */
+  const CLASS_ONLY = new Set(['light', 'underlay']);
 
   const downgraded: string[] = [];
   /** R2018: the solids whose SAB payloads ride the AcDs data section,
@@ -1149,9 +1154,7 @@ const writeDwgImpl = (
         }
       }
 
-      /* ACAD_TABLE, MULTILEADER, LIGHT and the underlays are application
-         classes, and a class needs a CLASSES record to be nameable. R13
-         and R14 have no such record, so they cannot carry them at all. */
+      /* a class younger than the R13/R14 kernel cannot be named there */
       if (V <= 14 && CLASS_ONLY.has(e.type)) {
         skipped.push(e.type + ' (needs R2000 or later)');
         return false;
