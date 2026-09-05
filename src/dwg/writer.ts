@@ -21,9 +21,10 @@ import { buildAcDs } from './meta.js';
 import { sabToSat } from '../acis/sab.js';
 import { nearestAci } from '../core/color.js';
 import type {
-  Color, DimStyle, Drawing, Entity, Group, Layer, Linetype, MLeaderStyle, Point2, Point3,
+  Color, DimStyle, Drawing, DrawingVariable, Entity, Group, Layer, Linetype, MLeaderStyle,
+  MLineStyle, Point2, Point3,
   PolylineVertex, TableCell, TableStyle, TableStyleCell, TextEntity, TextStyle,
-  View, XdataGroup, XdataValue
+  Ucs, View, XdataGroup, XdataValue
 } from '../core/model.js';
 import { shapeArabic, mirrorBrackets, hasComplexScript } from '../text/arabic.js';
 import { flattenMtextParagraphs } from '../text/mtext.js';
@@ -991,6 +992,15 @@ const writeDwgImpl = (
     for (const g of drawing.groups ?? []) scanH(g.handle);
     for (const s of drawing.tableStyles ?? []) scanH(s.handle);
     for (const s of drawing.mleaderStyles ?? []) scanH(s.handle);
+    /* the multiline styles, the named coordinate systems and the
+       variable dictionary's records keep their numbers too — A-01's
+       highest handles are its DICTIONARYVARs, and a watermark below
+       them minted fresh numbers over the kept ones (two objects under
+       one handle: the reference read LIGHTINGUNITS 2 for a record that
+       said 0, and refused the file once nothing else sat above) */
+    for (const s of drawing.mlineStyles ?? []) scanH(s.handle);
+    for (const u of drawing.ucs ?? []) scanH(u.handle);
+    for (const v of drawing.variables ?? []) scanH(v.handle);
     for (const h of Object.values(drawing.structureHandles ?? {})) scanH(h);
   }
   let nextHandle = maxSrc;
@@ -1166,13 +1176,47 @@ const writeDwgImpl = (
   /* the entity groups, listed by name under ACAD_GROUP */
   const groupsOut: Group[] = drawing.groups ?? [];
   const groupH = groupsOut.map((g) => keepH(g.handle));
+  /* the named coordinate systems: one UCS table record each (one per
+     name), what the header's UCSNAME / PUCSNAME and an orthographic
+     UCS's base point at */
+  const ucsOut: Ucs[] = [];
+  for (const u of drawing.ucs ?? []) {
+    if (!u.name || ucsOut.some((o) => o.name.toLowerCase() === u.name.toLowerCase())) continue;
+    ucsOut.push(u);
+  }
+  const ucsH = ucsOut.map((u) => keepH(u.handle));
+  const ucsRef = (name?: unknown): number => {
+    if (typeof name !== 'string' || !name) return 0;
+    const i = ucsOut.findIndex((u) => u.name.toLowerCase() === name.toLowerCase());
+    return i >= 0 ? ucsH[i] : 0;
+  };
   const dimStyleRef = (name?: string): number =>
     (name && dimStyleH.get(name.toLowerCase())) || dimStandardH;
   /* Every release gets the MLINESTYLE "STANDARD" object under an
      ACAD_MLINESTYLE dictionary entry: R13/R14 refuse to open without it,
      and R2000+ audits flag any MLINE whose style handle is NULL, so the
-     record exists everywhere and MLINE + header CMLSTYLE point at it. */
-  const mlineStandardH = H();
+     record exists everywhere and MLINE + header CMLSTYLE point at it.
+     The drawing's own styles go out beside it — one record per name,
+     the source's "Standard" in place of the synthesized one — and every
+     MLINE points at the record its styleName names, else at STANDARD. */
+  const mlineStandard: MLineStyle = {
+    name: 'STANDARD', startAngle: Math.PI / 2, endAngle: Math.PI / 2,
+    elements: [
+      { offset: 0.5, color: { kind: 'byLayer' } },
+      { offset: -0.5, color: { kind: 'byLayer' } }
+    ]
+  };
+  const mlineStylesOut: MLineStyle[] = [];
+  for (const s of [...(drawing.mlineStyles ?? []), mlineStandard]) {
+    if (!s.name) continue;
+    if (mlineStylesOut.some((o) => o.name.toLowerCase() === s.name.toLowerCase())) continue;
+    mlineStylesOut.push(s);
+  }
+  const mlineStyleH = new Map<string, number>();     /* lower-cased name */
+  for (const s of mlineStylesOut) mlineStyleH.set(s.name.toLowerCase(), keepH(s.handle));
+  const mlineStandardH = mlineStyleH.get('standard')!;
+  const mlineStyleFor = (name?: unknown): number =>
+    (typeof name === 'string' && mlineStyleH.get(name.toLowerCase())) || mlineStandardH;
 
   /* block headers: model, paper, then user blocks */
   const msBH = H(), psBH = H();
@@ -1594,8 +1638,9 @@ const writeDwgImpl = (
    *  the application class R14 knew it as before. */
   const xrecordType = (): number =>
     V <= 14 ? clsFor('XRECORD', 'AcDbXrecord', 'ObjectDBX Classes', false) : 79;
-  const CLS_XRECORD = V <= 14 && columnParents.length ? xrecordType() : 0;
-  const recomposeH = columnParents.length ? H() : 0;
+  /* (an MTEXT that leaves with round-trip records is listed there too —
+     allocated below, once those are known) */
+  let recomposeH = columnParents.length ? H() : 0;
   /* PDF/DGN/DWF underlays: a class pair and a shared definition per kind */
   const underlayKinds = [...new Set(allEnts
     .filter((e): e is Entity & { type: 'underlay' } => e.type === 'underlay')
@@ -1818,10 +1863,59 @@ const writeDwgImpl = (
    *  line styles) or re-homed as before. */
   const BUILT_NOD = new Set(['ACAD_LAYOUT', 'ACAD_GROUP', 'ACAD_MLINESTYLE',
     'ACAD_TABLESTYLE', 'ACAD_MLEADERSTYLE', 'ACDB_RECOMPOSE_DATA',
-    'ACAD_GEOGRAPHICDATA']);
+    'ACAD_GEOGRAPHICDATA', 'ACDBVARIABLEDICTIONARY']);
+  /* The drawing's variable dictionary (R2000+): the system variables the
+     reference keeps as DICTIONARYVAR records under the root's
+     AcDbVariableDictionary — DIMASSOC of 2002, CTABLESTYLE, CMLEADERSTYLE,
+     CANNOSCALE, LIGHTINGUNITS, CVIEWDETAILSTYLE… — rebuilt natively in
+     every release from `drawing.variables` (the DWG reader's) and from a
+     DICTIONARYVAR that arrived through DXF as tags. A source header slot
+     the target release lacks joins the list the way the reference's own
+     saves spell it (its 2000 save of A-01 lists DIMASSOC, INDEXCTL and
+     XCLIPFRAME beside the rest, its 2004 save SOLIDHIST; both header
+     slots elsewhere), and a slot this release has takes the dictionary's
+     value when the source header carried none (see hdrNum). */
+  const variablesOut: DrawingVariable[] = [];
+  const hasVar = (name: string): boolean =>
+    variablesOut.some((v) => v.name.toLowerCase() === name.toLowerCase());
+  for (const v of drawing.variables ?? []) {
+    if (v.name && !hasVar(v.name)) variablesOut.push(v);
+  }
+  const consumedVars = new Set<Sealed>();
+  for (const p of drawing.unknownObjects ?? []) {
+    if (kindOf(p) !== 'DICTIONARYVAR' || !p.name || !p.tags?.length) continue;
+    if (p.dictPath?.length !== 1 || !/^acdbvariabledictionary$/i.test(p.dictPath[0])) continue;
+    const tag = (code: number): string | undefined => p.tags!.find((t) => t[0] === code)?.[1];
+    const value = tag(1);
+    if (value === undefined) continue;
+    consumedVars.add(p);
+    if (hasVar(p.name)) continue;
+    const schema = Number(tag(280) ?? 0);
+    variablesOut.push({
+      name: p.name, value, ...(schema ? { schema } : {}),
+      ...(p.handle ? { handle: p.handle } : {}), ...(p.xdict ? { xdict: p.xdict } : {})
+    });
+  }
+  const headerSlotVar = (name: string): void => {
+    const x = drawing.header.vars?.[name];
+    if (typeof x !== 'number' || !Number.isFinite(x) || hasVar(name)) return;
+    variablesOut.push({ name, value: String(x) });
+  };
+  if (V < 2004) for (const k of ['DIMASSOC', 'INDEXCTL', 'XCLIPFRAME']) headerSlotVar(k);
+  if (V < 2007) headerSlotVar('SOLIDHIST');
+  const usesVariables = V >= 2000 && variablesOut.length > 0;
+  if (V < 2000 && variablesOut.length) {
+    skipped.push(`${variablesOut.length} drawing variables (AcDbVariableDictionary needs R2000 or later)`);
+  }
+  const varDictH = usesVariables ? keepH(sh('ACDBVARIABLEDICTIONARY')) : 0;
+  const varH = variablesOut.map((v) => (usesVariables ? keepH(v.handle) : 0));
+  const CLS_DICTVAR = usesVariables
+    ? clsFor('DICTIONARYVAR', 'AcDbDictionaryVar', 'ObjectDBX Classes', false) : 0;
   const sealedAll = (drawing.unknownObjects ?? []).filter((p) => {
     if (kindOf(p) === 'DICTIONARY' && p.dictPath?.length === 0 && p.name
       && BUILT_NOD.has(p.name.toUpperCase())) return false;
+    /* a DICTIONARYVAR rebuilt natively from its tags (above) */
+    if (consumedVars.has(p)) return false;
     /* the plot style name dictionary (with its default, the placeholder)
        is R2000's: R13/R14 have no plot styles to name */
     if (V < 2000 && isWdflt(p)) {
@@ -1881,6 +1975,9 @@ const writeDwgImpl = (
     addRef(activeVport?.handle);
     for (const ds of dimStyles) addRef(ds.handle);
     for (const g of groupsOut) addRef(g.handle);
+    for (const s of mlineStylesOut) addRef(s.handle);
+    for (const u of ucsOut) addRef(u.handle);
+    if (usesVariables) for (const v of variablesOut) addRef(v.handle);
   }
   /* The source's structural objects: the named objects dictionary, its
      sub-dictionaries this writer rebuilds, the symbol-table controls. A
@@ -1903,6 +2000,7 @@ const writeDwgImpl = (
     map(sh('ACAD_MLINESTYLE'), mlineDict);
     if (usesTableStyles) map(sh('ACAD_TABLESTYLE'), tableDictH);
     if (usesMLeaderStyles) map(sh('ACAD_MLEADERSTYLE'), mleaderDictH);
+    if (usesVariables) map(sh('ACDBVARIABLEDICTIONARY'), varDictH);
     map(sh('BLOCK_CONTROL'), blockControl); map(sh('LAYER_CONTROL'), layerControl);
     map(sh('STYLE_CONTROL'), styleControl); map(sh('LTYPE_CONTROL'), ltypeControl);
     map(sh('VIEW_CONTROL'), viewControl); map(sh('UCS_CONTROL'), ucsControl);
@@ -2253,6 +2351,96 @@ const writeDwgImpl = (
       }
     }
   }
+  /* ---- MTEXT paragraph codes an older release cannot show, and the
+     records the reference keeps the original under ----
+     The 2008 release's `\px…;` paragraph codes go out natively in AC1032
+     alone: the reference's own saves of a text spelled `\pxqc;…` into
+     2013, 2010, 2007 and 2004 all carry the 2004 spelling (`\pi…` in
+     drawing units, alignment and spacing dropped), and its 2000 and R14
+     saves carry no `\p…;` at all. Beside the rewritten text it keeps
+     the original in the entity's extension dictionary: an XRECORD
+     `ACAD_MTEXT_2008_RT` of (40 = Σ charCode(i)·(i+1) over the 2004
+     spelling, 1 = the original text in 250-character pieces), and for
+     2000 and R14 a second one, `ACAD_MTEXT_RT` (40 = the same sum over
+     the text as written, 1 = the 2004 spelling in pieces) — the 2004
+     text restored first on open, the original from it, each only when
+     its sum still matches what the entity carries (edited text keeps).
+     Pinned on the reference's saves of three probe texts and of its
+     Text-and-Tables sample (px2008 scratch): the sums above match every
+     record. A source chain that travels sealed under the entity is kept
+     (its sums hold: the 2004 spelling is what the source carried); a
+     record that does not travel is rebuilt from the source's typed
+     values, so the original survives a renumbering write too. */
+  const synthXdict = new Map<number, number>();    /* entity → its fresh xdict */
+  interface MtextRt { dict: number; fresh: boolean; entries: [string, number, XdataValue[]][] }
+  const mtextRt = new Map<Entity, MtextRt>();
+  /** The text an MTEXT goes out with in this release. */
+  const mtextWritten = (e: Entity & { type: 'mtext' }): string => {
+    const t0 = (e.raw ?? e.text).replace(/\n/g, '\\P');
+    if (V >= 2018) return t0;
+    const height = e.height > 0 ? e.height : 5;
+    const t4 = flattenMtextParagraphs(t0, 2004, height);
+    return V <= 2000 ? flattenMtextParagraphs(t4, 2000, height) : t4;
+  };
+  if (V < 2018) {
+    const sumPos1 = (s: string): number => {
+      let n = 0;
+      for (let i = 0; i < s.length; i++) n += s.charCodeAt(i) * (i + 1);
+      return n;
+    };
+    /** what lands in the record: the codepage spelling before R2007 */
+    const stored = (s: string): string => (V >= 2007 ? s : outText(s));
+    const pieces = (s: string): XdataValue[] => {
+      const out: XdataValue[] = [];
+      for (let i = 0; i < s.length; i += 250) out.push({ code: 1, value: s.slice(i, i + 250) });
+      return out;
+    };
+    const joined = (values: XdataValue[]): string =>
+      values.map((v) => (v.code === 1 && 'value' in v ? String(v.value) : '')).join('');
+    for (const [e, h] of entH) {
+      if (e.type !== 'mtext') continue;
+      const height = e.height > 0 ? e.height : 5;
+      const t0 = (e.raw ?? e.text).replace(/\n/g, '\\P');
+      const t4 = flattenMtextParagraphs(t0, 2004, height);
+      const tw = mtextWritten(e);
+      /* the source's own chain, when the entity came with one */
+      const srcDict = e.xdict ? sealedByH.get(e.xdict.toUpperCase()) : undefined;
+      const srcRt = (key: string): { handle: string; text: string } | undefined => {
+        const en = srcDict?.entries?.find((x) => x.name.toUpperCase() === key);
+        const vals = en ? xrecordValues.get(en.handle.toUpperCase()) : undefined;
+        return en && vals ? { handle: en.handle, text: joined(vals) } : undefined;
+      };
+      const src2008 = srcRt('ACAD_MTEXT_2008_RT');
+      const src2004 = srcRt('ACAD_MTEXT_RT');
+      const orig2008 = t4 !== t0 ? t0 : src2008?.text;
+      const orig2004 = tw !== t4 ? t4 : (V <= 2000 ? src2004?.text : undefined);
+      if (!orig2008 && !orig2004) continue;
+      const travelling = (src?: { handle: string }): boolean =>
+        !!src && !!srcDict && travel.has(srcDict) && written(src.handle);
+      const entries: MtextRt['entries'] = [];
+      if (orig2008 && !travelling(src2008)) {
+        entries.push(['ACAD_MTEXT_2008_RT', H(),
+          [{ code: 40, value: sumPos1(stored(orig2004 ?? tw)) }, ...pieces(orig2008)]]);
+      }
+      if (orig2004 && !travelling(src2004)) {
+        entries.push(['ACAD_MTEXT_RT', H(),
+          [{ code: 40, value: sumPos1(stored(tw)) }, ...pieces(orig2004)]]);
+      }
+      if (!entries.length) continue;
+      const sealed = xdictByOwner.get(h);
+      const dict = sealed?.h ?? H();
+      if (sealed) for (const [n, xh] of entries) listIn(dict, n, xh);
+      else synthXdict.set(h, dict);
+      mtextRt.set(e, { dict, fresh: !sealed, entries });
+    }
+    /* The reference restores the original only for an MTEXT its
+       ACDB_RECOMPOSE_DATA record names: its own 2000, 2004, 2007 and
+       R14 saves list every MTEXT that carries the records (330 each,
+       ascending), and from a file of ours without the listing it took
+       the 2004 spelling back from ACAD_MTEXT_RT but left the 2008
+       original in place — measured on the three-text probe. */
+    if (mtextRt.size && !recomposeH) recomposeH = H();
+  }
   const underlayDefH = new Map<string, number>();
   function modelEntsAll(): Entity[] { return drawing.entities; }
   function paperEntsAll(): Entity[] { return drawing.paperSpace ?? []; }
@@ -2490,8 +2678,9 @@ const writeDwgImpl = (
       : 0;
     if (V <= 14) w.b(ltFlags === 0 ? 1 : 0);   /* isbylayerlt */
     /* the entity's extension dictionary, when the sealed one the reader
-       kept for it goes out under it (see xdictByOwner) */
-    const xd = xdictByOwner.get(handle)?.h ?? 0;
+       kept for it goes out under it (see xdictByOwner), or the one this
+       writer builds for an MTEXT's round-trip records (synthXdict) */
+    const xd = xdictByOwner.get(handle)?.h ?? synthXdict.get(handle) ?? 0;
     if (V >= 2004) w.b(xd ? 0 : 1);       /* xdict missing */
     if (V <= 2002) w.b(0);                /* nolinks = 0: chain present */
     if (V >= 2018) w.b(ctx.hasDs ? 1 : 0);  /* has_ds_data (2013+) */
@@ -2921,12 +3110,9 @@ const writeDwgImpl = (
           w.bd(0); w.bd(0);               /* extents */
           /* paragraph codes the target release cannot show are rewritten
              the way the reference rewrites them on its own older saves
-             (flattenMtextParagraphs); the original spelling is not kept
-             beside the entity here — the reference's ACAD_MTEXT_2008_RT
-             xrecord needs an extension dictionary the model has no
-             field for yet */
-          w.t(outText(flattenMtextParagraphs(
-            (e.raw ?? e.text).replace(/\n/g, '\\P'), V, e.height > 0 ? e.height : 5)));
+             (mtextWritten), the original kept beside the entity in the
+             round-trip records the reference restores it from */
+          w.t(outText(mtextWritten(e)));
           /* R2000 line spacing — not part of the R13/R14 record (the
              decode-gap census read our own R14 MTEXT 13 bits short) */
           if (V >= 2000) { w.bs(1); w.bd(1); w.b(0); }
@@ -3282,9 +3468,9 @@ const writeDwgImpl = (
             }
           }
         }, (w) => {
-          /* the STANDARD style exists at R13/R14 (synthesized above); the
-             later releases keep the proven null reference */
-          w.h(5, mlineStandardH);         /* mlinestyle */
+          /* the style its styleName names, else STANDARD (which exists
+             in every release, synthesized when the drawing has none) */
+          w.h(5, mlineStyleFor(e.styleName));   /* mlinestyle */
         });
         return;
       }
@@ -4504,6 +4690,10 @@ const writeDwgImpl = (
    *  codepage containers keep the escaped/shaped legacy spelling, which
    *  the same AutoCAD audits clean. */
   const nameText = (s: string): string => V >= 2007 ? s : outText(s);
+  /** A dictionary key: NUL-closed in the R14, 2000 and 2004 containers,
+   *  as the reference's own files of those releases spell every one. */
+  const dictKey = (name: string): string =>
+    V >= 2000 && V < 2007 && name ? nameText(name) + '\0' : nameText(r14Str(name));
 
   /** @param xrefH the attachment an xref-dependent record belongs to —
    *  its block record's handle; 0 for the drawing's own records
@@ -4837,37 +5027,106 @@ const writeDwgImpl = (
     }, xd);
   };
 
-  /** The MLINESTYLE "STANDARD" object — present in every real file,
-   *  owned by the ACAD_MLINESTYLE dictionary. Values mirrored from
-   *  AutoCAD-minted refs (refR14, ref2004, ref2018): no fill, 90° end
-   *  caps, two elements at ±0.5 with ByLayer colour and the BYLAYER
-   *  linetype (index 32767 through R2013, a linetype handle per element
-   *  from R2018 on — 155 genuine AC1021/AC1024/AC1027 files carry the
+  /** An MLINESTYLE object, owned by the ACAD_MLINESTYLE dictionary: the
+   *  name, description, flags, fill colour, the two cap angles, then
+   *  the elements — offset, colour, and the linetype as a table index
+   *  through R2013 (32767 BYLAYER, 32766 BYBLOCK, else the record's
+   *  position in the linetype table's list) or a handle per element
+   *  from R2018 on (155 genuine AC1021/AC1024/AC1027 files carry the
    *  index in the data stream and nothing in the handle stream). The
-   *  colour takes the 2004+ CMC spelling — index 0
-   *  plus the 0xC0 "ByLayer" method dword — where the container does. */
-  const makeMlineStandard = (): void => {
-    const byLayerCmc = (w: BitWriter): void => {
-      if (V >= 2004) { w.bs(0); w.bl(0xc0000000); w.rc(0); }
-      else w.bs(256);
-    };
-    makeObject(73, mlineStandardH, (w) => {
-      w.t(outText(r14Name('STANDARD')));   /* real files spell it uppercase */
-      w.t('');                          /* description */
-      w.bs(0);                          /* flags */
-      byLayerCmc(w);                    /* fill colour */
-      w.bd(Math.PI / 2); w.bd(Math.PI / 2);   /* start / end angle */
-      w.rc(2);
-      for (const off of [0.5, -0.5]) {
-        w.bd(off);
-        byLayerCmc(w);                  /* element colour */
-        if (V < 2018) w.bs(32767);      /* linetype index: BYLAYER */
+   *  STANDARD values mirror the reference's own (refR14, ref2004,
+   *  ref2018): no fill, 90° caps, ±0.5 ByLayer/BYLAYER. A colour takes
+   *  the 2004+ CMC spelling where the container does. */
+  const mlineLtypeIndex = (name?: string): number => {
+    if (!name || /^bylayer$/i.test(name)) return 32767;
+    if (/^byblock$/i.test(name)) return 32766;
+    const i = userLtypes.findIndex((lt) => lt.name.toLowerCase() === name.toLowerCase());
+    return i >= 0 ? i : 32767;
+  };
+  const mlineLtypeRef = (name?: string): number => {
+    if (!name || /^bylayer$/i.test(name)) return ltBylayer;
+    if (/^byblock$/i.test(name)) return ltByblock;
+    return ltypeH.get(name) ?? ltBylayer;
+  };
+  const makeMlineStyle = (s: MLineStyle, h: number): void => {
+    const xd = xdictByOwner.get(h)?.h ?? 0;
+    const elements = s.elements.slice(0, 64);
+    /* 2000 and 2004 close the name and a non-empty description with a
+       NUL, as R14 does (the reference's own re-saves of a WALL style,
+       bit-walked beside its STANDARD) */
+    const cstr = (s: string): string => (V >= 2000 && V < 2007 && s ? s + '\0' : s);
+    makeObject(73, h, (w) => {
+      w.t(cstr(nameText(r14Name(s.name))));   /* real files spell STANDARD uppercase */
+      w.t(cstr(nameText(r14Str(s.description ?? ''))));
+      w.bs(s.flags ?? 0);
+      objCmc(w, s.fillColor ?? { kind: 'byLayer' });   /* fill colour */
+      w.bd(s.startAngle ?? Math.PI / 2); w.bd(s.endAngle ?? Math.PI / 2);
+      w.rc(elements.length);
+      for (const el of elements) {
+        w.bd(el.offset);
+        objCmc(w, el.color ?? { kind: 'byLayer' });
+        if (V < 2018) w.bs(mlineLtypeIndex(el.linetype));
       }
     }, (w) => {
       w.h(4, mlineDict);                /* owner */
-      if (V < 2004) w.h(3, 0);          /* xdict (2004+ says "missing") */
-      if (V >= 2018) { w.h(5, ltBylayer); w.h(5, ltBylayer); }
-    });
+      if (V < 2004 || xd) w.h(3, xd);   /* xdict (2004+ says "missing") */
+      if (V >= 2018) for (const el of elements) w.h(5, mlineLtypeRef(el.linetype));
+    }, xd);
+  };
+
+  /** A named UCS record: name and flags, origin and the two axes, then
+   *  from R2000 the elevation, the orthographic view type and the
+   *  remembered origin per orthographic type; in the handle stream the
+   *  xref slot, then (R2000+) the base UCS and an always-null second
+   *  pointer — bit-walked on the reference's 2000/2004/2007/2018 saves
+   *  of its Tower sample. */
+  const makeUcs = (u: Ucs, h: number): void => {
+    const xd = xdictByOwner.get(h)?.h ?? 0;
+    makeObject(63, h, (w) => {
+      tableFlags(w, u.name);
+      w.bd3(u.origin.x, u.origin.y, u.origin.z ?? 0);
+      w.bd3(u.xAxis.x, u.xAxis.y, u.xAxis.z ?? 0);
+      w.bd3(u.yAxis.x, u.yAxis.y, u.yAxis.z ?? 0);
+      if (V >= 2000) {
+        w.bd(u.elevation ?? 0);
+        w.bs(u.orthoViewType ?? 0);
+        const origins = u.orthoOrigins ?? [];
+        w.bs(origins.length);
+        for (const o of origins) {
+          w.bs(o.type);
+          w.bd3(o.origin.x, o.origin.y, o.origin.z ?? 0);
+        }
+      }
+    }, (w) => {
+      w.h(4, ucsControl);
+      if (V < 2004 || xd) w.h(3, xd);
+      w.h(5, 0);                          /* xref */
+      if (V >= 2000) {
+        w.h(5, ucsRef(u.baseUcs));        /* base UCS (346) */
+        w.h(5, 0);                        /* named UCS: always null */
+      }
+    }, xd);
+  };
+
+  /** A DICTIONARYVAR: the schema byte, the value as text — NUL-closed in
+   *  the codepage containers, as the reference writes it (its 2000 and
+   *  2004 saves spell "Standard" as nine characters) — and, in the
+   *  handle stream, the variable dictionary twice: as the owner and as
+   *  the record's one persistent reactor (bit-walked on the reference's
+   *  2004, 2007 and 2018 saves of A-01, record LIGHTINGUNITS: data
+   *  identical to ours, `4:dict 4:dict` where ours had `4:dict` — and
+   *  without the reactor the R2007+ files read the defaults back, 2 for
+   *  LIGHTINGUNITS where the record says 0). */
+  const makeDictionaryVar = (v: DrawingVariable, h: number): void => {
+    const xd = xdictByOwner.get(h)?.h ?? 0;
+    makeObject(CLS_DICTVAR, h, (w) => {
+      w.rc(v.schema ?? 0);
+      w.t(V >= 2007 ? v.value : outText(v.value) + '\0');
+    }, (w) => {
+      w.h(4, varDictH);                   /* owner */
+      w.h(4, varDictH);                   /* reactor */
+      if (V < 2004 || xd) w.h(3, xd);
+    }, xd, undefined, 1);
   };
 
   /** A colour inside an object record: the 2004 CMC layout — a zero
@@ -5239,8 +5498,13 @@ const writeDwgImpl = (
      inline: owner, reactors, xdict, entries, model, paper. The generic
      makeControl matches that shape (num in data stream, rest as handles). */
 
+  /** @param hardOwner the dictionary owns its entries hard (DXF 280 = 1):
+   *  what the reference gives an entity's extension dictionary. The keys
+   *  are NUL-closed in the 2000 and 2004 containers as in R14 — every
+   *  dictionary of the reference's own 2000/2004 saves spells them so
+   *  (its root, its variable dictionary, its MTEXT round-trip ones). */
   const makeDictionary = (
-    handle: number, owner: number, items: [string, number][]
+    handle: number, owner: number, items: [string, number][], hardOwner = false
   ): void => {
     /* the dictionary's own extension dictionary, when the source's sealed
        one goes out under it (the root's, a sub-dictionary's) */
@@ -5248,12 +5512,12 @@ const writeDwgImpl = (
     makeObject(42, handle, (w) => {
       w.bl(items.length);
       if (V >= 2000) w.bs(1);             /* cloning (R2000+ only) */
-      if (V >= 14) w.rc(0);               /* hard owner (R13c3 and later) */
-      for (const [name] of items) w.t(nameText(r14Str(name)));
+      if (V >= 14) w.rc(hardOwner ? 1 : 0);   /* hard owner (R13c3 and later) */
+      for (const [name] of items) w.t(dictKey(name));
     }, (w) => {
       w.h(4, owner);
       if (V < 2004 || xd) w.h(3, xd);
-      for (const [, h] of items) w.h(2, h);
+      for (const [, h] of items) w.h(hardOwner ? 3 : 2, h);
     }, xd);
   };
 
@@ -5319,6 +5583,9 @@ const writeDwgImpl = (
     /* the record points at its extension dictionary: only when that
        dictionary goes out under this entity is the pointer still true */
     if (e.xdict && !xdictByOwner.has(handle)) return undefined;
+    /* an extension dictionary this writer builds (an MTEXT's round-trip
+       records) is not in the retained bytes */
+    if (synthXdict.has(handle)) return undefined;
     /* likewise its reactor list: a watcher that is not in this file
        would be a dangling reactor in the retained bytes */
     if (e.reactors?.some((r) => outOf(r) === undefined)) return undefined;
@@ -5371,7 +5638,7 @@ const writeDwgImpl = (
   makeControl(56, ltypeControl, userLtypes.map((lt) => ltypeH.get(lt.name)!),
     (w) => { w.h(3, ltByblock); w.h(3, ltBylayer); });
   makeControl(60, viewControl, viewH);
-  makeControl(62, ucsControl, []);
+  makeControl(62, ucsControl, ucsH);
   makeControl(64, vportControl, [vportActive]);
   makeControl(66, appidControl, [appidAcad, ...extraAppids.map((a) => a.handle)]);
   makeControl(68, dimstyleControl,
@@ -5387,6 +5654,10 @@ const writeDwgImpl = (
       ? [['ACAD_TABLESTYLE', tableDictH] as [string, number]] : []),
     ...(usesMLeaderStyles
       ? [['ACAD_MLEADERSTYLE', mleaderDictH] as [string, number]] : []),
+    /* the variable dictionary, spelled as the reference's own files
+       spell the key */
+    ...(usesVariables
+      ? [['ACDBVARIABLEDICTIONARY', varDictH] as [string, number]] : []),
     ...(recomposeH
       ? [['ACDB_RECOMPOSE_DATA', recomposeH] as [string, number]] : []),
     ...(geoData ? [['ACAD_GEOGRAPHICDATA', geoDataH] as [string, number]] : []),
@@ -5429,15 +5700,16 @@ const writeDwgImpl = (
     });
   }
   views.forEach((vw, i) => makeView(vw, viewH[i]));
+  ucsOut.forEach((u, i) => makeUcs(u, ucsH[i]));
   if (recomposeH) {
     /* the XRECORD's data is a byte-counted run of (RS group, value):
        RL for 90, an absolute 64-bit handle for 330 — walked bit-exact
        off the reference's own R14 and R2000 saves */
-    const parents = columnParents
+    const parents = [...new Set([...columnParents, ...mtextRt.keys()]
       .map((e) => entH.get(e))
-      .filter((h): h is number => h !== undefined)
+      .filter((h): h is number => h !== undefined))]
       .sort((a, b) => a - b);             /* ascending, as the reference lists them */
-    makeObject(V <= 14 ? CLS_XRECORD : 79, recomposeH, (w) => {
+    makeObject(xrecordType(), recomposeH, (w) => {
       w.bl(6 + 10 * parents.length);
       w.rs(90); w.rl(1);
       for (const h of parents) { w.rs(330); w.rll(h); }
@@ -5447,8 +5719,34 @@ const writeDwgImpl = (
       if (V < 2004) w.h(3, 0);            /* xdict */
     });
   }
-  /* the dictionary names the STANDARD style in every release */
-  makeDictionary(mlineDict, nod, [['STANDARD', mlineStandardH]]);
+  /* the dictionary names every style, STANDARD among them, in every release */
+  makeDictionary(mlineDict, nod,
+    mlineStylesOut.map((s) => [s.name, mlineStyleH.get(s.name.toLowerCase())!]));
+  /* the variable dictionary and its DICTIONARYVARs (R2000+) */
+  if (usesVariables) {
+    makeDictionary(varDictH, nod, variablesOut.map((v, i) => [v.name, varH[i]]));
+    variablesOut.forEach((v, i) => makeDictionaryVar(v, varH[i]));
+  }
+  /* the MTEXT round-trip records: a fresh extension dictionary per
+     entity that had none travelling, then the XRECORDs (typed runs:
+     the sum as a real, the text in pieces, the R2000+ cloning flag) */
+  for (const [e, rt] of mtextRt) {
+    const owner = entH.get(e)!;
+    /* a hard-owner dictionary, as the reference gives an entity's */
+    if (rt.fresh) makeDictionary(rt.dict, owner, rt.entries.map(([n, h]) => [n, h]), true);
+    for (const [, h, values] of rt.entries) {
+      /* the dictionary owns the record and watches it — its one
+         persistent reactor, as the reference's own records carry it */
+      makeObject(xrecordType(), h, (w) => {
+        xrecordBody(w, values);
+        if (V >= 2000) w.bs(1);           /* cloning flag */
+      }, (w) => {
+        w.h(4, rt.dict);                  /* owner */
+        w.h(4, rt.dict);                  /* reactor */
+        if (V < 2004) w.h(3, 0);          /* xdict */
+      }, 0, undefined, 1);
+    }
+  }
   /* the table and multileader styles, each listed by name under its
      dictionary — the drawing's own, plus a Standard when it has none */
   if (usesTableStyles) {
@@ -5705,7 +6003,7 @@ const writeDwgImpl = (
         w.bl(items.length);
         if (V >= 2000) w.bs(p.cloning ?? 1);
         if (V >= 14) w.rc(p.hardOwner ? 1 : 0);
-        for (const [n] of items) w.t(nameText(r14Str(n)));
+        for (const [n] of items) w.t(dictKey(n));
       }, (w) => {
         prologue(w);
         for (const [, t, code] of items) w.h(code, t);
@@ -5766,7 +6064,7 @@ const writeDwgImpl = (
   makeAppid('ACAD', appidAcad);
   for (const a of extraAppids) makeAppid(a.name, a.handle);
   for (const ds of dimStyles) makeDimStyle(ds);
-  makeMlineStandard();
+  for (const s of mlineStylesOut) makeMlineStyle(s, mlineStyleH.get(s.name.toLowerCase())!);
 
   makeBlockHeader(msBH, '*MODEL_SPACE', msBlockEnt, msEndblk, msEntH,
     undefined, V >= 2000 ? layoutModelH : 0,
@@ -5886,7 +6184,7 @@ const writeDwgImpl = (
         w.bl(entries.length);
         if (V >= 2000) w.bs(1);           /* cloning: keep existing */
         if (V >= 14) w.rc(1);             /* hard-owner flag */
-        for (const [name] of entries) w.t(nameText(r14Str(name)));
+        for (const [name] of entries) w.t(dictKey(name));
       }, (w) => {
         w.h(4, bh);
         noXdict(w);
@@ -6102,7 +6400,12 @@ const writeDwgImpl = (
     /** a numeric header variable the source drawing carried, else a default */
     const hdrNum = (k: string, dflt: number): number => {
       const x = drawing.header.vars?.[k];
-      return typeof x === 'number' && Number.isFinite(x) ? x : dflt;
+      if (typeof x === 'number' && Number.isFinite(x)) return x;
+      /* a slot the source kept in its variable dictionary instead (a
+         2000 file's DIMASSOC) */
+      const v = variablesOut.find((q) => q.name.toLowerCase() === k.toLowerCase());
+      const n = v ? Number(v.value) : NaN;
+      return Number.isFinite(n) ? n : dflt;
     };
     if (V >= 2013) w.bll(0);              /* REQUIREDVERSIONS */
     /* unit ratios: the first is the ancient 412148564080.0 constant every
@@ -6165,7 +6468,7 @@ const writeDwgImpl = (
     H(5, ltBylayer);                      /* CELTYPE */
     if (V >= 2007) H(5, 0);               /* CMATERIAL */
     H(5, dimStandardH);                   /* DIMSTYLE */
-    H(5, mlineStandardH);                 /* CMLSTYLE (STANDARD at R13/R14) */
+    H(5, mlineStyleFor(drawing.header.vars?.CMLSTYLE));   /* CMLSTYLE */
     if (V >= 2000) w.bd(0);               /* PSVPSCALE (R2000+) */
     /* paper space vars */
     w.bd3(0, 0, 0);                       /* PINSBASE */
@@ -6176,7 +6479,7 @@ const writeDwgImpl = (
     w.bd3(pu?.origin.x ?? 0, pu?.origin.y ?? 0, pu?.origin.z ?? 0);   /* PUCSORG */
     w.bd3(pu?.xAxis.x ?? 1, pu?.xAxis.y ?? 0, pu?.xAxis.z ?? 0);      /* PUCSXDIR */
     w.bd3(pu?.yAxis.x ?? 0, pu?.yAxis.y ?? 1, pu?.yAxis.z ?? 0);      /* PUCSYDIR */
-    H(5, 0);                              /* PUCSNAME */
+    H(5, ucsRef(drawing.header.vars?.PUCSNAME));   /* PUCSNAME */
     if (V >= 2000) {
       H(5, 0); w.bs(0); H(5, 0);          /* PUCSORTHOREF/VIEW/BASE */
       for (let i = 0; i < 6; i++) w.bd3(0, 0, 0);  /* PUCSORG* */
@@ -6201,7 +6504,7 @@ const writeDwgImpl = (
     w.bd3(hu?.origin.x ?? 0, hu?.origin.y ?? 0, hu?.origin.z ?? 0);   /* UCSORG */
     w.bd3(hu?.xAxis.x ?? 1, hu?.xAxis.y ?? 0, hu?.xAxis.z ?? 0);      /* UCSXDIR */
     w.bd3(hu?.yAxis.x ?? 0, hu?.yAxis.y ?? 1, hu?.yAxis.z ?? 0);      /* UCSYDIR */
-    H(5, 0);                              /* UCSNAME */
+    H(5, ucsRef(drawing.header.vars?.UCSNAME));    /* UCSNAME */
     if (V >= 2000) {
       H(5, 0); w.bs(0); H(5, 0);          /* UCSORTHOREF/VIEW/BASE */
       for (let i = 0; i < 6; i++) w.bd3(0, 0, 0);

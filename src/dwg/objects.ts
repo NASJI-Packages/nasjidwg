@@ -35,7 +35,8 @@ import type { DwgClassInfo } from './classes.js';
  *  than re-create — extension dictionaries with the XRECORDs they list,
  *  and the nodes of a dynamic block's evaluation graph. */
 const DUAL_SEALED = new Set([
-  'DICTIONARY', 'ACDBDICTIONARYWDFLT', 'XRECORD', 'BLOCKVISIBILITYPARAMETER',
+  'DICTIONARY', 'ACDBDICTIONARYWDFLT', 'XRECORD', 'DICTIONARYVAR',
+  'BLOCKVISIBILITYPARAMETER',
   'BLOCKLINEARPARAMETER', 'BLOCKROTATIONPARAMETER', 'BLOCKFLIPPARAMETER',
   'BLOCKALIGNMENTPARAMETER', 'BLOCKBASEPOINTPARAMETER', 'BLOCKXYPARAMETER',
   'BLOCKPOLARPARAMETER', 'BLOCKPOINTPARAMETER', 'BLOCKLOOKUPPARAMETER',
@@ -253,14 +254,25 @@ export interface RawObject {
   };
   /** GROUP object payload. */
   group?: { name: string; description?: string; selectable?: boolean; members: number[] };
-  /** MLINESTYLE object payload. */
+  /** MLINESTYLE object payload. Each element's linetype is a handle
+   *  from R2018 and a table index before (32767 BYLAYER, 32766 BYBLOCK,
+   *  else the record's position in the linetype table's list). */
   mlineStyle?: {
     name: string; description?: string; flags?: number; fillColor?: Color;
     startAngle?: number; endAngle?: number;
-    elements: { offset: number; color: Color; ltypeHandle?: number }[];
+    elements: { offset: number; color: Color; ltypeHandle?: number; ltypeIndex?: number }[];
   };
+  /** MLINE: the MLINESTYLE record the entity is drawn with. */
+  mlineStyleHandle?: number;
+  /** DICTIONARYVAR object payload: the schema byte and the value text. */
+  dictionaryVar?: { schema: number; value: string };
   /** UCS / VIEW / VPORT table payloads. */
-  ucs?: { name: string; origin: Point3; xAxis: Point3; yAxis: Point3 };
+  ucs?: {
+    name: string; origin: Point3; xAxis: Point3; yAxis: Point3;
+    elevation?: number; orthoViewType?: number;
+    orthoOrigins?: { type: number; origin: Point3 }[];
+    baseUcsHandle?: number;
+  };
   view?: View;
   vport?: {
     name: string; lowerLeft: Point2; upperRight: Point2; center: Point2;
@@ -1510,7 +1522,9 @@ const decodeEntitySpecific = (
           lines
         });
       }
-      x.hr.h();                           /* mlinestyle */
+      /* the style: resolved to its name by the reader (the ACAD_MLINESTYLE
+         entry the handle is listed under) */
+      raw.mlineStyleHandle = x.handle(raw.handle);
       return {
         type: 'mline', layer: '0', color: { kind: 'byLayer' },
         scale, justification, basePoint: pt3(bx, by, bz),
@@ -3925,6 +3939,26 @@ const decodeObjectSpecific = (x: Ctx, typeName: string, raw: RawObject): void =>
       return;
     }
 
+    case 'LinetypeTable': {
+      /* the linetype table's entry list, in the control's order: what
+         a pre-2018 MLINESTYLE element's linetype index counts through
+         (the reference's own 2000/2004 re-saves of a style whose
+         elements name DASHED and HIDDEN, the third and fourth records
+         after ByLayer/ByBlock, carry 1 and 2 — the index into this
+         list; 32767 BYLAYER, 32766 BYBLOCK) */
+      const num = r.bl();
+      const chr = v < 2007 ? x.r : x.hr;
+      chr.h();                            /* owner */
+      for (let i = 0; i < x.numReactors; i++) chr.h();
+      if (v < 2004 || !x.xdicMissing) chr.h();
+      const entries: number[] = [];
+      for (let i = 0; i < num && i < 100000; i++) {
+        entries.push(resolveHandle(chr.h(), raw.handle));
+      }
+      raw.table = { kind: 'tableControl', ownedHandles: entries };
+      return;
+    }
+
     case 'APPID': {
       const name = x.tableFlags();
       raw.table = { kind: 'appid', name };
@@ -4014,11 +4048,15 @@ const decodeObjectSpecific = (x: Ctx, typeName: string, raw: RawObject): void =>
            in R2018. Reading handles too early left the handle stream
            short and threw, which sealed the record: every R2007/R2010/
            R2013 file came back with no MLINESTYLE at all. */
-        if (v < 2018) r.bs();             /* linetype index */
-        elements.push({ offset, color });
+        const el: (typeof elements)[number] = { offset, color };
+        if (v < 2018) el.ltypeIndex = r.bs();   /* linetype index */
+        elements.push(el);
       }
       if (v >= 2018) {
-        for (let i = 0; i < num; i++) x.hr.h();   /* per-element ltype */
+        for (let i = 0; i < num; i++) {
+          const lt = x.handle(raw.handle);      /* per-element ltype */
+          if (lt) elements[i].ltypeHandle = lt;
+        }
       }
       raw.mlineStyle = {
         name, description: description || undefined, flags,
@@ -4075,6 +4113,13 @@ const decodeObjectSpecific = (x: Ctx, typeName: string, raw: RawObject): void =>
     }
 
     case 'UCS': {
+      /* R2000 added the elevation, the orthographic view type, the
+         remembered origin per orthographic type (a counted run of BS
+         type + 3BD), and in the handle stream — after the xref slot —
+         the base UCS and a second, always-null UCS pointer. Bit-walked
+         on the reference's own 2000, 2004, 2007 and 2018 saves of its
+         Tower sample (records ZX and ZY): the data closes `BD 0, BS 0,
+         BS 0` and the handles run `4:control 5:0 5:0 5:0`. */
       const name = x.tableFlags();
       const [ox, oy, oz] = r.bd3();
       const [xx, xy, xz] = r.bd3();
@@ -4084,6 +4129,31 @@ const decodeObjectSpecific = (x: Ctx, typeName: string, raw: RawObject): void =>
         name, origin: pt3(ox, oy, oz),
         xAxis: pt3(xx, xy, xz), yAxis: pt3(yx, yy, yz)
       };
+      if (v >= 2000) {
+        raw.ucs.elevation = r.bd();
+        raw.ucs.orthoViewType = r.bs();
+        const n = r.bs();
+        if (n < 0 || n > 64) return;
+        const origins: { type: number; origin: Point3 }[] = [];
+        for (let i = 0; i < n; i++) {
+          const type = r.bs();
+          const [px, py, pz] = r.bd3();
+          origins.push({ type, origin: pt3(px, py, pz) });
+        }
+        if (origins.length) raw.ucs.orthoOrigins = origins;
+        const base = x.handle(raw.handle);   /* base UCS (346) */
+        if (base) raw.ucs.baseUcsHandle = base;
+        x.hr.h();                           /* named UCS: always null */
+      }
+      return;
+    }
+
+    case 'DICTIONARYVAR': {
+      /* the schema byte (DXF 280, 0 in every file seen), the value as
+         text (DXF 1) */
+      const schema = r.rc();
+      const value = x.text();
+      raw.dictionaryVar = { schema, value };
       return;
     }
 
@@ -4488,7 +4558,8 @@ export const decodeObjectBody = (
     || raw.imageDef || raw.underlayDef || raw.visibility || raw.blockParam
     || raw.blockAction || raw.tableContent || raw.geoData || raw.mlineStyle
     || raw.table || raw.proxyObject || raw.ucs || raw.view || raw.vport
-    || raw.sortents || raw.tableStyleObj || raw.mleaderStyleObj;
+    || raw.sortents || raw.tableStyleObj || raw.mleaderStyleObj
+    || raw.dictionaryVar;
   if ((failed && !modeled) || (cls && !modeled && !isControl)
     || (!modeled && !isControl && SEAL_FIXED.has(typeName))) {
     r.pos = dpos;

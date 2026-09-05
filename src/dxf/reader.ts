@@ -24,7 +24,7 @@ import type {
 } from '../core/model.js';
 import { decodeProxyGraphics } from '../dwg/proxy.js';
 import { BitWriter } from '../dwg/bitwriter.js';
-import { encodingGroup } from '../dwg/objects.js';
+import { encodingGroup, resbufKind } from '../dwg/objects.js';
 import { decodeCadText, stripMtextCodes } from '../text/escapes.js';
 import { binaryDxfToPairs, isBinaryDxf } from './binary.js';
 
@@ -95,6 +95,62 @@ const hexToBytes = (hex: string): Uint8Array => {
   return out;
 };
 
+/** Bits [from, to) of a MSB-first bit string, as their own byte run. */
+const sliceBits = (bytes: Uint8Array, from: number, to: number): Uint8Array => {
+  const n = Math.max(0, to - from);
+  const out = new Uint8Array((n + 7) >> 3);
+  for (let i = 0; i < n; i++) {
+    const at = from + i;
+    if (bytes[at >> 3] & (0x80 >> (at & 7))) out[i >> 3] |= 0x80 >> (i & 7);
+  }
+  return out;
+};
+const bitAt = (bytes: Uint8Array, at: number): number =>
+  (bytes[at >> 3] >> (7 - (at & 7))) & 1;
+/** A little-endian 16-bit word read from a bit position (an RS). */
+const rsAt = (bytes: Uint8Array, at: number): number => {
+  let v = 0;
+  for (let i = 0; i < 16; i++) v |= bitAt(bytes, at + i) << (i < 8 ? 7 - i : 15 - (i - 8));
+  return v;
+};
+/** The DWG generation a proxy's drawing-format code names (the low word
+ *  of its version: 19 R13, 21 R14, 23 R2000, 25 R2004, 27 R2007, 29
+ *  R2010, 31 R2013, 33 R2018), as the encoding group the sealed records
+ *  carry; undefined for a code this library does not know. */
+const encodingOfFormatCode = (code: number): number | undefined => {
+  if (code === 19 || code === 21) return 14;
+  if (code === 23) return 2000;
+  if (code === 25) return 2004;
+  if (code === 27) return 2007;
+  if (code === 29 || code === 31 || code === 33) return 2018;
+  return undefined;
+};
+/** A proxy object's DWG-format payload as the sealed record the DWG
+ *  reader would keep: the data area of an object of that generation —
+ *  the data bits, and from R2007 the string stream behind them, closed
+ *  by its size and the strings-present flag as the last bit (a bare 0
+ *  when there are none). Null when the layout does not parse. */
+const unwrapProxyPayload = (
+  bytes: Uint8Array, nbits: number, encoding: number
+): { data: Uint8Array; dataBits: number; str?: Uint8Array; strBits?: number } | null => {
+  if (nbits <= 0 || nbits > bytes.length * 8) return null;
+  if (encoding < 2007) return { data: sliceBits(bytes, 0, nbits), dataBits: nbits };
+  if (!bitAt(bytes, nbits - 1)) return { data: sliceBits(bytes, 0, nbits - 1), dataBits: nbits - 1 };
+  if (nbits < 17) return null;
+  let size = rsAt(bytes, nbits - 17);
+  let hdr = 16;
+  if (size & 0x8000) {
+    if (nbits < 33) return null;
+    size = (size & 0x7fff) | (rsAt(bytes, nbits - 33) << 15);
+    hdr = 32;
+  }
+  const start = nbits - 1 - hdr - size;
+  if (start < 0) return null;
+  return {
+    data: sliceBits(bytes, 0, start), dataBits: start,
+    str: sliceBits(bytes, start, start + size), strBits: size
+  };
+};
 const bytesToB64 = (bytes: Uint8Array): string => {
   let bin = '';
   for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
@@ -157,10 +213,12 @@ const parseProxyPayload = (g: Group[]): ProxyPayload => {
     } else if (c === 310) {
       if (target === 'data') dataHex += v; else graphicsHex += v;
     }
-    /* soft references (330/350) were code 4 in the source record, hard
-       ones (340/360) code 3 */
-    else if (c === 330 || c === 350) refs.push({ code: 4, value: v.trim().toUpperCase() });
-    else if (c === 340 || c === 360) refs.push({ code: 3, value: v.trim().toUpperCase() });
+    /* each reference under the handle code its group spells: 350 soft
+       owner 2, 360 hard owner 3, 330 soft pointer 4, 340 hard pointer 5 */
+    else if (c === 330) refs.push({ code: 4, value: v.trim().toUpperCase() });
+    else if (c === 340) refs.push({ code: 5, value: v.trim().toUpperCase() });
+    else if (c === 350) refs.push({ code: 2, value: v.trim().toUpperCase() });
+    else if (c === 360) refs.push({ code: 3, value: v.trim().toUpperCase() });
     else if (c === 94) refsDone = true;
   }
   if (graphicsHex) out.graphics = hexToBytes(graphicsHex);
@@ -225,54 +283,12 @@ const VERSION_NUM: Record<string, number> = {
   R2010: 2010, R2013: 2013, R2018: 2018
 };
 
-/** The typing an XRECORD's data stream gives each group, by DXF group
- *  code: the resbuf kinds the DWG spelling encodes a value with. */
-type XrecKind = 'string' | 'real' | 'point' | 'int8' | 'int16' | 'int32'
-  | 'int64' | 'bool' | 'binary' | 'handle' | 'invalid';
-const xrecKind = (gc: number): XrecKind => {
-  if (gc < 0) return 'handle';
-  if (gc <= 4) return 'string';
-  if (gc === 5) return 'handle';
-  if (gc <= 9) return 'string';
-  if (gc <= 37) return 'point';
-  if (gc <= 59) return 'real';
-  if (gc <= 79) return 'int16';
-  if (gc <= 99) return 'int32';
-  if (gc <= 102) return 'string';
-  if (gc === 105) return 'handle';
-  if (gc <= 109) return 'invalid';
-  if (gc <= 139) return 'point';
-  if (gc <= 149) return 'real';
-  if (gc <= 169) return 'int64';
-  if (gc <= 179) return 'int16';
-  if (gc <= 209) return 'invalid';
-  if (gc <= 269) return 'point';
-  if (gc <= 279) return 'int16';
-  if (gc <= 289) return 'int8';
-  if (gc <= 299) return 'bool';
-  if (gc <= 309) return 'string';
-  if (gc <= 319) return 'binary';
-  if (gc <= 369) return 'handle';
-  if (gc <= 389) return 'int16';
-  if (gc <= 399) return 'handle';
-  if (gc <= 409) return 'int16';
-  if (gc <= 419) return 'string';
-  if (gc <= 429) return 'int32';
-  if (gc <= 439) return 'string';
-  if (gc <= 459) return 'int32';
-  if (gc <= 469) return 'real';
-  if (gc <= 479) return 'string';
-  if (gc === 999) return 'string';
-  if (gc < 1000) return 'invalid';
-  if (gc === 1004) return 'binary';
-  if (gc <= 1009) return 'string';
-  if (gc <= 1039) return 'point';
-  if (gc <= 1042) return 'real';
-  if (gc <= 1069) return 'point';
-  if (gc <= 1070) return 'int16';
-  if (gc === 1071) return 'int32';
-  return 'invalid';
-};
+/* The typing an XRECORD's data stream gives each group is the DWG
+   side's `resbufKind` — one table for both codecs, so what the DXF
+   reader spells is what the DWG reader decodes. In particular group 5
+   (and 105) is a counted STRING in the run, not an object id: the
+   reference's own data-extraction records (ACAD_DXFILE) carry one, and
+   spelled as an 8-byte id they made the 2018 file refuse to open. */
 
 /** The DWG body of an XRECORD in the R2007+ spelling, from its typed
  *  values: a byte count, then one (RS group, value) per value in the
@@ -291,7 +307,7 @@ const xrecordBits = (
 ): { data: string; dataBits: number } | undefined => {
   const body = new BitWriter();
   for (const v of values) {
-    const kind = xrecKind(v.code);
+    const kind = resbufKind(v.code);
     const raw = 'value' in v ? v.value : undefined;
     const num = typeof raw === 'number' ? raw
       : typeof raw === 'string' && /^\s*-?\d+(\.\d+)?([eE][-+]?\d+)?\s*$/.test(raw)
@@ -2202,10 +2218,41 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
              discipline, named afterwards through its owning dictionary */
           const p = parseProxyPayload(rec.g);
           const cls = proxyClassById.get(p.classId);
+          const com = commonOf(rec.g);
+          /* A proxy carrying DWG-format bits of a class the file names,
+             under a drawing-format code this library knows, is the
+             sealed record itself — what the DXF writer spells a
+             bits-sealed record as, and what the reference writes for an
+             object whose enabler was absent. Unwrapped here to the seal
+             the DWG reader keeps (data, strings, references, encoding),
+             so the DWG writers carry it natively under its owner and
+             the DXF writer spells it the same way again. A DXF-format
+             proxy, one without data, or one under a code unknown here
+             stays a proxy object. */
+          const enc = p.proxyVersion !== undefined && !p.fromDxf
+            ? encodingOfFormatCode(p.proxyVersion) : undefined;
+          const un = enc !== undefined && cls && p.data && p.dataBits
+            ? unwrapProxyPayload(p.data, p.dataBits, enc) : null;
+          if (un && un.dataBits > 0 && cls) {
+            const uo: UnknownObject = {
+              sourceType: cls.dxfName, appClass: { ...cls }, encoding: enc,
+              data: bytesToB64(un.data), dataBits: un.dataBits
+            };
+            if (com.handle) uo.handle = com.handle;
+            if (un.str && un.strBits) { uo.strData = bytesToB64(un.str); uo.strBits = un.strBits; }
+            if (p.refs) uo.refs = p.refs;
+            if (com.owner) uo.ownerHandle = com.owner;
+            if (com.xdict) uo.xdict = com.xdict;
+            if (com.reactors) uo.reactors = com.reactors;
+            const xd = parseXdata(rec.g);
+            if (xd) uo.xdata = xd;
+            (drawing.unknownObjects ??= []).push(uo);
+            k = findNext0(rec.next, null, end);
+            continue;
+          }
           const po: ProxyObject = {};
           const h = q.str(5, '');
           if (h) po.handle = h.toUpperCase();
-          const com = commonOf(rec.g);
           if (com.owner) po.ownerHandle = com.owner;
           if (cls) { po.sourceType = cls.dxfName; po.appClass = { ...cls }; }
           if (p.data?.length) {
@@ -2791,24 +2838,27 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
       }
       /* ---- the XRECORDs, sealed beside their values under their
          owners — all but the ones the named objects dictionary owns
-         directly, which the writers list themselves. From an R2007+
-         source the record carries its DWG bits too, so the DWG writers
-         can hang it back under its owner natively. ---- */
+         directly, which the writers list themselves. Each carries its
+         DWG bits too, in the R2007 spelling whatever the source's
+         version: the DWG writers put those out whole into an R2007+
+         file and re-encode the record from its values, in the target's
+         own spelling, into an older one (the values account for every
+         byte the run declares, which is what they trust). A seal with
+         no bits at all went out as an empty record — refused by the
+         reference for every XRECORD of an AC1015 source. ---- */
       const relNum = VERSION_NUM[drawing.header.version ?? ''];
-      const group = relNum ? encodingGroup(relNum) : 0;
+      const xrecordGroup = relNum ? encodingGroup(relNum) : 0;
       for (const { uo, owner, values, cloning } of xrecordSeals) {
         if (owner === nod) continue;
         const at = placeOf(uo.handle, owner);
         if (at.dictPath) uo.dictPath = at.dictPath;
         const nm = at.name ?? (uo.handle ? dictEntryName.get(uo.handle) : undefined);
         if (nm) uo.name = nm;
-        if (group >= 2007) {
-          const bits = xrecordBits(values, cloning);
-          if (bits) {
-            uo.data = bits.data;
-            uo.dataBits = bits.dataBits;
-            uo.encoding = group;
-          }
+        const bits = xrecordBits(values, cloning);
+        if (bits) {
+          uo.data = bits.data;
+          uo.dataBits = bits.dataBits;
+          uo.encoding = Math.max(2007, xrecordGroup);
         }
         (drawing.unknownObjects ??= []).push(uo);
       }

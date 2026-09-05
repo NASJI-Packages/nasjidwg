@@ -13,6 +13,7 @@ import type {
 } from '../core/model.js';
 import { sabToSat } from '../acis/sab.js';
 import { nearestAci } from '../core/color.js';
+import { BitWriter } from '../dwg/bitwriter.js';
 import { hasComplexScript, mirrorBrackets, shapeArabic } from '../text/arabic.js';
 import { encodeCadSymbols, escapeUnicode } from '../text/escapes.js';
 import { flattenMtextParagraphs } from '../text/mtext.js';
@@ -443,7 +444,36 @@ export const writeDxf = (drawing: Drawing, options: DxfWriteOptions = {}): strin
   for (const x of drawing.xrecords ?? []) if (x.handle) xrecordByHandle.set(up(x.handle), x);
   const xrecordTwin = (o: Sealed): XRecord | undefined =>
     isXrecord(o) && o.handle ? xrecordByHandle.get(up(o.handle)) : undefined;
-  const spellable = (o: Sealed): boolean => hasTags(o) || isDict(o) || xrecordTwin(o) !== undefined;
+  /* A record sealed as DWG bits from a class the source's CLASSES named
+     — a FIELD, a graph node, a spatial filter, a constraint network read
+     from a DWG — is spelled as an ACAD_PROXY_OBJECT carrying those bits
+     in DWG format under the version that wrote them: the form the
+     reference itself gives an object whose enabler was absent when the
+     file was saved, and which it unwraps to the native object on open
+     when the enabler is present. The version word names the payload's
+     own filer, so bits from a later generation than this AC1015 file
+     travel too. A fixed-type record (no class) has no such spelling. */
+  const DWG_VERSION_CODE: Record<string, number> = {
+    R13: 19, R14: 21, R2000: 23, R2004: 25, R2007: 27, R2010: 29, R2013: 31, R2018: 33
+  };
+  const GROUP_OF_VERSION: Record<string, number> = {
+    R13: 14, R14: 14, R2000: 2000, R2004: 2004, R2007: 2007, R2010: 2018, R2013: 2018, R2018: 2018
+  };
+  const hasBits = (o: Sealed): boolean =>
+    !!o.data && !!o.dataBits && o.encoding !== undefined && !!o.appClass?.dxfName
+    && !isDictKind(o) && !isXrecord(o);
+  /** The drawing-format code of a sealed record's bits: the source
+   *  file's own version when the record's encoding group is the file's
+   *  (a 2010 file's records are 2010 bits, though the group says 2018),
+   *  else the first release of the group. */
+  const proxyVersionOf = (o: Sealed): number => {
+    const hv = drawing.header.version ?? '';
+    if (o.encoding === GROUP_OF_VERSION[hv]) return DWG_VERSION_CODE[hv];
+    const byGroup: Record<number, string> = { 14: 'R14', 2000: 'R2000', 2004: 'R2004', 2007: 'R2007', 2018: 'R2018' };
+    return DWG_VERSION_CODE[byGroup[o.encoding ?? 2018] ?? 'R2018'];
+  };
+  const spellable = (o: Sealed): boolean =>
+    hasTags(o) || isDict(o) || xrecordTwin(o) !== undefined || hasBits(o);
   const sealedAll: Sealed[] = drawing.unknownObjects ?? [];
   const sealedByH = new Map<string, Sealed>();
   for (const o of sealedAll) if (o.handle) sealedByH.set(up(o.handle), o);
@@ -583,7 +613,9 @@ export const writeDxf = (drawing: Drawing, options: DxfWriteOptions = {}): strin
       continue;
     }
     if (!spellable(o)) { whyNot.set(o, `${kind} (sealed as DWG bits, no DXF spelling)`); continue; }
-    if (spelledPastR2000(o)) {
+    /* (a bits-sealed record travels under its own version word, whatever
+       this file's: the version axis binds the tagged ones alone) */
+    if (hasTags(o) && spelledPastR2000(o)) {
       whyNot.set(o, `${kind} (its post-R2000 spelling has no place in an AC1015 file)`);
       continue;
     }
@@ -605,7 +637,14 @@ export const writeDxf = (drawing: Drawing, options: DxfWriteOptions = {}): strin
    *  is nulled instead (the proven behaviour of the value-written
    *  record), a dictionary's entries are filtered. */
   const hardRefsIn = (o: Sealed): boolean => {
-    if (!o.tags || isXrecord(o) || isDict(o)) return true;
+    if (isXrecord(o) || isDict(o)) return true;
+    if (!o.tags) {
+      /* a bits-sealed record's reference list: the hard codes (3 owner,
+         5 pointer) must land on something written, as the DWG writer
+         demands of them */
+      return !(o.refs ?? []).some((r) => (r.code === 3 || r.code === 5)
+        && !!r.value && up(r.value) !== '0' && !written(r.value));
+    }
     let body = false;
     for (const [c, v] of o.tags) {
       if (c === 100) { body = true; continue; }
@@ -789,14 +828,72 @@ export const writeDxf = (drawing: Drawing, options: DxfWriteOptions = {}): strin
   for (const p of proxyObjs) {
     addProxyClass(p.appClass, p.sourceType, 'ACAD_PROXY_OBJECT', false);
   }
-  const proxyClassId = new Map<string, number>();
-  {
-    /* class numbers are positional (first CLASS record = 500); the two
-       always-present plot-style classes come before everything else */
-    let id = 502 + (usesImages ? 4 : 0) + underlayKinds.length * 2
-      + (usesTables ? 2 : 0) + (usesMLeaders ? 2 : 0);
-    for (const key of proxyClasses.keys()) proxyClassId.set(key, id++);
+  /* ---- the class registry: every CLASS record of the file in the order
+     the CLASSES section writes them, since class numbers are positional
+     (the first CLASS record is 500). The two always-present plot-style
+     classes first, the fixed pairs (images, underlays, tables, multi-
+     leaders), the proxy classes, then the classes the sealed records
+     re-declare — a class the reference loads on demand (WIPEOUTVARIABLES
+     from the WipeOut module, say) is skipped on open without its CLASS
+     record, and the dictionary entry naming the record is then audited
+     away — and the draw-order table's. One record per class name. ---- */
+  interface ClassDecl { dxf: string; cpp: string; app: string; flags: number; wasProxy: boolean; ent: boolean }
+  const classDecls: ClassDecl[] = [];
+  const classIndex = new Map<string, number>();
+  const declareClass = (d: ClassDecl): void => {
+    const key = up(d.dxf);
+    if (!key || classIndex.has(key)) return;
+    classIndex.set(key, 500 + classDecls.length);
+    classDecls.push(d);
+  };
+  const classIdOf = (dxfName: string): number => classIndex.get(up(dxfName)) ?? 0;
+  declareClass({ dxf: 'ACDBDICTIONARYWDFLT', cpp: 'AcDbDictionaryWithDefault', app: 'ObjectDBX Classes', flags: 0, wasProxy: false, ent: false });
+  declareClass({ dxf: 'ACDBPLACEHOLDER', cpp: 'AcDbPlaceholder', app: 'ObjectDBX Classes', flags: 0, wasProxy: false, ent: false });
+  const ismClass = (dxf: string, cpp: string, ent: boolean): void =>
+    declareClass({ dxf, cpp, app: 'ISM', flags: 127, wasProxy: false, ent });
+  if (usesImages) {
+    ismClass('IMAGE', 'AcDbRasterImage', true);
+    ismClass('WIPEOUT', 'AcDbWipeout', true);
+    ismClass('IMAGEDEF', 'AcDbRasterImageDef', false);
+    ismClass('RASTERVARIABLES', 'AcDbRasterVariables', false);
   }
+  for (const kind of underlayKinds) {
+    const cap = kind.charAt(0).toUpperCase() + kind.slice(1);
+    ismClass(kind.toUpperCase() + 'UNDERLAY', `AcDb${cap}Reference`, true);
+    ismClass(kind.toUpperCase() + 'DEFINITION', `AcDb${cap}Definition`, false);
+  }
+  /* the table and multileader class pairs, spelled as the reference's
+     own R2000 DXF spells them (application name and capability flags
+     included); a record of either kind is refused without its class */
+  if (usesTables) declareClass({ dxf: 'ACAD_TABLE', cpp: 'AcDbTable', app: 'ObjectDBX Classes', flags: 1025, wasProxy: false, ent: true });
+  if (usesTableStyles) declareClass({ dxf: 'TABLESTYLE', cpp: 'AcDbTableStyle', app: 'ObjectDBX Classes', flags: 4095, wasProxy: false, ent: false });
+  if (usesMLeaders) declareClass({ dxf: 'MULTILEADER', cpp: 'AcDbMLeader', app: 'ACDB_MLEADER_CLASS', flags: 1025, wasProxy: false, ent: true });
+  if (usesMLeaderStyles) declareClass({ dxf: 'MLEADERSTYLE', cpp: 'AcDbMLeaderStyle', app: 'ACDB_MLEADERSTYLE_CLASS', flags: 4095, wasProxy: false, ent: false });
+  /* proxy classes re-state the original application's naming, with the
+     was-a-proxy flag (280) set — what the class stood for in the source */
+  for (const [key, pc] of proxyClasses) {
+    declareClass({ dxf: key, cpp: pc.cpp, app: pc.app, flags: pc.ent ? 4095 : 0, wasProxy: true, ent: pc.ent });
+  }
+  for (const o of sealedObjs) {
+    if (o.appClass) {
+      declareClass({
+        dxf: o.appClass.dxfName, cpp: o.appClass.cppName || o.appClass.dxfName,
+        app: o.appClass.appName || 'ObjectDBX Classes', flags: 0, wasProxy: false, ent: false
+      });
+    }
+  }
+  for (const e of allEntities()) {
+    if (e.type === 'unknown' && e.tags?.length && e.appClass) {
+      declareClass({
+        dxf: e.appClass.dxfName, cpp: e.appClass.cppName || e.appClass.dxfName,
+        app: e.appClass.appName || 'ObjectDBX Classes', flags: 4095, wasProxy: false, ent: true
+      });
+    }
+  }
+  /* the draw-order tables this writer adds under preserveHandles */
+  if (sortPlans.length) declareClass({ dxf: 'SORTENTSTABLE', cpp: 'AcDbSortentsTable', app: 'ObjectDBX Classes', flags: 0, wasProxy: false, ent: false });
+  const proxyClassId = new Map<string, number>();
+  for (const key of proxyClasses.keys()) proxyClassId.set(key, classIdOf(key));
 
   /* ---- THE SAVED VIEW ---------------------------------------------------
      A DXF that declares no extents and no viewport opens wherever the
@@ -1031,96 +1128,14 @@ export const writeDxf = (drawing: Drawing, options: DxfWriteOptions = {}): strin
   w(5, 'FFFF');
   w(0, 'ENDSEC');
 
-  /* ---- CLASSES ---- */
+  /* ---- CLASSES: the registry, in its order (the plot-style machinery
+     first, spelled the way the reference spells it — these two classes
+     exist in every R2000+ file it writes) ---- */
   {
     w(0, 'SECTION'); w(2, 'CLASSES');
-    const cls = (dxf: string, cpp: string, isEntity: boolean): void => {
-      w(0, 'CLASS'); w(1, dxf); w(2, cpp);
-      w(3, 'ISM'); w(90, 127); w(280, 0); w(281, isEntity ? 1 : 0);
-    };
-    /* The plot-style machinery below is spelled the way AutoCAD spells
-       it — these two classes exist in every R2000+ file it writes. */
-    for (const [dxfName, cpp] of [
-      ['ACDBDICTIONARYWDFLT', 'AcDbDictionaryWithDefault'],
-      ['ACDBPLACEHOLDER', 'AcDbPlaceholder']
-    ]) {
-      w(0, 'CLASS'); w(1, dxfName); w(2, cpp);
-      w(3, 'ObjectDBX Classes'); w(90, 0); w(280, 0); w(281, 0);
-    }
-    if (usesImages) {
-      cls('IMAGE', 'AcDbRasterImage', true);
-      cls('WIPEOUT', 'AcDbWipeout', true);
-      cls('IMAGEDEF', 'AcDbRasterImageDef', false);
-      cls('RASTERVARIABLES', 'AcDbRasterVariables', false);
-    }
-    for (const kind of underlayKinds) {
-      const cap = kind.charAt(0).toUpperCase() + kind.slice(1);
-      cls(kind.toUpperCase() + 'UNDERLAY', `AcDb${cap}Reference`, true);
-      cls(kind.toUpperCase() + 'DEFINITION', `AcDb${cap}Definition`, false);
-    }
-    /* the table and multileader class pairs, spelled as the reference's
-       own R2000 DXF spells them (application name and capability flags
-       included); a record of either kind is refused without its class */
-    if (usesTables) {
-      w(0, 'CLASS'); w(1, 'ACAD_TABLE'); w(2, 'AcDbTable');
-      w(3, 'ObjectDBX Classes'); w(90, 1025); w(280, 0); w(281, 1);
-    }
-    if (usesTableStyles) {
-      w(0, 'CLASS'); w(1, 'TABLESTYLE'); w(2, 'AcDbTableStyle');
-      w(3, 'ObjectDBX Classes'); w(90, 4095); w(280, 0); w(281, 0);
-    }
-    if (usesMLeaders) {
-      w(0, 'CLASS'); w(1, 'MULTILEADER'); w(2, 'AcDbMLeader');
-      w(3, 'ACDB_MLEADER_CLASS'); w(90, 1025); w(280, 0); w(281, 1);
-    }
-    if (usesMLeaderStyles) {
-      w(0, 'CLASS'); w(1, 'MLEADERSTYLE'); w(2, 'AcDbMLeaderStyle');
-      w(3, 'ACDB_MLEADERSTYLE_CLASS'); w(90, 4095); w(280, 0); w(281, 0);
-    }
-    /* proxy classes re-state the original application's naming, with the
-       was-a-proxy flag (280) set — what the class stood for in the source */
-    for (const [key, pc] of proxyClasses) {
-      w(0, 'CLASS'); w(1, key); w(2, pc.cpp); w(3, pc.app);
-      w(90, pc.ent ? 4095 : 0); w(280, 1); w(281, pc.ent ? 1 : 0);
-    }
-    /* Sealed records re-declare the class their source declared for
-       them, application name included: a class the reference loads on
-       demand (WIPEOUTVARIABLES from the WipeOut module, say) is skipped
-       on open without its CLASS record, and the dictionary entry naming
-       the record is then audited away. Classes already declared above
-       are not repeated. */
-    {
-      const declared = new Set<string>([
-        'ACDBDICTIONARYWDFLT', 'ACDBPLACEHOLDER',
-        ...(usesImages ? ['IMAGE', 'WIPEOUT', 'IMAGEDEF', 'RASTERVARIABLES'] : []),
-        ...underlayKinds.flatMap((k) => [k.toUpperCase() + 'UNDERLAY', k.toUpperCase() + 'DEFINITION']),
-        ...(usesTables ? ['ACAD_TABLE'] : []),
-        ...(usesTableStyles ? ['TABLESTYLE'] : []),
-        ...(usesMLeaders ? ['MULTILEADER'] : []),
-        ...(usesMLeaderStyles ? ['MLEADERSTYLE'] : []),
-        ...[...proxyClasses.keys()].map((k) => k.toUpperCase())
-      ]);
-      const sealedClasses: { cls: { dxfName: string; cppName: string; appName: string }; ent: boolean }[] = [];
-      for (const o of sealedObjs) if (o.appClass) sealedClasses.push({ cls: o.appClass, ent: false });
-      for (const e of allEntities()) {
-        if (e.type === 'unknown' && e.tags?.length && e.appClass) {
-          sealedClasses.push({ cls: e.appClass, ent: true });
-        }
-      }
-      for (const { cls: c, ent } of sealedClasses) {
-        const key = c.dxfName.toUpperCase();
-        if (!key || declared.has(key)) continue;
-        declared.add(key);
-        w(0, 'CLASS'); w(1, c.dxfName); w(2, c.cppName || c.dxfName);
-        w(3, c.appName || 'ObjectDBX Classes');
-        w(90, ent ? 4095 : 0); w(280, 0); w(281, ent ? 1 : 0);
-      }
-      /* the draw-order tables this writer adds under preserveHandles */
-      if (sortPlans.length && !declared.has('SORTENTSTABLE')) {
-        declared.add('SORTENTSTABLE');
-        w(0, 'CLASS'); w(1, 'SORTENTSTABLE'); w(2, 'AcDbSortentsTable');
-        w(3, 'ObjectDBX Classes'); w(90, 0); w(280, 0); w(281, 0);
-      }
+    for (const c of classDecls) {
+      w(0, 'CLASS'); w(1, c.dxf); w(2, c.cpp); w(3, c.app);
+      w(90, c.flags); w(280, c.wasProxy ? 1 : 0); w(281, c.ent ? 1 : 0);
     }
     w(0, 'ENDSEC');
   }
@@ -1486,11 +1501,22 @@ export const writeDxf = (drawing: Drawing, options: DxfWriteOptions = {}): strin
       w(93, p.dataBits ?? bytes.length * 8);
       emit310Chunks(bytes);
     }
-    /* references: soft codes travel as 330, hard ones (3/5) as 340 */
-    for (const ref of p.refs ?? []) {
-      w(ref.code === 3 || ref.code === 5 ? 340 : 330, ref.value);
-    }
+    writeProxyRefs(p.refs);
     w(94, 0);                            /* end of the reference run */
+  };
+  /** A proxy record's reference list, each under the DXF group of its
+   *  handle code — 2 soft owner 350, 3 hard owner 360, 4 soft pointer
+   *  330, 5 hard pointer 340. A target this file numbered is followed
+   *  to its new number; any other reference keeps the number it was,
+   *  code-for-code, the way the proxy contract always promised (the DWG
+   *  writer's rule; a sealed record with a hard reference into nothing
+   *  never gets this far — the settle kept it home). */
+  const writeProxyRefs = (refs?: { code: number; value: string }[]): void => {
+    for (const ref of refs ?? []) {
+      const code = ref.code === 2 ? 350 : ref.code === 3 ? 360 : ref.code === 5 ? 340 : 330;
+      const v = ref.value.trim();
+      w(code, outHandleOf(v) ?? v);
+    }
   };
 
   /* MTEXT body: symbols encoded, brackets mirrored for CAD's non-mirroring
@@ -1891,6 +1917,48 @@ export const writeDxf = (drawing: Drawing, options: DxfWriteOptions = {}): strin
         w(v.code, typeof v.value === 'number' ? fmt(v.value) : v.value);
       }
     }
+  };
+
+  /** A record sealed as DWG bits, as an ACAD_PROXY_OBJECT of its class.
+   *  The payload is the record's data area exactly as an object record
+   *  of its generation lays it out: the data bits, and from R2007 the
+   *  string stream behind them with its size (two words past 0x7FFF)
+   *  and the strings-present flag as the last bit — a bare 0 bit when
+   *  there are no strings. Measured on the reference with A-01's 102
+   *  FIELDs and its evaluation graph: the data bits alone unwrap only
+   *  the records whose strings happen not to matter, a count-prefixed
+   *  envelope hangs its loader, and this layout unwraps every one on
+   *  open — `(entget)` answers FIELD, and its own DXFOUT lists them
+   *  natively. Under the version word of the filer that wrote the bits,
+   *  DWG format (70 = 0), then the reference list and the record's own
+   *  xdata. */
+  const writeSealedProxy = (o: UnknownObject, h: string, owner: string): void => {
+    const enc = o.encoding ?? 2018;
+    const payload = new BitWriter();
+    if (o.data && o.dataBits) payload.putBits(fromBase64(o.data), o.dataBits);
+    if (enc >= 2007) {
+      const sb = o.strData ? o.strBits ?? 0 : 0;
+      if (sb === 0) payload.b(0);
+      else {
+        payload.putBits(fromBase64(o.strData!), sb);
+        if (sb >= 0x8000) { payload.rs(sb >> 15); payload.rs((sb & 0x7fff) | 0x8000); } else payload.rs(sb);
+        payload.b(1);
+      }
+    }
+    const bits = payload.pos;
+    w(0, 'ACAD_PROXY_OBJECT'); w(5, h);
+    writeFences(o.handle, o.reactors, h);
+    w(330, owner);
+    w(100, 'AcDbProxyObject');
+    w(90, 499);
+    w(91, classIdOf(o.appClass!.dxfName));
+    w(95, proxyVersionOf(o));
+    w(70, 0);
+    w(93, bits);
+    emit310Chunks(payload.bytes());
+    writeProxyRefs(o.refs);
+    w(94, 0);
+    writeXdata(o);
   };
 
   /** The text style a record points at by hard handle: the named one,
@@ -3411,6 +3479,8 @@ export const writeDxf = (drawing: Drawing, options: DxfWriteOptions = {}): strin
         } else if (hasTags(o)) {
           w(0, o.sourceType);
           writeSealedTags(o.tags!, h, owner, { src: o.handle, reactors: o.reactors });
+        } else if (hasBits(o)) {
+          writeSealedProxy(o, h, owner);
         } else {
           const twin = xrecordTwin(o);
           if (!twin) continue;

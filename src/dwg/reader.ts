@@ -36,7 +36,7 @@ import {
  *  dictionary — the rest of the tree and every extension dictionary — is
  *  retained sealed with its entries and travels under its owner. */
 const MODELED_DICTS = new Set(['ACAD_LAYOUT', 'ACAD_GROUP', 'ACAD_MLINESTYLE',
-  'ACAD_TABLESTYLE', 'ACAD_MLEADERSTYLE']);
+  'ACAD_TABLESTYLE', 'ACAD_MLEADERSTYLE', 'ACDBVARIABLEDICTIONARY']);
 
 export interface DwgReadOptions {
   /** Verify per-object and section CRCs; mismatches become warnings. */
@@ -945,7 +945,29 @@ export const readDwg = (
     } else if (e.type === 'table' && raw.tableStyle) {
       const nm = dictNameOf.get(raw.tableStyle);
       if (nm) e.styleName = nm;
+    } else if (e.type === 'mline' && raw.mlineStyleHandle) {
+      /* an MLINE's style: its ACAD_MLINESTYLE key, else the record's
+         own name */
+      const nm = dictNameOf.get(raw.mlineStyleHandle)
+        ?? objects.get(raw.mlineStyleHandle)?.mlineStyle?.name;
+      if (nm) e.styleName = nm;
     }
+  }
+  /* a pre-2018 MLINESTYLE element's linetype: an index into the linetype
+     table's entry list (32767 BYLAYER = unset, 32766 BYBLOCK) */
+  const ltypeOrder = order.find((raw) => raw.typeName === 'LinetypeTable')
+    ?.table?.ownedHandles ?? [];
+  const mlineLtypeByIndex = (index?: number): string | undefined => {
+    if (index === undefined || index === 32767 || index < 0) return undefined;
+    if (index === 32766) return 'ByBlock';
+    const h = ltypeOrder[index];
+    return h === undefined ? undefined : ltypeName.get(h);
+  };
+  /* the named UCS records by handle: what the header's UCSNAME /
+     PUCSNAME and an orthographic UCS's base (346) point at */
+  const ucsNameOf = new Map<number, string>();
+  for (const raw of order) {
+    if (raw.ucs && !ucsNameOf.has(raw.handle)) ucsNameOf.set(raw.handle, raw.ucs.name);
   }
 
   /* ---- the named-objects tree: the root dictionary (the header names
@@ -1016,6 +1038,15 @@ export const readDwg = (
    *  opposed to owning it as its extension dictionary). */
   const listedBy = (owner: number, h: number): boolean =>
     !!objects.get(owner)?.dictionary?.handles.includes(h);
+  /** A DICTIONARYVAR the root's variable dictionary lists: the model's
+   *  own (`drawing.variables`), consumed here and rebuilt by the writers
+   *  rather than sealed. */
+  const inVariableDict = (raw: RawObject): boolean => {
+    if (!raw.dictionaryVar || raw.owner === undefined) return false;
+    const path = dictPathOf.get(raw.owner);
+    return !!path && path.length === 1 && /^acdbvariabledictionary$/i.test(path[0])
+      && listedBy(raw.owner, raw.handle);
+  };
 
   for (const raw of order) {
     if (raw.xrecord && raw.xrecord.values.length) {
@@ -1051,7 +1082,8 @@ export const readDwg = (
       const treePath = raw.dictionary ? dictPathOf.get(raw.handle) : undefined;
       const ownTree = treePath?.length === 0
         || (treePath?.length === 1 && MODELED_DICTS.has(treePath[0].toUpperCase()))
-        || (raw.xrecord && raw.owner !== undefined && dictPathOf.get(raw.owner)?.length === 0);
+        || (raw.xrecord && raw.owner !== undefined && dictPathOf.get(raw.owner)?.length === 0)
+        || inVariableDict(raw);
       if (!ownTree) {
         nameApps(raw.unknownObject.xdata);
         const d = raw.dictionary;
@@ -1117,7 +1149,8 @@ export const readDwg = (
         startAngle: ms.startAngle, endAngle: ms.endAngle,
         elements: ms.elements.map((el) => ({
           offset: el.offset, color: el.color,
-          linetype: el.ltypeHandle ? ltypeName.get(el.ltypeHandle) : undefined
+          linetype: el.ltypeHandle ? ltypeName.get(el.ltypeHandle)
+            : mlineLtypeByIndex(el.ltypeIndex)
         })),
         handle: hexOf(raw.handle),
         ...(raw.xdict ? { xdict: hexOf(raw.xdict) } : {})
@@ -1177,7 +1210,6 @@ export const readDwg = (
       if (raw.xdict) style.xdict = hexOf(raw.xdict);
       (drawing.mleaderStyles ??= []).push(style);
     }
-    if (raw.ucs) (drawing.ucs ??= []).push(raw.ucs);
     /* the table records carry their numbers (and their extension
        dictionaries) so a handle-stable rewrite can hang the sealed
        chain back under each of them */
@@ -1185,6 +1217,18 @@ export const readDwg = (
       ...rec, handle: hexOf(raw.handle),
       ...(raw.xdict ? { xdict: hexOf(raw.xdict) } : {})
     });
+    if (raw.ucs) {
+      const { baseUcsHandle, ...rest } = raw.ucs;
+      const baseUcs = baseUcsHandle ? ucsNameOf.get(baseUcsHandle) : undefined;
+      (drawing.ucs ??= []).push(numbered({ ...rest, ...(baseUcs ? { baseUcs } : {}) }));
+    }
+    if (raw.dictionaryVar && inVariableDict(raw)) {
+      (drawing.variables ??= []).push(numbered({
+        name: dictNameOf.get(raw.handle) ?? '',
+        value: raw.dictionaryVar.value,
+        ...(raw.dictionaryVar.schema ? { schema: raw.dictionaryVar.schema } : {})
+      }));
+    }
     if (raw.view) (drawing.views ??= []).push(numbered(raw.view));
     if (raw.vport) (drawing.vports ??= []).push(numbered(raw.vport));
     if (raw.table?.kind === 'appid' && raw.table.name) {
@@ -1196,6 +1240,20 @@ export const readDwg = (
   }
   if (drawing.layouts) {
     drawing.layouts.sort((a, b) => (a.tabOrder ?? 0) - (b.tabOrder ?? 0));
+  }
+  /* the header's named pointers, by name: the current model and paper
+     coordinate systems when they are named UCS records, the current
+     multiline style — the DXF spellings of UCSNAME / PUCSNAME / CMLSTYLE */
+  if (hv) {
+    const vars = (): Record<string, unknown> => (drawing.header.vars ??= {});
+    const un = hv.ucsNameHandle ? ucsNameOf.get(hv.ucsNameHandle) : undefined;
+    if (un) vars().UCSNAME = un;
+    const pn = hv.pUcsNameHandle ? ucsNameOf.get(hv.pUcsNameHandle) : undefined;
+    if (pn) vars().PUCSNAME = pn;
+    const ms = hv.cmlStyleHandle
+      ? dictNameOf.get(hv.cmlStyleHandle) ?? objects.get(hv.cmlStyleHandle)?.mlineStyle?.name
+      : undefined;
+    if (ms) vars().CMLSTYLE = ms;
   }
 
   /* Before R2004 the summary properties live in the DWGPROPS xrecord;

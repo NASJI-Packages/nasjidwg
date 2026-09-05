@@ -21,7 +21,7 @@ import { describe, expect, it } from 'vitest';
 import { readDxf } from '../src/dxf/reader.js';
 import { writeDxf } from '../src/dxf/writer.js';
 import { readDwg } from '../src/dwg/reader.js';
-import { writeDwg2018 } from '../src/dwg/writer.js';
+import { writeDwg2000, writeDwg2018 } from '../src/dwg/writer.js';
 import { emptyDrawing } from '../src/core/model.js';
 import type { Drawing, Entity, UnknownObject } from '../src/core/model.js';
 
@@ -408,5 +408,155 @@ describe('an associative hatch', () => {
     const hatch = recs.find((r) => r.type === 'HATCH')!;
     expect(groupOf(hatch, 71)).toBe('0');
     expect(hatch.groups.find(([c]) => c === 97)).toEqual([97, '0']);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+
+/* A record sealed as DWG bits — what a DWG read keeps for a FIELD, a
+ * graph node, a spatial filter, a constraint network — has a DXF
+ * spelling after all: the ACAD_PROXY_OBJECT of its class, carrying its
+ * data area verbatim (the data bits; from R2007 the string stream
+ * behind them, its size and the strings-present flag as the last bit)
+ * under the version word of the filer that wrote it, DWG format. The
+ * reference unwraps such a proxy on open when the enabler is present:
+ * proven on A-01's 102 FIELDs and its evaluation graph, Site Grading
+ * Plan's SPATIAL_FILTERs, Data Extraction's DATALINK and TABLEGEOMETRY,
+ * Structural - Metric's constraint networks — AUDIT 0, (entget) answers
+ * the native class, its own DXFOUT lists them natively. The reader
+ * unwraps such a proxy back to the seal the DWG reader keeps, so the
+ * trip is exact in both handle modes. */
+const bitsOfHex = (hex: string): string =>
+  (hex.match(/../g) ?? []).map((b) => parseInt(b, 16).toString(2).padStart(8, '0')).join('');
+const bitsSealedDrawing = (version: 'R2007' | 'R2000'): Drawing => {
+  const d = chainDrawing();
+  d.header.version = version;
+  d.unknownObjects![0].entries!.push({ name: 'ACME_THING', handle: 'D0', code: 3 });
+  const thing: UnknownObject = {
+    handle: 'D0', ownerHandle: 'B0', reactors: ['B0'], sourceType: 'ACME_THING',
+    appClass: { dxfName: 'ACME_THING', cppName: 'AcmeThing', appName: 'ACME' },
+    encoding: version === 'R2007' ? 2007 : 2000,
+    data: 'qrvM3A==', dataBits: 30,                 /* AA BB CC DC: 30 bits, padding clear */
+    refs: [{ code: 3, value: 'A0' }, { code: 4, value: 'DEAD' }]
+  };
+  if (version === 'R2007') { thing.strData = 'ESA='; thing.strBits = 13; }   /* 11 20 */
+  d.unknownObjects!.push(thing);
+  return d;
+};
+const proxyPayload = (r: { groups: [number, string][] }): string =>
+  r.groups.filter(([c]) => c === 310).map(([, v]) => v).join('');
+const classIdIn = (recs: ReturnType<typeof recordsOf>, name: string): number =>
+  500 + recs.filter((r) => r.type === 'CLASS').findIndex((r) => groupOf(r, 1) === name);
+
+describe('a record sealed as DWG bits leaves as a proxy of its class', () => {
+  const d = bitsSealedDrawing('R2007');
+  const text = writeDxf(d, { preserveHandles: true });
+  const recs = recordsOf(text);
+  const proxy = byHandle(recs, 'D0')!;
+
+  it('under its owner, with its class, version word and reference list', () => {
+    expect(proxy.type).toBe('ACAD_PROXY_OBJECT');
+    expect(groupOf(proxy, 330)).toBe('B0');
+    const r = proxy.groups.findIndex(([c, v]) => c === 102 && v === '{ACAD_REACTORS');
+    expect(proxy.groups[r + 1]).toEqual([330, 'B0']);
+    expect(groupOf(proxy, 90)).toBe('499');
+    expect(groupOf(proxy, 91)).toBe(String(classIdIn(recs, 'ACME_THING')));
+    expect(groupOf(proxy, 95)).toBe('27');             /* R2007's drawing-format code */
+    expect(groupOf(proxy, 70)).toBe('0');              /* DWG format */
+    const tail = proxy.groups.slice(proxy.groups.findIndex(([c]) => c === 93));
+    const refs = tail.filter(([c]) => c === 330 || c === 340 || c === 350 || c === 360);
+    expect(refs).toEqual([[360, 'A0'], [330, 'DEAD']]);
+    expect(tail[tail.length - 1]).toEqual([94, '0']);
+    expect(entriesOf(byHandle(recs, 'B0')!)).toEqual([['ACAD_XREC_ROUNDTRIP', 360, 'C0'], ['ACME_THING', 360, 'D0']]);
+    expect(d.warnings).toEqual([]);
+  });
+
+  it('with its data area laid out as an R2007 object record: data, strings, size, flag', () => {
+    expect(groupOf(proxy, 93)).toBe(String(30 + 13 + 16 + 1));
+    const bits = bitsOfHex(proxyPayload(proxy));
+    expect(bits.slice(0, 30)).toBe(bitsOfHex('AABBCCDC').slice(0, 30));
+    expect(bits.slice(30, 43)).toBe(bitsOfHex('1120').slice(0, 13));
+    expect(bits.slice(43, 59)).toBe('0000110100000000');   /* RS 13 */
+    expect(bits.slice(59, 60)).toBe('1');
+  });
+
+  it('reads back as the seal the DWG reader keeps, and leaves the same way again', () => {
+    const back = readDxf(text);
+    const thing = back.unknownObjects?.find((o) => o.handle === 'D0');
+    expect(thing).toMatchObject({
+      sourceType: 'ACME_THING', ownerHandle: 'B0', reactors: ['B0'], encoding: 2007,
+      data: 'qrvM3A==', dataBits: 30, strData: 'ESA=', strBits: 13,
+      refs: [{ code: 3, value: 'A0' }, { code: 4, value: 'DEAD' }],
+      appClass: { dxfName: 'ACME_THING', cppName: 'AcmeThing', appName: 'ACME' }
+    });
+    expect(back.proxyObjects ?? []).toEqual([]);
+    const again = recordsOf(writeDxf(back, { preserveHandles: true }));
+    expect(proxyPayload(byHandle(again, 'D0')!)).toBe(proxyPayload(proxy));
+  });
+
+  it('from an R2000 source: the data bits alone, and its references renumbered', () => {
+    const d2 = bitsSealedDrawing('R2000');
+    const text2 = writeDxf(d2);
+    const recs2 = recordsOf(text2);
+    const line = recs2.find((r) => r.type === 'LINE')!;
+    const p = recs2.find((r) => r.type === 'ACAD_PROXY_OBJECT')!;
+    expect(groupOf(p, 95)).toBe('23');
+    expect(groupOf(p, 93)).toBe('30');
+    expect(bitsOfHex(proxyPayload(p)).slice(0, 30)).toBe(bitsOfHex('AABBCCDC').slice(0, 30));
+    const tail = p.groups.slice(p.groups.findIndex(([c]) => c === 93));
+    expect(tail.filter(([c]) => c === 330 || c === 360)).toEqual([[360, ownHandle(line)!], [330, 'DEAD']]);
+    const thing = readDxf(text2).unknownObjects?.find((o) => o.sourceType === 'ACME_THING');
+    expect(thing).toMatchObject({ encoding: 2000, data: 'qrvM3A==', dataBits: 30 });
+    expect(thing?.strData).toBeUndefined();
+  });
+});
+
+/* ------------------------------------------------------------------ */
+
+/* Every XRECORD read from a DXF carries DWG bits, in the R2007 spelling
+ * whatever the source's version, so the DWG writers put it out natively
+ * under its owner (whole into an R2007+ file, re-encoded from the values
+ * into an older one). Group 5 is a counted STRING in that run — the
+ * reference's own data-extraction records (ACAD_DXFILE: codes 1, 4, 2,
+ * 3, 5) carry an empty one, and spelled as an object id it made the
+ * 2018 file refuse to open. */
+describe('an XRECORD from a DXF, its DWG bits and the group-5 string', () => {
+  const rows = ['0', 'SECTION', '2', 'HEADER', '9', '$ACADVER', '1', 'AC1015', '0', 'ENDSEC',
+    '0', 'SECTION', '2', 'ENTITIES',
+    '0', 'LINE', '5', 'E1', '102', '{ACAD_XDICTIONARY', '360', 'D1', '102', '}',
+    '330', '1F', '100', 'AcDbEntity', '8', '0', '100', 'AcDbLine',
+    '10', '0', '20', '0', '30', '0', '11', '1', '21', '1', '31', '0',
+    '0', 'ENDSEC', '0', 'SECTION', '2', 'OBJECTS',
+    '0', 'DICTIONARY', '5', 'C', '330', '0', '100', 'AcDbDictionary', '281', '1',
+    '0', 'DICTIONARY', '5', 'D1', '330', 'E1', '100', 'AcDbDictionary', '280', '1', '281', '1',
+    '3', 'ACAD_DXFILE', '360', 'A1',
+    '0', 'XRECORD', '5', 'A1', '102', '{ACAD_REACTORS', '330', 'D1', '102', '}', '330', 'D1',
+    '100', 'AcDbXrecord', '280', '1', '1', 'C:\\data.dxe', '4', 'ACAD', '2', 'Table', '3', 'Sheet', '5', '',
+    '0', 'ENDSEC', '0', 'EOF', ''];
+  const values = [{ code: 1, value: 'C:\\data.dxe' }, { code: 4, value: 'ACAD' },
+    { code: 2, value: 'Table' }, { code: 3, value: 'Sheet' }, { code: 5, value: '' }];
+  const d = readDxf(rows.join('\n'));
+
+  it('is sealed with bits from an AC1015 source too', () => {
+    expect(d.xrecords?.find((x) => x.handle === 'A1')?.values).toEqual(values);
+    const seal = d.unknownObjects?.find((o) => o.handle === 'A1');
+    expect(seal?.encoding).toBe(2007);
+    /* the run: BL byte count, then (RS code, RS length, UTF-16 units)
+       per value — the code-5 group a length-0 string, 4 bytes */
+    const bytes = (2 + 2 + 2 * 11) + (2 + 2 + 2 * 4) + (2 + 2 + 2 * 5) + (2 + 2 + 2 * 5) + (2 + 2);
+    expect(seal?.dataBits).toBe((2 + 8) + bytes * 8 + (2 + 8));   /* BL 70, the run, BS 1 */
+  });
+
+  it('rides into a 2018 DWG whole and into a 2000 one re-encoded, group 5 a string both ways', () => {
+    for (const write of [writeDwg2018, writeDwg2000]) {
+      const res = write(d, { preserveHandles: true });
+      expect(res.skipped).toEqual([]);
+      const back = readDwg(res.data);
+      expect(back.warnings).toEqual([]);
+      expect(back.entities[0].xdict).toBe('D1');
+      expect(back.unknownObjects?.find((o) => o.handle === 'D1')?.entries)
+        .toEqual([{ name: 'ACAD_DXFILE', handle: 'A1', code: 3 }]);
+      expect(back.xrecords?.find((x) => x.handle === 'A1')?.values).toEqual(values);
+    }
   });
 });

@@ -1238,6 +1238,39 @@ export interface Ucs {
   origin: Point3;
   xAxis: Point3;
   yAxis: Point3;
+  /** DXF 146 (R2000+): the UCS's elevation. */
+  elevation?: number;
+  /** DXF 79 (R2000+): orthographic view type — 0 not orthographic,
+   *  1 top, 2 bottom, 3 front, 4 back, 5 left, 6 right. */
+  orthoViewType?: number;
+  /** DXF 346: the base UCS an orthographic one is relative to, by name. */
+  baseUcs?: string;
+  /** DXF 71/13 pairs (R2000+): the origins this UCS remembers for each
+   *  orthographic type. */
+  orthoOrigins?: { type: number; origin: Point3 }[];
+  /** Source-file handle (hex), for handle-stable rewrites. */
+  handle?: string;
+  /** Handle (hex) of the record's extension dictionary in the source
+   *  file; sealed in `drawing.unknownObjects`, owned by this record. */
+  xdict?: string;
+}
+
+/** One entry of the drawing's variable dictionary (the named objects
+ *  dictionary's `AcDbVariableDictionary`, a DICTIONARYVAR each): the
+ *  system variables that never got a header slot — DIMASSOC in 2002,
+ *  CTABLESTYLE, CMLEADERSTYLE, CANNOSCALE, LIGHTINGUNITS, PSOLHEIGHT… —
+ *  stored as text under their names. */
+export interface DrawingVariable {
+  name: string;
+  /** The value, spelled as the reference stores it (DXF 1). */
+  value: string;
+  /** DXF 280: object schema number (0 in every file seen). */
+  schema?: number;
+  /** Source-file handle (hex), for handle-stable rewrites. */
+  handle?: string;
+  /** Handle (hex) of the record's extension dictionary in the source
+   *  file; sealed in `drawing.unknownObjects`, owned by this record. */
+  xdict?: string;
 }
 
 /** A named view (DXF VIEW table record). */
@@ -1441,6 +1474,11 @@ export interface Drawing {
   mleaderStyles?: MLeaderStyle[];
   /** Named coordinate systems. */
   ucs?: Ucs[];
+  /** The drawing's variable dictionary (`AcDbVariableDictionary`): the
+   *  system variables kept as DICTIONARYVAR records rather than header
+   *  slots — DIMASSOC, CTABLESTYLE, CMLEADERSTYLE, CANNOSCALE… — in
+   *  the source's order. Written natively by every R2000+ DWG writer. */
+  variables?: DrawingVariable[];
   /** Named views. */
   views?: View[];
   /** Viewport configurations. */

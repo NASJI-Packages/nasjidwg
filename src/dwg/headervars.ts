@@ -24,6 +24,12 @@ export interface HeaderVars {
   textStyleHandle?: number;
   celtypeHandle?: number;
   dimStyleHandle?: number;
+  /** CMLSTYLE: the current multiline style's record. */
+  cmlStyleHandle?: number;
+  /** UCSNAME / PUCSNAME: the named UCS records the current model and
+   *  paper coordinate systems are, when they are named ones. */
+  ucsNameHandle?: number;
+  pUcsNameHandle?: number;
   /** The named objects dictionary's handle: the root the reader walks
    *  to tell the dictionary tree from the extension dictionaries. */
   nodHandle?: number;
@@ -194,7 +200,7 @@ const readHeaderVarsWith = (
     out.celtypeHandle = H();
     if (v >= 2007) H();                   /* CMATERIAL */
     out.dimStyleHandle = H();
-    H();                                  /* CMLSTYLE */
+    out.cmlStyleHandle = H() || undefined;   /* CMLSTYLE */
     if (v >= 2000) r.bd();                /* PSVPSCALE */
     /* paper space block */
     p3();                                 /* PINSBASE */
@@ -202,7 +208,7 @@ const readHeaderVarsWith = (
     p2(); p2();                           /* PLIMMIN/MAX */
     r.bd();                               /* PELEVATION */
     out.pUcs = { origin: p3(), xAxis: p3(), yAxis: p3() };
-    H();                                  /* PUCSNAME */
+    out.pUcsNameHandle = H() || undefined;   /* PUCSNAME */
     if (v >= 2000) {
       H(); r.bs(); H();                   /* PUCSORTHOREF/VIEW/BASE */
       for (let i = 0; i < 6; i++) p3();
@@ -215,7 +221,7 @@ const readHeaderVarsWith = (
     out.limMax = p2();
     r.bd();                               /* ELEVATION */
     out.ucs = { origin: p3(), xAxis: p3(), yAxis: p3() };
-    H();                                  /* UCSNAME */
+    out.ucsNameHandle = H() || undefined;    /* UCSNAME */
     if (v >= 2000) {
       H(); r.bs(); H();
       for (let i = 0; i < 6; i++) p3();
@@ -292,7 +298,7 @@ const readHeaderVarsWith = (
     }
     if (v >= 2004) {
       out.vars.SORTENTS = r.rc();
-      r.rc();                             /* INDEXCTL */
+      out.vars.INDEXCTL = r.rc();
       out.vars.HIDETEXT = r.rc();
       out.vars.XCLIPFRAME = r.rc();
       out.vars.DIMASSOC = r.rc();

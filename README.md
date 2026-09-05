@@ -40,9 +40,10 @@ string stream verbatim, handle references code-for-code, cached display
 list byte-for-byte. It is re-emitted natively in its own encoding
 generation, travels **wrapped in a proxy record across generations and
 unwraps back to native on return** (verified through a
-2018 → R13 → 2004 → 2018 odyssey), and survives the DXF path too. That
-is the same preservation contract AutoCAD itself offers for objects it
-has no enabler for.
+2018 → R13 → 2004 → 2018 odyssey), and survives the DXF path too — a
+record that arrived through DXF leaves as its verbatim tags, under the
+owner it had. That is the same preservation contract AutoCAD itself
+offers for objects it has no enabler for.
 
 **AutoCAD itself signs off on the output.** All seven writable release
 families — R12, R13, R14, R2000, R2004, R2007 and R2018 — open in
@@ -257,6 +258,32 @@ exist only while that file is attached. Draw order too: a SORTENTSTABLE reorders
 array on read — the array a consumer walks IS the order AutoCAD paints —
 and a handle-preserving rewrite writes the table back whenever the array
 no longer matches handle order.
+
+**Ownership is a fact of the model, on both codecs.** Every sealed
+object knows its owner (`ownerHandle`), every entity and record its
+extension dictionary (`xdict`) and reactors, every sealed dictionary
+its decoded `entries` — and both writers hang each sealed object back
+under its original owner: an entity's `ACAD_FIELD` → FIELD chain, an
+INSERT's `ACAD_FILTER` → SPATIAL_FILTER, a block record's
+`ACAD_ENHANCEDBLOCK` → evaluation graph → parameter and grip nodes,
+`ACAD_SORTENTS` → draw-order table, a layer's or layout's round-trip
+records, settled to a fixed point (an owner that is not written strands
+its chain, a dictionary with nothing written left to list is dropped
+quietly). The DXF writer takes the same `{ preserveHandles: true }` the
+DWG writers take: every entity, table record, block record, layout and
+object keeps its source number, so a sealed body's verbatim handle
+groups stay true; without it the file is renumbered from 0x100 and
+every handle-typed group of a sealed body is remapped (nulled when the
+target is not written). The DXF reader captures the same facts a DWG
+read carries — the `{ACAD_XDICTIONARY` and `{ACAD_REACTORS` fences, the
+dictionaries with their entries, each XRECORD sealed under its owner —
+so a chain read from a DXF rides into a DWG the way a DWG-read one
+does. Proven on the reference: its own DXF of A-01 (102 fields, the
+"Drawing Title" graph), Site Grading Plan (SPATIAL_FILTER, 83 fields)
+and Structural - Metric (three evaluation graphs with their draw-order
+tables) through `readDxf` and `writeDxf` in both handle modes all
+reopen at AUDIT 0 with the chains intact — `(entget (handent "26EFC"))`
+shows the MTEXT's `360`, the ACAD_FIELD dictionary, the FIELD.
 
 **Proxies and the unknown** — a proxy entity or proxy object keeps its
 application payload bit-for-bit, its cached display list byte-for-byte

@@ -197,11 +197,15 @@ describe('MTEXT paragraph codes before R2007', () => {
     return e.type === 'mtext' ? (e.raw ?? e.text) : '';
   };
 
+  /* the 2008 spelling goes out natively in AC1032 alone: the reference's
+     own 2013, 2010 and 2007 saves of this text all carry the 2004
+     spelling (px2008 scratch, re-saved from a 2018 file), the original
+     under the ACAD_MTEXT_2008_RT record (test/dictvar-mlstyle-ucs) */
   it.each([
     ['2004', writeDwg2004, 'Centred heading\\P\\pi-7.5,l7.5,t7.5;1.\tIndented item\\Pplain again'],
     ['2000', writeDwg2000, 'Centred heading\\P1.\tIndented item\\Pplain again'],
     ['R14', writeDwgR14, 'Centred heading\\P1.\tIndented item\\Pplain again'],
-    ['2007', writeDwg2007, T2008],
+    ['2007', writeDwg2007, 'Centred heading\\P\\pi-7.5,l7.5,t7.5;1.\tIndented item\\Pplain again'],
     ['2018', writeDwg2018, T2008]
   ] as const)('DWG %s writes what that release can show', (_label, write, expected) => {
     const back = readDwg(write(mtextDrawing(T2008)).data);
