@@ -605,7 +605,8 @@ export const writeDxf = (drawing: Drawing): string => {
   const ownStyles = drawing.textStyles.filter((s) => !s.xrefDependent)
     .filter((s, i, all) => !(s.shapeFile
       && all.some((o) => o !== s && !o.shapeFile && o.name.toLowerCase() === s.name.toLowerCase())));
-  const styles = ownStyles.length ? ownStyles : [{ name: 'Standard' }];
+  const keptStyles = ownStyles.filter((s) => !(s.shapeFile && s.name.includes('|') && !s.xrefDependent));
+  const styles = keptStyles.length ? keptStyles : [{ name: 'Standard' }];
   w(0, 'TABLE'); w(2, 'STYLE'); w(5, handle()); w(100, 'AcDbSymbolTable');
   w(70, styles.length);
   for (const st of styles) {

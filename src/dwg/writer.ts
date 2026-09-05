@@ -1056,7 +1056,14 @@ const writeDwgImpl = (
   const ownStyles = drawing.textStyles.filter(travels)
     .filter((s, i, all) => !(s.shapeFile
       && all.some((o) => o !== s && !o.shapeFile && o.name.toLowerCase() === s.name.toLowerCase())));
-  const styles: TextStyle[] = ownStyles.length ? ownStyles : [{ name: 'Standard' }];
+  /* a shape-file record spelled `xref|name` that is not an external
+     reference's is what a detached reference leaves behind; the reference
+     audits it by name ("Non XREF-dependent record contains vertical bar"),
+     and nothing in the drawing can name a shape record, so it stays home */
+  const orphanShapes = ownStyles.filter((s) => s.shapeFile && s.name.includes('|') && !s.xrefDependent);
+  if (orphanShapes.length) skipped.push(`${orphanShapes.length} orphan shape-file style records`);
+  const keptStyles = ownStyles.filter((s) => !orphanShapes.includes(s));
+  const styles: TextStyle[] = keptStyles.length ? keptStyles : [{ name: 'Standard' }];
   const styleH = new Map<string, number>();
   for (const st of styles) styleH.set(st.name, tableH(st.handle));
 
@@ -4951,7 +4958,7 @@ const writeDwgImpl = (
   function clsBytes(): Uint8Array {
     const clsW = new BitWriter();
     const noClasses = !usesImages && !usesLights && !usesTables
-        && !usesMLeaders && !underlayKinds.length && !geoData
+        && !usesMLeaders && !CLS_XRECORD && !underlayKinds.length && !geoData
         && !proxyClsH.size && !usesDynBlocks && !sortSpaces.length;
     /* AutoCAD 2027 refuses an AC1032 drawing whose CLASSES section is
        empty — the R2018 'tight' wrap has no accepted empty form
@@ -5003,6 +5010,11 @@ const writeDwgImpl = (
       cls(CLS_MLEADER, 'MULTILEADER', 'AcDbMLeader', true);
       cls(CLS_MLEADERSTYLE, 'MLEADERSTYLE', 'AcDbMLeaderStyle', false,
         'ACDB_MLEADERSTYLE_CLASS');
+    }
+    /* R14 only (numbered right after the MLEADERSTYLE slot, so emitted
+       here): the class the ACDB_RECOMPOSE_DATA record is typed with */
+    if (CLS_XRECORD) {
+      cls(CLS_XRECORD, 'XRECORD', 'AcDbXrecord', false, 'ObjectDBX Classes');
     }
     for (const [kind, nums] of underlayCls) {
       const cap = kind.charAt(0).toUpperCase() + kind.slice(1);
