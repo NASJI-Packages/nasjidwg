@@ -236,8 +236,12 @@ describe('the DWG and DXF codecs agree', () => {
       };
       const a = mix(dwg);
       const b = mix(dxf);
-      /* every type the DXF side kept, the DWG side kept too */
+      /* every type the DXF side kept, the DWG side kept too — except
+         the application class no R13/R14 container can hold: the DXF
+         carries the ACAD_TABLE natively, those two writers report it in
+         `skipped` */
       for (const t of Object.keys(b)) {
+        if (/^R1[34]$/.test(version) && t === 'table') continue;
         expect(a[t], `${version} is missing ${t}`).toBeGreaterThan(0);
       }
     }

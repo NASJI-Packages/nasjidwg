@@ -299,10 +299,12 @@ text, leader/mleader/mline → polylines, tolerance → text) and the rest
 | Capability | Status |
 |---|---|
 | ASCII write (R2000) full entity set | ✅ dimensions-by-kind, exact hatch edges + gradient, mline, mesh, image w/ CLASSES + OBJECTS sections, Arabic pipeline, saved view |
-| ASCII tolerant read | ✅ never throws; every model type incl. ATTDEF, ARC_DIMENSION, mesh flavors, IMAGEDEF paths; SORTENTSTABLE draw order applied the same way the DWG reader applies it |
+| ASCII write: ACAD_TABLE and MULTILEADER natively | ✅ each leaves as its own record in the spelling the reference's own R2000 DXFOUT uses — the class pair in CLASSES, the table's anonymous `*T<n>` block record and block, the R2000 cell grammar (171…145 per cell, 3-chunked text or 340/144/179 block, the 177 override word with 170/140), the multileader's fenced CONTEXT_DATA / LEADER / LEADER_LINE tree with its style-level tail and ACAD_MLEADERVER stamp — pointing at a synthesized "Standard" TABLESTYLE / MLEADERSTYLE under ACAD_TABLESTYLE / ACAD_MLEADERSTYLE. Verified externally: the reference opens the DXF of its own tables sample (2 ACAD_TABLE, 66 cells equal), multileader sample (21 MULTILEADER) and A-03 sheet (3 tables, 832 cells equal) at AUDIT 0 errors with the census matching the source, and `readDxf` returns the same grids and leaders. A table met only inside a proxy's picture still leaves as grid + text |
+| ASCII write: external references | ✅ `BlockDefinition.xref` leaves as an attachment — BLOCK 70 = 4 (+ 8 overlay) with the stored path in group 1, no owned entities — and the `xref\|name` layers, linetypes and text styles travel beside a block written that way, flagged 70 = 48 (dependent + resolved) as the reference's own DXF spells them; with no such block they stay home, as before (the DWG writer's rule). Verified on A-01: the reference reopens the DXF with both attachments resolved (BLOCK 70=44 / 70=36, paths intact, 51 dependent layers) at AUDIT 0, and with the `Res` folder absent it opens unresolved (70=12 / 70=4) exactly as it opens its own DXF |
+| ASCII tolerant read | ✅ never throws; every model type incl. ATTDEF, ARC_DIMENSION, mesh flavors, IMAGEDEF paths; SORTENTSTABLE draw order applied the same way the DWG reader applies it; a BLOCK flagged xref (70 bits 4/8) reads into `BlockDefinition.xref` with its group-1 path, as the DWG reader keeps it |
 | Binary DXF read | ✅ verified against a real-world binary DXF byte stream |
 | Binary DXF write | ✅ round-trip tested |
-| OBJECTS section write (root dict, layouts, groups, mline styles, image defs) | ✅ |
+| OBJECTS section write (root dict, layouts, groups, mline styles, image defs, table + multileader styles) | ✅ |
 | Pre-R13 binary DXF (1-byte codes, 255 escape) | ✅ read (auto-detected) + write via `writeDxfBinary(d, { narrowCodes: true })` |
 
 ## Text / i18n
@@ -433,7 +435,7 @@ The axes a DWG/DXF library is judged on, and where this one stands:
 | OLE2FRAME | ✅ read + write (R14+), document byte-for-byte |
 | Dynamic-block visibility | ✅ read + write (R2000+) |
 | ACAD_TABLE | ✅ read and written in every container. AC1021 keeps a cell's content as a full table VALUE — the additional-data flag, the format flags, the data type, the text inline as byte-counted UTF-16, the unit type, then the value's format string and rendered form in the record's string stream — which is why a bare string there was refused; pinned against AutoCAD-minted AC1021 tables and verified by AutoCAD reading our output back cell for cell (R2010+ writes through the paired TABLECONTENT object) |
-| MULTILEADER | ✅ read + write, its own record |
+| MULTILEADER | ✅ read + write, its own record — in DXF too, where the reference reopens the 21-multileader sample from our DXF at AUDIT 0 |
 | ACIS solids | ✅ SAT write everywhere, SAB from R2007 in the dialect that container's kernel reads (pre-ASM inline at AC1021, ASM through AcDs at AC1032), and SAB→SAT conversion so a binary payload reaches a target that cannot hold it |
 | GEODATA + georeferenced GeoJSON | ✅ DWG and DXF read, DXF write, WGS84 output |
 | Dimension geometry generation | ✅ `explodeDimension` |

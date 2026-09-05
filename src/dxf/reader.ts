@@ -1816,6 +1816,15 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
           };
           /* the record handle, as the DWG reader keeps a block header's */
           if (isExtraPaper && recH) def.handle = recH;
+          /* an external reference: 70 bit 4 (8 for an overlay), the
+             stored path in group 1 — kept as the DWG reader keeps it,
+             so a rewrite re-attaches the file instead of defining an
+             empty block under the attachment's name */
+          const bflags = q.int(70, 0);
+          if (bflags & 4) {
+            def.xref = { path: decodeCadText(q.str(1, '')) };
+            if (bflags & 8) def.xref.overlay = true;
+          }
           drawing.blocks[nm] = def;
         }
         i = findNext0(blkEnd + 1, 'BLOCK', end);

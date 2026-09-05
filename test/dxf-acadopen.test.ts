@@ -182,6 +182,32 @@ describe('what DXFIN demands', () => {
     expect(pairs(writeDxf(d2)).some(([c, v]) => c === 0 && v === 'REGION')).toBe(true);
   });
 
+  it('a 250-character text chunk never ends inside an escape', () => {
+    /* The GENERAL NOTES mtext of the reference's own tables sample has
+       tabs (^I) that fell on a chunk boundary: a chunk ending in a bare
+       caret is a malformed DXF string — "DXF read error on line N",
+       file discarded. The cut moves back before a caret, a \U+XXXX or a
+       %%x code, and is measured after escaping, so every chunk that
+       lands in the file is at most 250 characters. */
+    const d = base();
+    const text = 'A'.repeat(249) + '^I' + 'B'.repeat(30) + 'C'.repeat(217)
+      + 'é' + 'D'.repeat(40) + '%'.repeat(2) + 'd' + 'E'.repeat(300);
+    d.entities.push({
+      type: 'mtext', layer: '0', color: { kind: 'byLayer' },
+      position: { x: 0, y: 0, z: 0 }, text, height: 2.5, rotation: 0
+    } as Entity);
+    const rec = record(writeDxf(d), 'MTEXT');
+    const chunks = rec.filter(([c]) => c === 3 || c === 1).map(([, v]) => v);
+    expect(chunks.length).toBeGreaterThan(3);
+    for (const ch of chunks) {
+      expect(ch.length).toBeLessThanOrEqual(250);
+      expect(ch.endsWith('^'), 'bare caret: ' + ch.slice(-5)).toBe(false);
+      expect(/\\U\+[0-9A-F]{0,3}$/.test(ch), 'split \\U+: ' + ch.slice(-8)).toBe(false);
+      expect(/%%?$/.test(ch), 'split %%: ' + ch.slice(-5)).toBe(false);
+    }
+    expect(chunks.join('')).toBe(text.replace('é', '\\U+00E9'));
+  });
+
   it('a carried 1005 xdata handle leaves as null, not dangling', () => {
     const d = base();
     d.entities[0].xdata = [{

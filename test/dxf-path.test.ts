@@ -18,6 +18,7 @@ import { readDxf } from '../src/dxf/reader.js';
 import { writeDxf } from '../src/dxf/writer.js';
 import { readDwg } from '../src/dwg/reader.js';
 import { writeDwg2018 } from '../src/dwg/writer.js';
+import { emptyDrawing } from '../src/core/model.js';
 import type { Drawing, Entity } from '../src/core/model.js';
 
 const dxf = (rows: (string | number)[]): string => rows.map(String).join('\n') + '\n';
@@ -461,5 +462,335 @@ describe('objects with nothing to write are reported, not dropped in silence', (
     expect(d.unknownObjects?.[0]?.sourceType).toBe('ACME_STORE');
     const res = writeDwg2018(d);
     expect(res.skipped).toEqual(['ACME_STORE (no retained record bits)']);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * The writer's side of the same records. A table, a multileader and an
+ * external reference built in the model leave as native ACAD_TABLE,
+ * MULTILEADER and xref BLOCK records in the spelling the reference's own
+ * R2000 DXFOUT uses — the reference opens the DXF of its tables,
+ * multileader and A-01/A-03 samples written this way at AUDIT 0 with the
+ * census matching the source — and come back through readDxf, and
+ * through readDxf → writeDwg2018 → readDwg, as the same entities.
+ * ------------------------------------------------------------------ */
+
+type Tag = [number, string];
+const tagsOf = (text: string): Tag[] => {
+  const lines = text.split('\n');
+  const out: Tag[] = [];
+  for (let i = 0; i + 1 < lines.length; i += 2) out.push([parseInt(lines[i], 10), lines[i + 1]]);
+  return out;
+};
+/** Every record of `type`: its groups from the 0 to the next 0. */
+const recordsOf = (text: string, type: string): Tag[][] => {
+  const g = tagsOf(text);
+  const out: Tag[][] = [];
+  for (let i = 0; i < g.length; i++) {
+    if (g[i][0] !== 0 || g[i][1] !== type) continue;
+    const rec: Tag[] = [g[i]];
+    for (let k = i + 1; k < g.length && g[k][0] !== 0; k++) rec.push(g[k]);
+    out.push(rec);
+  }
+  return out;
+};
+const named = (text: string, type: string, name: string): Tag[] | undefined =>
+  recordsOf(text, type).find((r) => r.some(([c, v]) => c === 2 && v === name));
+const has = (rec: Tag[] | undefined, code: number, value?: string | number): boolean =>
+  !!rec && rec.some(([c, v]) => c === code && (value === undefined || v === String(value)));
+const count = (rec: Tag[] | undefined, code: number): number =>
+  (rec ?? []).filter(([c]) => c === code).length;
+const valueOf = (rec: Tag[] | undefined, code: number): string | undefined =>
+  (rec ?? []).find(([c]) => c === code)?.[1];
+
+const tag = (): Entity => ({
+  type: 'circle', layer: '0', color: { kind: 'byLayer' },
+  center: { x: 0, y: 0, z: 0 }, radius: 0.5
+});
+
+describe('ACAD_TABLE written natively', () => {
+  const tableDrawing = (): Drawing => {
+    const d = emptyDrawing();
+    d.blocks['TAG'] = { name: 'TAG', basePoint: { x: 0, y: 0, z: 0 }, entities: [tag()] };
+    d.entities.push({
+      type: 'table', layer: 'T', color: { kind: 'byLayer' }, handle: 'AB1',
+      position: { x: 5, y: 10, z: 0 }, direction: { x: 1, y: 0, z: 0 },
+      numRows: 3, numColumns: 2, rowHeights: [0.5, 0.4, 0.4], columnWidths: [3, 2.5],
+      cells: [
+        { text: 'Title', spanColumns: 2, textHeight: 0.25 }, {},
+        { text: 'A', alignment: 5 }, { text: 'B \\P two' },
+        { contentType: 2, blockName: 'TAG' }, { text: '' }
+      ]
+    } as Entity);
+    return d;
+  };
+  const text = writeDxf(tableDrawing());
+
+  it('is spelled as the reference spells an R2000 ACAD_TABLE', () => {
+    const rec = recordsOf(text, 'ACAD_TABLE')[0];
+    expect(rec).toBeDefined();
+    expect(has(rec, 100, 'AcDbBlockReference')).toBe(true);
+    expect(has(rec, 2, '*T1')).toBe(true);
+    expect(has(rec, 100, 'AcDbTable')).toBe(true);
+    expect(has(rec, 91, 3)).toBe(true);
+    expect(has(rec, 92, 2)).toBe(true);
+    expect(count(rec, 141)).toBe(3);
+    expect(count(rec, 142)).toBe(2);
+    expect(count(rec, 171)).toBe(6);
+    /* the 2008+ words stay out of an AC1015 file */
+    expect(has(rec, 280)).toBe(false);
+    expect(has(rec, 301)).toBe(false);
+    /* the block cell names its record; the overrides say what a cell states */
+    const tagRec = named(text, 'BLOCK_RECORD', 'TAG');
+    expect(has(rec, 340, valueOf(tagRec, 5))).toBe(true);
+    expect(rec.filter(([c]) => c === 177).map(([, v]) => v)).toEqual(['32', '0', '1', '0', '1', '0']);
+    expect(has(rec, 140, 0.25)).toBe(true);
+    expect(has(rec, 170, 5)).toBe(true);
+    /* the table style: a Standard TABLESTYLE under ACAD_TABLESTYLE */
+    const style = recordsOf(text, 'TABLESTYLE')[0];
+    expect(has(style, 100, 'AcDbTableStyle')).toBe(true);
+    expect(has(style, 3, 'Standard')).toBe(true);
+    expect(has(rec, 342, valueOf(style, 5))).toBe(true);
+    expect(has(recordsOf(text, 'DICTIONARY')[0], 3, 'ACAD_TABLESTYLE')).toBe(true);
+    /* the class pair, and the anonymous block the record owns */
+    expect(recordsOf(text, 'CLASS').some((c) => has(c, 1, 'ACAD_TABLE') && has(c, 2, 'AcDbTable'))).toBe(true);
+    expect(recordsOf(text, 'CLASS').some((c) => has(c, 1, 'TABLESTYLE'))).toBe(true);
+    const blk = named(text, 'BLOCK', '*T1');
+    expect(has(blk, 70, 1)).toBe(true);
+    expect(has(rec, 343, valueOf(named(text, 'BLOCK_RECORD', '*T1'), 5))).toBe(true);
+  });
+
+  it('reads back as the same table', () => {
+    const d = readDxf(text);
+    expect(d.warnings).toEqual([]);
+    const t = d.entities.find((e) => e.type === 'table');
+    expect(t?.type).toBe('table');
+    if (t?.type !== 'table') return;
+    expect(t.position).toEqual({ x: 5, y: 10, z: 0 });
+    expect(t.numRows).toBe(3);
+    expect(t.numColumns).toBe(2);
+    expect(t.rowHeights).toEqual([0.5, 0.4, 0.4]);
+    expect(t.columnWidths).toEqual([3, 2.5]);
+    expect(t.blockName).toBe('*T1');
+    expect(t.styleName).toBe('Standard');
+    expect(t.cells[0]).toEqual({ contentType: 1, spanColumns: 2, textHeight: 0.25, text: 'Title' });
+    expect(t.cells[1]).toEqual({ contentType: 1 });
+    expect(t.cells[2]).toEqual({ contentType: 1, alignment: 5, text: 'A' });
+    expect(t.cells[3].text).toBe('B \\P two');
+    expect(t.cells[4]).toEqual({ contentType: 2, alignment: 5, blockName: 'TAG' });
+    expect(t.cells[5]).toEqual({ contentType: 1 });
+    /* the block carries the grid's picture, and is the table's own */
+    expect(d.blocks['*T1']?.entities.length).toBeGreaterThan(0);
+    expect(Object.keys(d.blocks).sort()).toEqual(['*T1', 'TAG']);
+  });
+
+  it('reaches DWG through readDxf and reads back', () => {
+    const back = readDwg(writeDwg2018(readDxf(text)).data);
+    const t = back.entities.find((e) => e.type === 'table');
+    expect(t?.type).toBe('table');
+    if (t?.type !== 'table') return;
+    expect(t.numRows).toBe(3);
+    expect(t.numColumns).toBe(2);
+    expect(t.cells[0].text).toBe('Title');
+    expect(t.cells[0].spanColumns).toBe(2);
+    expect(t.cells[2].text).toBe('A');
+    expect(t.cells[3].text).toBe('B \\P two');
+    expect(back.warnings).toEqual([]);
+  });
+
+  it('a table read from a DXF keeps its own block under the new number', () => {
+    /* the picture block the first write minted travels, not a second
+       copy of it renamed ND_T1 */
+    const again = writeDxf(readDxf(text));
+    expect(named(again, 'BLOCK', 'ND_T1')).toBeUndefined();
+    const t = readDxf(again).entities.find((e) => e.type === 'table');
+    expect(t?.type === 'table' && t.blockName).toBe('*T1');
+  });
+});
+
+describe('MULTILEADER written natively', () => {
+  const mleaderDrawing = (block: boolean): Drawing => {
+    const d = emptyDrawing();
+    d.textStyles.push({ name: 'Notes', font: 'arial.ttf' });
+    d.blocks['TAG'] = { name: 'TAG', basePoint: { x: 0, y: 0, z: 0 }, entities: [tag()] };
+    const base = {
+      type: 'mleader', layer: 'N', color: { kind: 'byLayer' }, handle: '1EC8',
+      leaders: [
+        {
+          lines: [[{ x: 418, y: 87, z: 0 }, { x: 420, y: 100, z: 0 }], [{ x: 400, y: 80, z: 0 }]],
+          landing: { x: 423, y: 140, z: 0 }, doglegVector: { x: 1, y: 0, z: 0 }, doglegLength: 5
+        },
+        {
+          lines: [[{ x: 510, y: 90, z: 0 }]],
+          landing: { x: 500, y: 140, z: 0 }, doglegVector: { x: -1, y: 0, z: 0 }, doglegLength: 5
+        }
+      ],
+      scale: 1, arrowSize: 2.5, hasLanding: true, hasDogleg: true
+    };
+    d.entities.push((block
+      ? { ...base, blockName: 'TAG', blockPosition: { x: 155.5, y: 429.5, z: 0 }, blockScale: { x: 2, y: 2, z: 2 }, blockRotation: 0.5 }
+      : { ...base, text: 'RUPTURE DISK \\PSHEET 2', textPosition: { x: 429.5, y: 142.5, z: 0 }, textHeight: 3, textRotation: 0.25, textStyle: 'Notes' }) as Entity);
+    return d;
+  };
+
+  it('is spelled as the reference spells an R2000 MULTILEADER', () => {
+    const text = writeDxf(mleaderDrawing(false));
+    const rec = recordsOf(text, 'MULTILEADER')[0];
+    expect(rec).toBeDefined();
+    expect(has(rec, 100, 'AcDbMLeader')).toBe(true);
+    expect(has(rec, 300, 'CONTEXT_DATA{')).toBe(true);
+    expect(count(rec, 302)).toBe(2);                 /* LEADER{ per leader */
+    expect(count(rec, 304)).toBe(4);                 /* the text + 3 LEADER_LINE{ */
+    expect(count(rec, 305)).toBe(3);
+    expect(has(rec, 301, '}')).toBe(true);
+    expect(has(rec, 270)).toBe(false);               /* the 2010+ version word */
+    expect(has(rec, 172, 2)).toBe(true);             /* mtext content */
+    expect(has(rec, 1001, 'ACAD_MLEADERVER')).toBe(true);
+    /* the style: a Standard MLEADERSTYLE under ACAD_MLEADERSTYLE, and
+       the text style by handle, both from the record's tail */
+    const style = recordsOf(text, 'MLEADERSTYLE')[0];
+    expect(has(style, 100, 'AcDbMLeaderStyle')).toBe(true);
+    expect(has(style, 3, 'Standard')).toBe(true);
+    const tail = rec.slice(rec.findIndex(([c, v]) => c === 301 && v === '}'));
+    expect(has(tail, 340, valueOf(style, 5))).toBe(true);
+    expect(has(tail, 343, valueOf(named(text, 'STYLE', 'Notes'), 5))).toBe(true);
+    expect(has(tail, 341, valueOf(named(text, 'LTYPE', 'ByBlock'), 5))).toBe(true);
+    expect(has(recordsOf(text, 'DICTIONARY')[0], 3, 'ACAD_MLEADERSTYLE')).toBe(true);
+    expect(recordsOf(text, 'CLASS').some((c) => has(c, 1, 'MULTILEADER') && has(c, 2, 'AcDbMLeader'))).toBe(true);
+    expect(recordsOf(text, 'CLASS').some((c) => has(c, 1, 'MLEADERSTYLE'))).toBe(true);
+    expect(named(text, 'APPID', 'ACAD_MLEADERVER')).toBeDefined();
+  });
+
+  it('reads back as the same multileader, text and block content alike', () => {
+    for (const block of [false, true]) {
+      const d = readDxf(writeDxf(mleaderDrawing(block)));
+      expect(d.warnings).toEqual([]);
+      const m = d.entities.find((e) => e.type === 'mleader');
+      expect(m?.type).toBe('mleader');
+      if (m?.type !== 'mleader') return;
+      expect(m.leaders.length).toBe(2);
+      expect(m.leaders[0].lines).toEqual([[{ x: 418, y: 87, z: 0 }, { x: 420, y: 100, z: 0 }], [{ x: 400, y: 80, z: 0 }]]);
+      expect(m.leaders[0].landing).toEqual({ x: 423, y: 140, z: 0 });
+      expect(m.leaders[0].doglegVector).toEqual({ x: 1, y: 0, z: 0 });
+      expect(m.leaders[0].doglegLength).toBe(5);
+      expect(m.leaders[1].landing).toEqual({ x: 500, y: 140, z: 0 });
+      expect(m.scale).toBe(1);
+      expect(m.arrowSize).toBe(2.5);
+      expect(m.styleName).toBe('Standard');
+      expect(m.hasLanding).toBe(true);
+      expect(m.hasDogleg).toBe(true);
+      if (block) {
+        expect(m.text).toBeUndefined();
+        expect(m.blockName).toBe('TAG');
+        expect(m.blockPosition).toEqual({ x: 155.5, y: 429.5, z: 0 });
+        expect(m.blockScale).toEqual({ x: 2, y: 2, z: 2 });
+        expect(m.blockRotation).toBe(0.5);
+      } else {
+        expect(m.text).toBe('RUPTURE DISK \\PSHEET 2');
+        expect(m.textPosition).toEqual({ x: 429.5, y: 142.5, z: 0 });
+        expect(m.textHeight).toBe(3);
+        expect(m.textRotation).toBe(0.25);
+        expect(m.textStyle).toBe('Notes');
+      }
+    }
+  });
+
+  it('reaches DWG through readDxf and reads back', () => {
+    for (const block of [false, true]) {
+      const back = readDwg(writeDwg2018(readDxf(writeDxf(mleaderDrawing(block)))).data);
+      const m = entitiesOf(back).find((e) => e.type === 'mleader');
+      expect(m?.type).toBe('mleader');
+      if (m?.type !== 'mleader') return;
+      expect(m.leaders.length).toBe(2);
+      expect(m.leaders[0].lines[0][1]).toEqual({ x: 420, y: 100, z: 0 });
+      expect(m.leaders[0].landing).toEqual({ x: 423, y: 140, z: 0 });
+      if (block) expect(m.blockName).toBe('TAG');
+      else expect(m.text).toBe('RUPTURE DISK \\PSHEET 2');
+      expect(back.warnings).toEqual([]);
+    }
+  });
+});
+
+describe('external references through DXF', () => {
+  const xrefDrawing = (attached: boolean): Drawing => {
+    const d = emptyDrawing();
+    d.layers.push(
+      {
+        name: 'Wall Base|WALL', color: { kind: 'aci', index: 5 }, on: true, frozen: false,
+        locked: false, xrefDependent: true, linetype: 'Wall Base|CENTER'
+      },
+      { name: 'Ghost|G', color: { kind: 'aci', index: 3 }, on: true, frozen: false, locked: false, xrefDependent: true }
+    );
+    d.linetypes.push({ name: 'Wall Base|CENTER', pattern: [1.25, -0.25, 0.25, -0.25], xrefDependent: true });
+    d.textStyles.push({ name: 'Wall Base|Notes', font: 'arial.ttf', xrefDependent: true });
+    if (attached) {
+      d.blocks['Wall Base'] = {
+        name: 'Wall Base', basePoint: { x: 0, y: 0, z: 0 }, entities: [],
+        xref: { path: '.\\Res\\Wall Base.dwg' }
+      };
+      d.blocks['Grid Plan'] = {
+        name: 'Grid Plan', basePoint: { x: 0, y: 0, z: 0 }, entities: [],
+        xref: { path: '.\\Res\\Grid Plan.dwg', overlay: true }
+      };
+    }
+    return d;
+  };
+
+  it('an attachment leaves as an xref BLOCK with its path, its dependent records flagged beside it', () => {
+    const text = writeDxf(xrefDrawing(true));
+    const wall = named(text, 'BLOCK', 'Wall Base');
+    expect(has(wall, 70, 4)).toBe(true);
+    expect(has(wall, 1, '.\\Res\\Wall Base.dwg')).toBe(true);
+    const grid = named(text, 'BLOCK', 'Grid Plan');
+    expect(has(grid, 70, 12)).toBe(true);
+    expect(has(grid, 1, '.\\Res\\Grid Plan.dwg')).toBe(true);
+    expect(named(text, 'BLOCK_RECORD', 'Wall Base')).toBeDefined();
+    /* 16 dependent + 32 resolved, as the reference's own DXF spells them */
+    expect(has(named(text, 'LAYER', 'Wall Base|WALL'), 70, 48)).toBe(true);
+    expect(has(named(text, 'LTYPE', 'Wall Base|CENTER'), 70, 48)).toBe(true);
+    expect(has(named(text, 'STYLE', 'Wall Base|Notes'), 70, 48)).toBe(true);
+    /* a dependent record whose block is not attached stays home */
+    expect(named(text, 'LAYER', 'Ghost|G')).toBeUndefined();
+  });
+
+  it('without the block, the dependent records stay home as before', () => {
+    const text = writeDxf(xrefDrawing(false));
+    expect(named(text, 'LAYER', 'Wall Base|WALL')).toBeUndefined();
+    expect(named(text, 'LTYPE', 'Wall Base|CENTER')).toBeUndefined();
+    expect(named(text, 'STYLE', 'Wall Base|Notes')).toBeUndefined();
+  });
+
+  it('reads back as an attachment, and survives the DWG trip as one', () => {
+    const back = readDxf(writeDxf(xrefDrawing(true)));
+    expect(back.blocks['Wall Base']?.xref).toEqual({ path: '.\\Res\\Wall Base.dwg' });
+    expect(back.blocks['Grid Plan']?.xref).toEqual({ path: '.\\Res\\Grid Plan.dwg', overlay: true });
+    expect(back.layers.find((l) => l.name === 'Wall Base|WALL')?.xrefDependent).toBe(true);
+    expect(back.linetypes.find((l) => l.name === 'Wall Base|CENTER')?.xrefDependent).toBe(true);
+    expect(back.textStyles.find((s) => s.name === 'Wall Base|Notes')?.xrefDependent).toBe(true);
+    const res = writeDwg2018(back);
+    expect(res.skipped).toEqual([]);
+    const dwg = readDwg(res.data);
+    expect(dwg.blocks['Wall Base']?.xref?.path).toBe('.\\Res\\Wall Base.dwg');
+    expect(dwg.blocks['Grid Plan']?.xref).toEqual({ path: '.\\Res\\Grid Plan.dwg', overlay: true });
+    expect(dwg.layers.find((l) => l.name === 'Wall Base|WALL')?.xrefDependent).toBe(true);
+  });
+
+  it('reads the reference spelling: BLOCK 70 = 36 / 44 with the group-1 path', () => {
+    const d = readDxf(dxf([
+      0, 'SECTION', 2, 'BLOCKS',
+      0, 'BLOCK', 5, '27075', 330, '27074', 100, 'AcDbEntity', 8, '0', 100, 'AcDbBlockBegin',
+      2, 'Grid Plan', 70, 44, 10, 0, 20, 0, 30, 0, 3, 'Grid Plan', 1, '.\\Res\\Grid Plan.dwg',
+      0, 'ENDBLK', 5, '27076', 330, '27074', 100, 'AcDbEntity', 8, '0', 100, 'AcDbBlockEnd',
+      0, 'BLOCK', 5, '270D0', 330, '270CF', 100, 'AcDbEntity', 8, '0', 100, 'AcDbBlockBegin',
+      2, 'Wall Base', 70, 36, 10, 0, 20, 0, 30, 0, 3, 'Wall Base', 1, '.\\Res\\Wall Base.dwg',
+      0, 'ENDBLK', 5, '270D1', 330, '270CF', 100, 'AcDbEntity', 8, '0', 100, 'AcDbBlockEnd',
+      0, 'BLOCK', 5, '30', 330, '31', 100, 'AcDbEntity', 8, '0', 100, 'AcDbBlockBegin',
+      2, 'DOOR', 70, 0, 10, 0, 20, 0, 30, 0, 3, 'DOOR', 1, '',
+      0, 'ENDBLK', 5, '32', 330, '31', 100, 'AcDbEntity', 8, '0', 100, 'AcDbBlockEnd',
+      0, 'ENDSEC', 0, 'EOF'
+    ]));
+    expect(d.blocks['Grid Plan']?.xref).toEqual({ path: '.\\Res\\Grid Plan.dwg', overlay: true });
+    expect(d.blocks['Wall Base']?.xref).toEqual({ path: '.\\Res\\Wall Base.dwg' });
+    expect(d.blocks['DOOR']?.xref).toBeUndefined();
   });
 });
