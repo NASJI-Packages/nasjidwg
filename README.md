@@ -596,7 +596,7 @@ four independent mechanisms:
    produced the R14 viewport grammar, the proxy envelope's class-name
    field, the xref-dependent record rule, the pre-2018 MLEADER tail, the
    pre-2010 table cell grammar and the dynamic-block evaluation chain in
-   this release. Where the campaign stands (2026-09-05, round 8, 96
+   this release. Where the campaign stands (2026-09-05, round 9, 96
    drawings): every one of them reads exactly in all eight encodings;
    written back as R14, 2000, 2004, 2007, 2010, 2013 and 2018, every one
    reopens with **zero AUDIT errors and the reference's own entity
