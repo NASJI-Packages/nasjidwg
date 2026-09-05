@@ -4,7 +4,7 @@
 import { describe, expect, it } from 'vitest';
 import { readDwg } from '../src/dwg/reader.js';
 import { ByteSink } from '../src/dwg/bitwriter.js';
-import { writeDwg2000, writeDwg2004, writeDwg2007, writeDwg2018, writeDwgR14 } from '../src/dwg/writer.js';
+import { writeDwg2000, writeDwg2004, writeDwg2007, writeDwg2018, writeDwgR13, writeDwgR14 } from '../src/dwg/writer.js';
 import { emptyDrawing } from '../src/core/model.js';
 import type { Drawing, Entity } from '../src/core/model.js';
 
@@ -336,9 +336,13 @@ describe('external references', () => {
     return d;
   };
 
+  /* R13/R14 spell the attachment the same way (the reference's own R14
+     save of A-01, bit-walked: the xref/overlaid bits, the path, no entity
+     chain — and its dependent records flagged with the block handle) */
   const writers = [
     ['2018', writeDwg2018], ['2007', writeDwg2007],
-    ['2004', writeDwg2004], ['2000', writeDwg2000]
+    ['2004', writeDwg2004], ['2000', writeDwg2000],
+    ['R14', writeDwgR14], ['R13', writeDwgR13]
   ] as const;
   for (const [label, write] of writers) {
     it(`${label}: an attachment keeps its path, overlay flag and dependent records`, () => {
@@ -362,11 +366,4 @@ describe('external references', () => {
     });
   }
 
-  it('R14 keeps an attachment as a plain block and its records at home', () => {
-    const res = writeDwgR14(build());
-    expect(res.skipped).toContain('5 xref-dependent table records');
-    const back = readDwg(res.data);
-    expect(back.blocks['Wall Base'].xref).toBeUndefined();
-    expect(back.layers.some((l) => /\|/.test(l.name))).toBe(false);
-  });
 });

@@ -175,7 +175,7 @@ describe('ACAD_TABLE through DXF', () => {
     expect(t.styleName).toBe('Standard');
     expect(t.cells.length).toBe(4);
     expect(t.cells[0]).toEqual({ contentType: 1, spanColumns: 2, text: '{\\L\\C4;LEGEND}' });
-    expect(t.cells[1]).toEqual({ contentType: 1 });
+    expect(t.cells[1]).toEqual({ contentType: 1, merged: true });
     expect(t.cells[2]).toEqual({ contentType: 2, blockName: 'SUPPORT', alignment: 5 });
     expect(t.cells[3]).toEqual({ contentType: 1, textHeight: 2.5, text: 'PIPE SUPPORT' });
     expect(d.warnings).toEqual([]);
@@ -574,7 +574,7 @@ describe('ACAD_TABLE written natively', () => {
     expect(t.blockName).toBe('*T1');
     expect(t.styleName).toBe('Standard');
     expect(t.cells[0]).toEqual({ contentType: 1, spanColumns: 2, textHeight: 0.25, text: 'Title' });
-    expect(t.cells[1]).toEqual({ contentType: 1 });
+    expect(t.cells[1]).toEqual({ contentType: 1, merged: true });
     expect(t.cells[2]).toEqual({ contentType: 1, alignment: 5, text: 'A' });
     expect(t.cells[3].text).toBe('B \\P two');
     expect(t.cells[4]).toEqual({ contentType: 2, alignment: 5, blockName: 'TAG' });

@@ -8,12 +8,14 @@
 
 import type {
   BlockDefinition, Color, Drawing, Entity, HatchBoundary, Layer,
-  MLeaderEntity, MTextEntity, Point3, ProxyEntity, TableEntity, TextEntity
+  MLeaderEntity, MLeaderStyle, MTextEntity, Point3, ProxyEntity, TableEntity,
+  TableStyle, TableStyleCell, TextEntity
 } from '../core/model.js';
 import { sabToSat } from '../acis/sab.js';
 import { nearestAci } from '../core/color.js';
 import { hasComplexScript, mirrorBrackets, shapeArabic } from '../text/arabic.js';
 import { encodeCadSymbols, escapeUnicode } from '../text/escapes.js';
+import { flattenMtextParagraphs } from '../text/mtext.js';
 import { pairsToBinaryDxf } from './binary.js';
 
 const TAU = Math.PI * 2;
@@ -224,15 +226,41 @@ export const writeDxf = (drawing: Drawing): string => {
   /* Table and multileader records name their style by hard handle (342 /
      340) and their text style and linetype the same way, so those
      records' handles are fixed here, ahead of the tables that assign
-     them. The two style objects are the "Standard" ones the DWG writer
-     synthesizes, listed under ACAD_TABLESTYLE / ACAD_MLEADERSTYLE in the
-     named objects dictionary — the reference audits a null style. */
+     them. The style objects are the drawing's own TABLESTYLE and
+     MLEADERSTYLE records — a "Standard" synthesized beside them when the
+     drawing names none — listed under ACAD_TABLESTYLE / ACAD_MLEADERSTYLE
+     in the named objects dictionary; every table and multileader points
+     at the one its styleName names, else at Standard (the reference
+     audits a null style). One record per name. */
   const styleHandleOf = new Map<string, string>();     /* lower-cased name */
   const ltypeHandleOf = new Map<string, string>();
-  const tableStyleDictHandle = usesTables ? handle() : '';
-  const tableStyleHandle = usesTables ? handle() : '';
-  const mleaderStyleDictHandle = usesMLeaders ? handle() : '';
-  const mleaderStyleHandle = usesMLeaders ? handle() : '';
+  const withStandard = <T extends { name: string }>(list: T[] | undefined, standard: T): T[] => {
+    const seen = new Set<string>();
+    return (list?.some((s) => /^standard$/i.test(s.name)) ? [...list] : [standard, ...(list ?? [])])
+      .filter((s) => !seen.has(s.name.toLowerCase()) && !!seen.add(s.name.toLowerCase()));
+  };
+  const usesTableStyles = usesTables || !!drawing.tableStyles?.length;
+  const usesMLeaderStyles = usesMLeaders || !!drawing.mleaderStyles?.length;
+  const tableStylesOut = usesTableStyles
+    ? withStandard(drawing.tableStyles, { name: 'Standard' }) : [];
+  const mleaderStylesOut = usesMLeaderStyles
+    ? withStandard(drawing.mleaderStyles, { name: 'Standard' }) : [];
+  const tableStyleDictHandle = usesTableStyles ? handle() : '';
+  const tableStyleHandles = tableStylesOut.map(() => handle());
+  const mleaderStyleDictHandle = usesMLeaderStyles ? handle() : '';
+  const mleaderStyleHandles = mleaderStylesOut.map(() => handle());
+  const styleHandleFor = <T extends { name: string }>(
+    list: T[], handles: string[], name?: string
+  ): string => {
+    const key = (name ?? '').toLowerCase();
+    let i = list.findIndex((s) => s.name.toLowerCase() === key);
+    if (i < 0) i = list.findIndex((s) => /^standard$/i.test(s.name));
+    return handles[i] ?? '0';
+  };
+  const tableStyleHandleFor = (name?: string): string =>
+    styleHandleFor(tableStylesOut, tableStyleHandles, name);
+  const mleaderStyleHandleFor = (name?: string): string =>
+    styleHandleFor(mleaderStylesOut, mleaderStyleHandles, name);
   /** Underlay kinds present, each needing its class + definition pair. */
   const underlayKinds = [...new Set(allEntities()
     .filter((e): e is Extract<Entity, { type: 'underlay' }> => e.type === 'underlay')
@@ -597,12 +625,16 @@ export const writeDxf = (drawing: Drawing): string => {
     if (usesTables) {
       w(0, 'CLASS'); w(1, 'ACAD_TABLE'); w(2, 'AcDbTable');
       w(3, 'ObjectDBX Classes'); w(90, 1025); w(280, 0); w(281, 1);
+    }
+    if (usesTableStyles) {
       w(0, 'CLASS'); w(1, 'TABLESTYLE'); w(2, 'AcDbTableStyle');
       w(3, 'ObjectDBX Classes'); w(90, 4095); w(280, 0); w(281, 0);
     }
     if (usesMLeaders) {
       w(0, 'CLASS'); w(1, 'MULTILEADER'); w(2, 'AcDbMLeader');
       w(3, 'ACDB_MLEADER_CLASS'); w(90, 1025); w(280, 0); w(281, 1);
+    }
+    if (usesMLeaderStyles) {
       w(0, 'CLASS'); w(1, 'MLEADERSTYLE'); w(2, 'AcDbMLeaderStyle');
       w(3, 'ACDB_MLEADERSTYLE_CLASS'); w(90, 4095); w(280, 0); w(281, 0);
     }
@@ -623,8 +655,10 @@ export const writeDxf = (drawing: Drawing): string => {
         'ACDBDICTIONARYWDFLT', 'ACDBPLACEHOLDER',
         ...(usesImages ? ['IMAGE', 'WIPEOUT', 'IMAGEDEF', 'RASTERVARIABLES'] : []),
         ...underlayKinds.flatMap((k) => [k.toUpperCase() + 'UNDERLAY', k.toUpperCase() + 'DEFINITION']),
-        ...(usesTables ? ['ACAD_TABLE', 'TABLESTYLE'] : []),
-        ...(usesMLeaders ? ['MULTILEADER', 'MLEADERSTYLE'] : []),
+        ...(usesTables ? ['ACAD_TABLE'] : []),
+        ...(usesTableStyles ? ['TABLESTYLE'] : []),
+        ...(usesMLeaders ? ['MULTILEADER'] : []),
+        ...(usesMLeaderStyles ? ['MLEADERSTYLE'] : []),
         ...[...proxyClasses.keys()].map((k) => k.toUpperCase())
       ]);
       const sealedClasses: { cls: { dxfName: string; cppName: string; appName: string }; ent: boolean }[] = [];
@@ -849,9 +883,12 @@ export const writeDxf = (drawing: Drawing): string => {
     walkApps(drawing.paperSpace);
     for (const b of Object.values(blocks)) walkApps(b?.entities);
     for (const p of proxyObjs) for (const g of p.xdata ?? []) addApp(g.appName);
+    for (const s of [...tableStylesOut, ...mleaderStylesOut]) {
+      for (const g of s.xdata ?? []) addApp(g.appName);
+    }
     /* every MULTILEADER and its style carry the ACAD_MLEADERVER xdata
        the reference writes on its own */
-    if (usesMLeaders) addApp('ACAD_MLEADERVER');
+    if (usesMLeaderStyles) addApp('ACAD_MLEADERVER');
     w(0, 'TABLE'); w(2, 'APPID'); w(5, handle()); w(100, 'AcDbSymbolTable');
     w(70, apps.length);
     for (const a of apps) {
@@ -1107,7 +1144,11 @@ export const writeDxf = (drawing: Drawing): string => {
     w(40, fmt(isNum(ent.height) && ent.height > 0 ? ent.height : 5));
     if (ent.type === 'mtext' && isNum(ent.width) && ent.width > 0) w(41, fmt(ent.width));
     w(71, attach);
-    emitMtextValue(mtextBody(ent.text));
+    /* an R2000 file knows no paragraph codes: the reference's own 2000
+       save drops every `\p…;` (the 2004 indents and the 2008 alignment
+       alike), and so does this AC1015 writer */
+    emitMtextValue(flattenMtextParagraphs(mtextBody(ent.text), 2000,
+      isNum(ent.height) && ent.height > 0 ? ent.height : 5));
     w(50, fmt((ent.rotation || 0) * DEG));
     if (ent.style) w(7, ent.style);
   };
@@ -1431,6 +1472,22 @@ export const writeDxf = (drawing: Drawing): string => {
    *  attachment point, overall scale). The groups the reference adds
    *  from 2010 on (270 version, 271–273 attachment directions, 295)
    *  have no place in an AC1015 file and are not written. */
+  /** The number this file gave the ATTDEF an attribute value names — by
+   *  the source handle when it maps to one of the block's definitions,
+   *  else by the value's 1-based index among them. */
+  const attdefHandleFor = (
+    blockName: string, a: { attdef?: string; index?: number }
+  ): string => {
+    const defs = (blocks[blockName]?.entities ?? []).filter(
+      (x): x is TextEntity => x.type === 'text' && x.attribute === 'attdef');
+    if (a.attdef) {
+      const h = outHandleOf(a.attdef);
+      if (h && defs.some((d) => writtenHandle.get(d) === h)) return h;
+    }
+    const d = defs[(a.index || 1) - 1];
+    return (d && writtenHandle.get(d)) || '0';
+  };
+
   const writeMLeader = (ent: MLeaderEntity): void => {
     const hasText = ent.text !== undefined && ent.text !== null;
     const blockRec = ent.blockName ? blockRecHandle[ent.blockName] : undefined;
@@ -1524,7 +1581,7 @@ export const writeDxf = (drawing: Drawing): string => {
       w(303, '}');
     });
     w(301, '}');
-    w(340, mleaderStyleHandle);
+    w(340, mleaderStyleHandleFor(ent.styleName));
     /* the properties this record states itself rather than taking from
        the style: dogleg length (7), arrowhead size (9), text height (17)
        and overall scale (25); a block adds content type (10), block id
@@ -1552,6 +1609,19 @@ export const writeDxf = (drawing: Drawing): string => {
     w(43, fmt(ent.blockRotation ?? 0));
     w(176, 0);                            /* block connection type */
     w(293, 0);                            /* annotative */
+    /* the block labels, between the annotative flag and the text
+       direction as the reference's own export places them: 330 the
+       ATTDEF (under the number this file gave it), 177 the index, 44
+       the width, 302 the value */
+    if (hasBlock) {
+      for (const lb of ent.attributes ?? []) {
+        if (typeof lb.text !== 'string') continue;
+        w(330, attdefHandleFor(ent.blockName!, lb));
+        w(177, lb.index || 1);
+        w(44, fmt(lb.width ?? 0));
+        w(302, encodeCadSymbols(lb.text));
+      }
+    }
     w(294, 0);                            /* text direction negative */
     w(178, 0);                            /* IPE alignment */
     w(179, 1);                            /* text attachment point */
@@ -1595,37 +1665,100 @@ export const writeDxf = (drawing: Drawing): string => {
     w(2, blockName);
     w(10, fmt(ent.position.x)); w(20, fmt(ent.position.y)); w(30, fmt(ent.position.z ?? 0));
     w(100, 'AcDbTable');
-    w(342, tableStyleHandle);
+    w(342, tableStyleHandleFor(ent.styleName));
     w(343, blockRec);
     const dir = ent.direction ?? { x: 1, y: 0, z: 0 };
     w(11, fmt(dir.x)); w(21, fmt(dir.y)); w(31, fmt(dir.z ?? 0));
     w(90, 22);                            /* flags for table value */
     w(91, rows); w(92, cols);
-    w(93, 0); w(94, 0); w(95, 0); w(96, 0); /* no table-level overrides */
+    /* the table-level override word and its values, as the reference's
+       own export spells a header-less legend (`93 3, 280 1, 281 1`):
+       0x01 title suppressed (280), 0x02 header suppressed (281), 0x04
+       flow direction (70), 0x08/0x10 the cell margins (40/41) */
+    const tf = (ent.titleSuppressed ? 0x01 : 0) | (ent.headerSuppressed ? 0x02 : 0)
+      | (isNum(ent.flowDirection) ? 0x04 : 0)
+      | (isNum(ent.horizontalMargin) ? 0x08 : 0)
+      | (isNum(ent.verticalMargin) ? 0x10 : 0);
+    w(93, tf); w(94, 0); w(95, 0); w(96, 0);
+    if (tf & 0x01) w(280, 1);
+    if (tf & 0x02) w(281, 1);
+    if (tf & 0x04) w(70, ent.flowDirection!);
+    if (tf & 0x08) w(40, fmt(ent.horizontalMargin!));
+    if (tf & 0x10) w(41, fmt(ent.verticalMargin!));
     for (let r = 0; r < rows; r++) w(141, fmt(isNum(ent.rowHeights[r]) ? ent.rowHeights[r] : 1));
     for (let c = 0; c < cols; c++) w(142, fmt(isNum(ent.columnWidths[c]) ? ent.columnWidths[c] : 1));
+    /* the per-cell overrides, in the reference's own R2000 spelling: the
+       177 word (0x01 alignment, 0x02 fill switch, 0x04 fill colour, 0x08
+       text colour, 0x10 text style, 0x20 text height; per edge
+       top/right/bottom/left colour 0x40<<i, lineweight 0x400<<i,
+       visibility 0x4000<<i — a 16-bit group, so the bottom and left
+       visibility bits fall off exactly as they do in its export), then
+       170 / 283 / 63 / 64 / 7 / 140, and the edges as it orders them:
+       right (275/285/65), bottom (276/286/66), left (278/288/68), top
+       (279/289/69), each as lineweight, visibility, colour */
+    const aci = (c: Color): number => c.kind === 'byBlock' ? 0
+      : c.kind === 'byLayer' ? 256 : c.kind === 'aci' ? c.index : nearestAci(c.rgb);
+    const styleKnown = (nm?: string): boolean => !!nm
+      && drawing.textStyles.some((s) => s.name.toLowerCase() === nm.toLowerCase());
+    const EDGES = ['top', 'right', 'bottom', 'left'] as const;
+    const EDGE_CODES: Record<typeof EDGES[number], [number, number, number]> = {
+      top: [279, 289, 69], right: [275, 285, 65], bottom: [276, 286, 66], left: [278, 288, 68]
+    };
     for (let i = 0; i < rows * cols; i++) {
       const cell = ent.cells[i] ?? {};
-      const isCovered = covered[i] === 1;
+      const isCovered = covered[i] === 1 || cell.merged === true;
       const cellBlock = cell.contentType === 2 && cell.blockName
         ? blockRecHandle[cell.blockName] : undefined;
       const hasHeight = isNum(cell.textHeight) && cell.textHeight > 0;
+      const textStyle = styleKnown(cell.textStyle) ? cell.textStyle : undefined;
+      let flags = (cell.alignment !== undefined || cellBlock ? 0x01 : 0)
+        | (cell.fillEnabled !== undefined ? 0x02 : 0)
+        | (cell.fillColor ? 0x04 : 0) | (cell.textColor ? 0x08 : 0)
+        | (textStyle ? 0x10 : 0) | (hasHeight ? 0x20 : 0);
+      EDGES.forEach((edge, k) => {
+        const b = cell.borders?.[edge];
+        if (!b) return;
+        if (b.color) flags |= 0x40 << k;
+        if (isNum(b.lineweight)) flags |= 0x400 << k;
+        if (b.visible !== undefined) flags |= 0x4000 << k;
+      });
       w(171, cellBlock ? 2 : 1);
-      w(172, 0);
+      /* 172: the edges the cell overrides (1 top, 2 right, 4 bottom, 8
+         left) — the reference's DXFIN takes an edge override only when
+         this byte announces it (proven on its re-export of ours) */
+      w(172, EDGES.reduce((m, edge, k) => cell.borders?.[edge] ? m | (1 << k) : m, 0));
       w(173, isCovered ? 1 : 0);
-      w(174, 0);
+      w(174, cell.autofit ? 1 : 0);
       w(175, isCovered ? 1 : Math.max(1, cell.spanColumns ?? 1));
       w(176, isCovered ? 1 : Math.max(1, cell.spanRows ?? 1));
-      w(177, (cell.alignment !== undefined || cellBlock ? 1 : 0) | (hasHeight ? 32 : 0));
+      w(177, flags & 0xffff);
       w(178, 0);
-      w(145, 0);
+      w(145, fmt(isNum(cell.rotation) ? cell.rotation : 0));
       if (cellBlock) {
-        w(340, cellBlock); w(144, 1); w(179, 0);
+        w(340, cellBlock); w(144, 1);
+        const attrs = (cell.attributes ?? []).filter((a) => typeof a.text === 'string');
+        w(179, attrs.length);
+        for (const a of attrs) {
+          w(331, attdefHandleFor(cell.blockName!, a));
+          w(300, encodeCadSymbols(a.text));
+        }
         w(170, cell.alignment ?? 5);
       } else {
         emitMtextValue(mtextBody(cell.text ?? ''));
         if (cell.alignment !== undefined) w(170, cell.alignment);
-        if (hasHeight) w(140, fmt(cell.textHeight!));
+      }
+      if (cell.fillEnabled !== undefined) w(283, cell.fillEnabled ? 0 : 1);   /* "fill none" */
+      if (cell.fillColor) w(63, aci(cell.fillColor));
+      if (cell.textColor) w(64, aci(cell.textColor));
+      if (textStyle) w(7, encodeCadSymbols(textStyle));
+      if (hasHeight) w(140, fmt(cell.textHeight!));
+      for (const edge of ['right', 'bottom', 'left', 'top'] as const) {
+        const b = cell.borders?.[edge];
+        if (!b) continue;
+        const [lwCode, visCode, colCode] = EDGE_CODES[edge];
+        if (isNum(b.lineweight)) w(lwCode, b.lineweight);
+        if (b.visible !== undefined) w(visCode, b.visible ? 0 : 1);
+        if (b.color) w(colCode, aci(b.color));
       }
     }
   };
@@ -1716,11 +1849,16 @@ export const writeDxf = (drawing: Drawing): string => {
             if (isNum(p.tangent)) w(50, fmt(p.tangent * DEG));
             if (isNum(p.id) && p.id) w(91, p.id);
           };
+          /* the reference's order for a spline-fit polyline: the first
+             frame vertex, the whole fitted run, then the rest of the
+             frame (16, 8×n, 16, 16 on its DXF of Road Profile and T-01);
+             the readers sort by flag, so either order reads the same */
           const frame = fit && fit !== 'curve' ? (ent.frame ?? []) : [];
-          for (const p of frame) vertex(p, 16);
+          if (frame.length) vertex(frame[0], 16);
           for (const p of ent.vertices) {
             vertex(p, fit === 'curve' ? (p.curveFit ? 1 : 0) : fit ? 8 : 0);
           }
+          for (const p of frame.slice(1)) vertex(p, 16);
           w(0, 'SEQEND'); w(5, handle()); w(330, currentOwner);
           subEnt();
           return;
@@ -2374,6 +2512,20 @@ export const writeDxf = (drawing: Drawing): string => {
     const base = def.basePoint ?? { x: 0, y: 0, z: 0 };
     const owner = blockRecHandle[nm];
     const xref = def.xref;
+    /* a dynamic block's graph (its visibility states, parameters and
+       actions) has no DXF spelling here: the block is written static,
+       and the drawing's warnings say so, as the DWG writers' `downgraded`
+       does */
+    {
+      const nStates = def.visibilityStates?.length ?? 0;
+      const nParams = def.parameters?.length ?? 0;
+      const nActions = def.actions?.length ?? 0;
+      if (nStates || nParams || nActions) {
+        drawing.warnings.push(`dynamic block ${nm}: `
+          + (nStates ? `${nStates} visibility state(s), ` : '')
+          + `${nParams} parameter(s) and ${nActions} action(s) written static`);
+      }
+    }
     w(0, 'BLOCK'); w(5, handle()); w(330, owner);
     w(100, 'AcDbEntity'); w(8, '0'); w(100, 'AcDbBlockBegin');
     w(2, outBlockName(nm));
@@ -2471,9 +2623,13 @@ export const writeDxf = (drawing: Drawing): string => {
     const isColumnParent = (e: Entity): boolean => e.type === 'mtext'
       && !!e.xdata?.some((g) => g.values.some((v) => 'value' in v
         && v.code === 1000 && v.value === 'ACAD_MTEXT_COLUMNS_BEGIN'));
-    const columnParents = allWritten().filter(isColumnParent)
+    /* the reference's pre-2007 saves list every ACAD_TABLE beside the
+       column MTEXTs (one 330 each, ascending by handle) */
+    const columnParents = allWritten()
+      .filter((e) => isColumnParent(e) || e.type === 'table')
       .map((e) => writtenHandle.get(e))
-      .filter((h): h is string => !!h);
+      .filter((h): h is string => !!h)
+      .sort((a, b) => parseInt(a, 16) - parseInt(b, 16));
     const recomposeHandle = columnParents.length ? handle() : '';
 
     /* ---- the named-objects tree the sealed records hang from. Each
@@ -2498,8 +2654,8 @@ export const writeDxf = (drawing: Drawing): string => {
     synth('ACAD_GROUP', groupDictHandle, groups.map((g) => g.name));
     synth('ACAD_LAYOUT', layoutDictHandle, outLayouts.map(({ l }) => l.name));
     synth('ACAD_MLINESTYLE', mlDictHandle, mlStyles.map((m) => m.name));
-    synth('ACAD_TABLESTYLE', tableStyleDictHandle, ['Standard']);
-    synth('ACAD_MLEADERSTYLE', mleaderStyleDictHandle, ['Standard']);
+    synth('ACAD_TABLESTYLE', tableStyleDictHandle, tableStylesOut.map((s) => s.name));
+    synth('ACAD_MLEADERSTYLE', mleaderStyleDictHandle, mleaderStylesOut.map((s) => s.name));
     synth('ACAD_IMAGE_DICT', imgDictHandle,
       [...imageDefs.keys()].map((_, i) => 'ND_IMAGE_' + (i + 1)));
     for (const [kind, h] of underlayDicts) {
@@ -2738,75 +2894,112 @@ export const writeDxf = (drawing: Drawing): string => {
       });
     }
     if (tableStyleDictHandle) {
-      /* The TABLESTYLE "Standard" every ACAD_TABLE's 342 resolves to,
-         spelled as the reference's own R2000 DXF spells its Standard:
-         the table-level margins and flags, then the data, title and
-         header cell styles — text style and height, alignment, colours,
-         and the six borders (lineweight, visibility, colour) each. The
-         values are the reference's defaults, as the DWG writer's
-         synthesized styles use them. */
+      /* Every TABLESTYLE an ACAD_TABLE's 342 can resolve to, spelled as
+         the reference's own R2000 DXF spells its Standard: the
+         description, flow direction and flags, the margins, the title /
+         header suppression switches, then the data, title and header
+         cell styles — each its text style and height, alignment, text
+         and fill colour, fill switch, and the six borders (lineweight,
+         visibility, colour). Values a style leaves unsaid take the
+         reference's defaults. */
       w(0, 'DICTIONARY'); w(5, tableStyleDictHandle); w(330, rootHandle);
       w(100, 'AcDbDictionary'); w(281, 1);
-      w(3, 'Standard'); w(350, tableStyleHandle);
+      tableStylesOut.forEach((s, i) => { w(3, s.name); w(350, tableStyleHandles[i]); });
       extraEntries('ACAD_TABLESTYLE');
-      w(0, 'TABLESTYLE'); w(5, tableStyleHandle); w(330, tableStyleDictHandle);
-      w(100, 'AcDbTableStyle');
-      w(3, 'Standard'); w(70, 0); w(71, 0);
-      w(40, 0.06); w(41, 0.06);           /* horizontal / vertical margin */
-      w(280, 0); w(281, 0);               /* title and header not suppressed */
-      const stdStyleName = styleHandleOf.has('standard') ? 'Standard' : styles[0].name;
-      for (const [h, align] of [[0.18, 2], [0.25, 5], [0.18, 5]]) {
-        w(7, stdStyleName); w(140, fmt(h)); w(170, align);
-        w(62, 0); w(63, 7); w(283, 0);    /* text colour, fill colour, no fill */
-        for (let k = 0; k < 6; k++) { w(274 + k, -2); w(284 + k, 1); w(64 + k, 0); }
-      }
+      const aciOf = (c: Color | undefined, dflt: number): number =>
+        !c ? dflt : c.kind === 'byBlock' ? 0 : c.kind === 'byLayer' ? 256
+        : c.kind === 'rgb' ? nearestAci(c.rgb) : c.index;
+      const cellOf = (
+        c: TableStyleCell | undefined, height: number, align: number
+      ): TableStyleCell => ({ textHeight: height, alignment: align, ...c });
+      const textStyleNameFor = (name?: string): string =>
+        name && styleHandleOf.has(name.toLowerCase()) ? name
+        : styleHandleOf.has('standard') ? 'Standard' : styles[0].name;
+      tableStylesOut.forEach((s, i) => {
+        w(0, 'TABLESTYLE'); w(5, tableStyleHandles[i]); w(330, tableStyleDictHandle);
+        w(100, 'AcDbTableStyle');
+        w(3, s.description ?? s.name);
+        w(70, s.flowDirection ?? 0); w(71, s.flags ?? 0);
+        w(40, fmt(s.horizontalMargin ?? 0.06)); w(41, fmt(s.verticalMargin ?? 0.06));
+        w(280, s.titleSuppressed ? 1 : 0); w(281, s.headerSuppressed ? 1 : 0);
+        const cells = [cellOf(s.data, 0.18, 2), cellOf(s.title, 0.25, 5), cellOf(s.header, 0.18, 5)];
+        for (const c of cells) {
+          w(7, textStyleNameFor(c.textStyle));
+          w(140, fmt(c.textHeight ?? 0.18)); w(170, c.alignment ?? 5);
+          w(62, aciOf(c.textColor, 0)); w(63, aciOf(c.fillColor, 7));
+          w(283, c.fillOn ? 1 : 0);
+          for (let k = 0; k < 6; k++) {
+            const b = c.borders?.[k] ?? {};
+            w(274 + k, b.lineweight ?? -2);
+            w(284 + k, b.visible === false ? 0 : 1);
+            w(64 + k, aciOf(b.color, 0));
+          }
+        }
+        writeXdata(s);
+      });
     }
     if (mleaderStyleDictHandle) {
-      /* The MLEADERSTYLE "Standard" every MULTILEADER's 340 resolves to
-         — the DWG writer's synthesized style, field for field, in the
-         reference's R2000 DXF spelling: mtext content, two-point straight
-         leaders, ByBlock colours and linetype, 0.09 landing gap, 0.36
-         dogleg, 0.18 arrowhead / text height / align space, 0.125 break
-         size, and the ACAD_MLEADERVER stamp. */
+      /* Every MLEADERSTYLE a MULTILEADER's 340 can resolve to, field for
+         field in the reference's R2000 DXF spelling — the colours as the
+         32-bit form (C0 ByLayer, C1 ByBlock, C2 RGB, C3 ACI), the
+         linetype, arrowhead, text style and block as handles — and the
+         ACAD_MLEADERVER stamp. Values a style leaves unsaid take the
+         reference's defaults: mtext content, two-point straight leaders,
+         ByBlock colours and linetype, 0.09 landing gap, 0.36 dogleg,
+         0.18 arrowhead / text height / align space, 0.125 break size. */
       w(0, 'DICTIONARY'); w(5, mleaderStyleDictHandle); w(330, rootHandle);
       w(100, 'AcDbDictionary'); w(281, 1);
-      w(3, 'Standard'); w(350, mleaderStyleHandle);
+      mleaderStylesOut.forEach((s, i) => { w(3, s.name); w(350, mleaderStyleHandles[i]); });
       extraEntries('ACAD_MLEADERSTYLE');
-      w(0, 'MLEADERSTYLE'); w(5, mleaderStyleHandle); w(330, mleaderStyleDictHandle);
-      w(100, 'AcDbMLeaderStyle');
-      w(170, 2);                          /* content type: mtext */
-      w(171, 1); w(172, 0);               /* draw mleader / leader order */
-      w(90, 2);                           /* max leader points */
-      w(40, 0); w(41, 0);                 /* first / second segment angle */
-      w(173, 1);                          /* leader type: straight */
-      w(91, -1056964608);                 /* line colour: ByBlock */
-      w(340, ltypeHandleOf.get('byblock') ?? '0');
-      w(92, -2);                          /* lineweight: ByBlock */
-      w(290, 1); w(42, 0.09);             /* landing enabled, gap */
-      w(291, 1); w(43, 0.36);             /* dogleg enabled, length */
-      w(3, 'Standard');                   /* description */
-      w(44, 0.18);                        /* arrowhead size */
-      w(300, '');                         /* default mtext contents */
-      w(342, textStyleHandleFor('Standard'));
-      w(174, 1); w(178, 1);               /* attachment left / right */
-      w(175, 1);                          /* text angle type */
-      w(176, 0);                          /* text alignment type */
-      w(93, -1056964608);                 /* text colour: ByBlock */
-      w(45, 0.18);                        /* text height */
-      w(292, 0);                          /* text frame */
-      w(297, 0);                          /* text always left */
-      w(46, 0.18);                        /* align space */
-      w(94, -1056964608);                 /* block colour: ByBlock */
-      w(47, 1); w(49, 1); w(140, 1);      /* block scale */
-      w(293, 1);                          /* use block scale */
-      w(141, 0);                          /* block rotation */
-      w(294, 1);                          /* use block rotation */
-      w(177, 0);                          /* block connection */
-      w(142, 1);                          /* overall scale */
-      w(295, 0);                          /* property changed */
-      w(296, 0);                          /* annotative */
-      w(143, 0.125);                      /* break size */
-      w(1001, 'ACAD_MLEADERVER'); w(1070, 2);
+      const dwordOf = (c: Color | undefined): number => {
+        const u = !c || c.kind === 'byBlock' ? 0xC1000000
+          : c.kind === 'byLayer' ? 0xC0000000
+          : c.kind === 'rgb' ? (0xC2000000 | (c.rgb & 0xffffff))
+          : (0xC3000000 | (c.index & 0xff));
+        return u | 0;
+      };
+      mleaderStylesOut.forEach((s, i) => {
+        w(0, 'MLEADERSTYLE'); w(5, mleaderStyleHandles[i]); w(330, mleaderStyleDictHandle);
+        w(100, 'AcDbMLeaderStyle');
+        w(170, s.contentType ?? 2);         /* content type: mtext */
+        w(171, s.drawMLeaderOrder ?? 1); w(172, s.drawLeaderOrder ?? 0);
+        w(90, s.maxLeaderPoints ?? 2);
+        w(40, fmt(s.firstSegmentAngle ?? 0)); w(41, fmt(s.secondSegmentAngle ?? 0));
+        w(173, s.leaderType ?? 1);          /* leader type: straight */
+        w(91, dwordOf(s.lineColor));
+        w(340, (s.linetype && ltypeHandleOf.get(s.linetype.toLowerCase()))
+          || ltypeHandleOf.get('byblock') || '0');
+        w(92, s.lineweight ?? -2);
+        w(290, s.landing === false ? 0 : 1); w(42, fmt(s.landingGap ?? 0.09));
+        w(291, s.dogleg === false ? 0 : 1); w(43, fmt(s.doglegLength ?? 0.36));
+        w(3, s.description ?? s.name);
+        const arrow = s.arrowBlock ? blockRecHandle[s.arrowBlock] : undefined;
+        if (arrow) w(341, arrow);
+        w(44, fmt(s.arrowSize ?? 0.18));
+        w(300, s.defaultText ?? '');
+        w(342, textStyleHandleFor(s.textStyle));
+        w(174, s.textLeftAttachment ?? 1); w(178, s.textRightAttachment ?? 1);
+        w(175, s.textAngleType ?? 1); w(176, s.textAlignment ?? 0);
+        w(93, dwordOf(s.textColor));
+        w(45, fmt(s.textHeight ?? 0.18));
+        w(292, s.textFrame ? 1 : 0); w(297, s.alwaysAlignLeft ? 1 : 0);
+        w(46, fmt(s.alignSpace ?? 0.18));
+        const blk = s.blockName ? blockRecHandle[s.blockName] : undefined;
+        if (blk) w(343, blk);
+        w(94, dwordOf(s.blockColor));
+        const bs = s.blockScale ?? { x: 1, y: 1, z: 1 };
+        w(47, fmt(bs.x)); w(49, fmt(bs.y)); w(140, fmt(bs.z ?? 1));
+        w(293, s.useBlockScale === false ? 0 : 1);
+        w(141, fmt(s.blockRotation ?? 0));
+        w(294, s.useBlockRotation === false ? 0 : 1);
+        w(177, s.blockConnection ?? 0);
+        w(142, fmt(s.scale ?? 1));
+        w(295, s.propertyChanged ? 1 : 0); w(296, s.annotative ? 1 : 0);
+        w(143, fmt(s.breakSize ?? 0.125));
+        const xd = (s.xdata ?? []).filter((g) => g.appName !== 'ACAD_MLEADERVER');
+        if (xd.length) writeXdata({ xdata: xd });
+        w(1001, 'ACAD_MLEADERVER'); w(1070, 2);
+      });
     }
     if (recomposeHandle) {
       w(0, 'XRECORD'); w(5, recomposeHandle); w(330, rootHandle);

@@ -11,11 +11,13 @@ import type {
   Drawing, Entity,
   Face3DEntity, FileVersion, GeoData, HatchBoundary, HatchDefLine, HatchEdge,
   HatchEntity, HatchGradient, HatchLoopFlags, ImageEntity, Layer, LeaderEntity, Linetype,
-  Group as EntityGroup, Layout, MeshEntity, MLeaderEntity, MLeaderLeader,
-  MLineEntity, MLineStyle,
+  Group as EntityGroup, Layout, MeshEntity, MLeaderAttribute, MLeaderEntity,
+  MLeaderLeader,
+  MLeaderStyle, MLineEntity, MLineStyle,
   MLineStyleElement, MLineVertex, MTextEntity, Point2, Point3,
   PolylineEntity, PolylineVertex, ProxyEntity, ProxyObject, ShapeEntity,
-  SplineEntity, TableCell, TableEntity, TextEntity,
+  SplineEntity, TableCell, TableEntity, TableStyle, TableStyleBorder,
+  TableStyleCell, TextEntity,
   TextHAlign, TextStyle, TextVAlign, ToleranceEntity, UnderlayEntity,
   UnknownEntity, UnknownObject,
   View, VPort, XdataGroup, XdataValue, XRecord
@@ -261,6 +263,10 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
      multileader's 341/344 block and 340/343 text style resolve through. */
   const blockRecordName = new Map<string, string>();
   const styleNameByHandle = new Map<string, string>();
+  const ltypeNameByHandle = new Map<string, string>();
+  /* ATTDEF tags by handle: what a multileader's block labels (330) and a
+     table's block-cell attributes (331) name */
+  const attdefTagByHandle = new Map<string, string>();
   /* The block each BLOCK_RECORD handle defines, in the model's naming
      (the numbered extra paper spaces included), and the LAYOUT objects
      waiting to be linked to theirs once every section is in. */
@@ -767,7 +773,24 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
       const flags = q.int(70, 0);
       if ((flags & 1) === 1) e.invisible = true;
       if ((flags & 2) === 2) e.constant = true;
+      /* the labels that name a definition by handle (multileader block
+         labels, table block cells) get its tag from here */
+      if (kind === 'attdef') {
+        const h = q.str(5, '').trim().toUpperCase();
+        const tag = q.str(2, '').trim();
+        if (h && tag) attdefTagByHandle.set(h, tag);
+      }
       return e;
+    };
+    /** Attribute values naming an ATTDEF by handle, resolved to the
+     *  definition's tag once every block has been read. */
+    const pendingAttdefTags: { attdef?: string; tag?: string }[] = [];
+    const aciColor = (v: string): Color | undefined => {
+      const n = parseInt(v, 10);
+      if (!isFinite(n)) return undefined;
+      if (n === 0) return { kind: 'byBlock' };
+      if (n === 256) return { kind: 'byLayer' };
+      return n > 0 && n < 256 ? { kind: 'aci', index: n } : undefined;
     };
 
     /* recognized but not modeled: kept, not lost. Beyond the common
@@ -808,6 +831,18 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
       let chunks = '';
       let styleHandle = '';
       let dir: Point3 | undefined;
+      /* the table-level override word (93) and the values that follow
+         it: 280 title suppressed, 281 header suppressed, 70 flow
+         direction, 40/41 the cell margins — the reference's own R2000
+         export of a header-less legend spells `93 3, 280 1, 281 1` */
+      let afterFlags = false;
+      const tableOv: Partial<TableEntity> = {};
+      let attr: { attdef?: string; tag?: string; index?: number; text: string } | null = null;
+      const edgeOf = (c: number): 'top' | 'right' | 'bottom' | 'left' | undefined =>
+        c === 69 || c === 279 || c === 289 ? 'top'
+        : c === 65 || c === 275 || c === 285 ? 'right'
+        : c === 66 || c === 276 || c === 286 ? 'bottom'
+        : c === 68 || c === 278 || c === 288 ? 'left' : undefined;
       for (const [c, v] of g) {
         if (c === 100) { inTable = /^AcDbTable$/i.test(v.trim()); continue; }
         if (!inTable) continue;
@@ -819,6 +854,7 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
           cells.push(cell);
           inValue = false;
           chunks = '';
+          attr = null;
           continue;
         }
         if (!cell) {
@@ -830,14 +866,40 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
           else if (c === 11) dir = { x: isFinite(nv) ? nv : 1, y: 0, z: 0 };
           else if (c === 21 && dir) dir.y = isFinite(nv) ? nv : 0;
           else if (c === 31 && dir) dir.z = isFinite(nv) ? nv : 0;
+          else if (c === 93) afterFlags = true;
+          else if (afterFlags && c === 280) { if (parseInt(v, 10) === 1) tableOv.titleSuppressed = true; }
+          else if (afterFlags && c === 281) { if (parseInt(v, 10) === 1) tableOv.headerSuppressed = true; }
+          else if (afterFlags && c === 70) { const n = parseInt(v, 10); if (isFinite(n)) tableOv.flowDirection = n; }
+          else if (afterFlags && c === 40) { if (isFinite(nv)) tableOv.horizontalMargin = nv; }
+          else if (afterFlags && c === 41) { if (isFinite(nv)) tableOv.verticalMargin = nv; }
           continue;
         }
         if (c === 301) { inValue = /CELL_VALUE/i.test(v); continue; }
         if (c === 304 && /ACVALUE_END/i.test(v)) { inValue = false; continue; }
+        const edge = edgeOf(c);
         if (c === 175) { const n = parseInt(v, 10); if (n > 1) cell.spanColumns = n; }
         else if (c === 176) { const n = parseInt(v, 10); if (n > 1) cell.spanRows = n; }
         else if (c === 170) { const n = parseInt(v, 10); if (isFinite(n)) cell.alignment = n; }
         else if (c === 140) { if (nv > 0) cell.textHeight = nv; }
+        else if (c === 173) { if (parseInt(v, 10) === 1) cell.merged = true; }
+        else if (c === 174) { if (parseInt(v, 10) === 1) cell.autofit = true; }
+        else if (c === 145) { if (isFinite(nv) && nv !== 0) cell.rotation = nv; }
+        else if (c === 7) { const nm = decodeCadText(v.trim()); if (nm) cell.textStyle = nm; }
+        else if (c === 63) { const col = aciColor(v); if (col) cell.fillColor = col; }
+        else if (c === 64) { const col = aciColor(v); if (col) cell.textColor = col; }
+        else if (c === 283) cell.fillEnabled = parseInt(v, 10) === 0;   /* "fill none" */
+        else if (edge) {
+          const b = (cell.borders ??= {})[edge] ??= {};
+          if (c < 100) { const col = aciColor(v); if (col) b.color = col; }
+          else if (c < 280) { const n = parseInt(v, 10); if (isFinite(n)) b.lineweight = n; }
+          else b.visible = parseInt(v, 10) === 0;
+        }
+        else if (c === 331) {
+          /* the R2000 spelling carries no index: the position stands in */
+          attr = { attdef: v.trim().toUpperCase(), index: (cell.attributes?.length ?? 0) + 1, text: '' };
+          (cell.attributes ??= []).push(attr);
+          pendingAttdefTags.push(attr);
+        } else if (c === 300 && attr && !inValue) { attr.text = decodeCadText(v); attr = null; }
         else if (c === 340) {
           const nm = blockRecordName.get(v.trim().toUpperCase());
           if (nm) cell.blockName = nm;
@@ -859,7 +921,8 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
       const e: TableEntity = {
         ...baseProps(q), type: 'table',
         position: pt3(q, 10, 20, 30),
-        numRows, numColumns, rowHeights, columnWidths, cells
+        numRows, numColumns, rowHeights, columnWidths, cells,
+        ...tableOv
       };
       if (dir) e.direction = dir;
       const bn = decodeCadText(q.str(2, ''));
@@ -889,13 +952,17 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
       let styleHandle = '', textStyleHandle = '', blockHandle = '';
       let hasText: boolean | undefined, hasBlock: boolean | undefined;
       let text: string | undefined;
+      /* the block labels: 330 opens one (the ATTDEF's handle), 177 its
+         index, 44 its width, 302 its value — after the annotative flag
+         (293) in the reference's own export */
+      let label: MLeaderAttribute | null = null;
       const num = (v: string): number => { const n = parseFloat(v); return isFinite(n) ? n : 0; };
       for (const [c, v] of g) {
         if (c === 100) { inBody = /AcDbMLeader/i.test(v); continue; }
         if (!inBody) continue;
         const s = v.trim();
         if (c === 300 && /^CONTEXT_DATA\{/i.test(s)) { state = 'ctx'; continue; }
-        if (c === 302 && /^LEADER\{/i.test(s)) {
+        if (c === 302 && state === 'ctx' && /^LEADER\{/i.test(s)) {
           leader = { lines: [] };
           e.leaders.push(leader);
           state = 'leader';
@@ -956,6 +1023,14 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
               if (a > 0) e.arrowSize = a;
             } else if (c === 343 && !textStyleHandle) textStyleHandle = s.toUpperCase();
             else if (c === 344 && !blockHandle) blockHandle = s.toUpperCase();
+            else if (c === 330) {
+              label = { index: (e.attributes?.length ?? 0) + 1, text: '' };
+              if (s && s !== '0') label.attdef = s.toUpperCase();
+              (e.attributes ??= []).push(label);
+              pendingAttdefTags.push(label);
+            } else if (label && c === 177) { const n = parseInt(v, 10); if (isFinite(n)) label.index = n; }
+            else if (label && c === 44) { const wd = num(v); if (wd) label.width = wd; }
+            else if (label && c === 302) label.text = decodeCadText(v);
             break;
         }
       }
@@ -1666,6 +1741,8 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
             } else if (tName === 'LTYPE') {
               const rec2: Linetype = { name: nm, pattern: q.nums(49) };
               if (q.int(70, 0) & 16) rec2.xrefDependent = true;
+              const lh = q.str(5, '');
+              if (lh) ltypeNameByHandle.set(lh.toUpperCase(), nm);
               const d = q.str(3, '');
               if (d) rec2.description = d;
               drawing.linetypes.push(rec2);
@@ -2042,6 +2119,128 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
             }
           }
           drawing.geoData ??= geo;
+        } else if (type === 'TABLESTYLE') {
+          /* The reference's spelling: 280 version, 3 description, 70
+             flow direction, 71 flags, 40/41 margins, 280/281 title and
+             header suppression, then the data, title and header cell
+             styles in that order — each opened by its 7 text style: 140
+             height, 170 alignment, 62/63 text and fill colour, 283 fill
+             switch, 90/91/1 value type and format, and the six borders
+             as 274…279 lineweights, 284…289 visibilities, 64…69 colours.
+             The name is the ACAD_TABLESTYLE entry, settled at the end. */
+          const aci = (n: number): Color => n === 0 ? { kind: 'byBlock' }
+            : n === 256 || n < 0 ? { kind: 'byLayer' } : { kind: 'aci', index: n & 0xff };
+          const style: TableStyle = { name: 'Standard' };
+          const cells: TableStyleCell[] = [];
+          let cell: TableStyleCell | null = null;
+          /* the R2007+ spelling opens with a 280 version word the R2000
+             one lacks: only a 280 past the margins is the title switch */
+          let inBody = false, pastMargins = false;
+          for (const [c, v] of rec.g) {
+            if (c === 100) { inBody = /AcDbTableStyle/i.test(v); continue; }
+            if (!inBody) continue;
+            const s = v.trim();
+            const nv = parseFloat(s), iv = parseInt(s, 10);
+            if (c === 7) {
+              cell = {
+                textStyle: decodeCadText(s) || undefined,
+                borders: Array.from({ length: 6 }, (): TableStyleBorder => ({}))
+              };
+              cells.push(cell);
+              continue;
+            }
+            if (!cell) {
+              if (c === 3) { const d = decodeCadText(s); if (d) style.description = d; }
+              else if (c === 70) style.flowDirection = iv;
+              else if (c === 71) style.flags = iv;
+              else if (c === 40) style.horizontalMargin = nv;
+              else if (c === 41) { style.verticalMargin = nv; pastMargins = true; }
+              else if (c === 280) { if (pastMargins) style.titleSuppressed = iv !== 0; }
+              else if (c === 281) style.headerSuppressed = iv !== 0;
+              continue;
+            }
+            if (c === 140) cell.textHeight = nv;
+            else if (c === 170) cell.alignment = iv;
+            else if (c === 62) cell.textColor = aci(iv);
+            else if (c === 63) cell.fillColor = aci(iv);
+            else if (c === 283) cell.fillOn = iv !== 0;
+            else if (c === 90) cell.dataType = iv;
+            else if (c === 91) cell.unitType = iv;
+            else if (c === 1) { if (s) cell.format = s; }
+            else if (c >= 274 && c <= 279) cell.borders![c - 274].lineweight = iv;
+            else if (c >= 284 && c <= 289) cell.borders![c - 284].visible = iv !== 0;
+            else if (c >= 64 && c <= 69) cell.borders![c - 64].color = aci(iv);
+          }
+          if (cells[0]) style.data = cells[0];
+          if (cells[1]) style.title = cells[1];
+          if (cells[2]) style.header = cells[2];
+          const h = q.str(5, '');
+          if (h) {
+            style.handle = h.toUpperCase();
+            pendingDictNames.push({ h: style.handle, set: (nm) => { style.name = nm; } });
+          }
+          const xd = parseXdata(rec.g);
+          if (xd) style.xdata = xd;
+          (drawing.tableStyles ??= []).push(style);
+        } else if (type === 'MLEADERSTYLE') {
+          /* the reference's spelling, one group per field; the colours
+             are the 32-bit form (C0 ByLayer, C1 ByBlock, C2 RGB, C3 ACI),
+             the linetype, arrowhead, text style and block are handles */
+          const dword = (n: number | null): Color | undefined => {
+            if (n === null) return undefined;
+            const u = n >>> 0, m = u >>> 24;
+            return m === 0xc2 ? { kind: 'rgb', rgb: u & 0xffffff }
+              : m === 0xc3 ? { kind: 'aci', index: u & 0xff }
+              : m === 0xc0 ? { kind: 'byLayer' } : { kind: 'byBlock' };
+          };
+          const opt = (code: number): number | undefined => q.numOr(code) ?? undefined;
+          const flag = (code: number): boolean | undefined => {
+            const n = q.numOr(code);
+            return n === null ? undefined : n !== 0;
+          };
+          const style: MLeaderStyle = {
+            name: 'Standard',
+            contentType: opt(170), drawMLeaderOrder: opt(171), drawLeaderOrder: opt(172),
+            maxLeaderPoints: opt(90), firstSegmentAngle: opt(40), secondSegmentAngle: opt(41),
+            leaderType: opt(173), lineColor: dword(q.numOr(91)), lineweight: opt(92),
+            landing: flag(290), landingGap: opt(42), dogleg: flag(291), doglegLength: opt(43),
+            arrowSize: opt(44),
+            textLeftAttachment: opt(174), textRightAttachment: opt(178),
+            textAngleType: opt(175), textAlignment: opt(176),
+            textColor: dword(q.numOr(93)), textHeight: opt(45),
+            textFrame: flag(292), alwaysAlignLeft: flag(297), alignSpace: opt(46),
+            blockColor: dword(q.numOr(94)),
+            useBlockScale: flag(293), blockRotation: opt(141), useBlockRotation: flag(294),
+            blockConnection: opt(177), scale: opt(142),
+            propertyChanged: flag(295), annotative: flag(296), breakSize: opt(143),
+            attachmentDirection: opt(271), bottomAttachment: opt(272), topAttachment: opt(273)
+          };
+          for (const k of Object.keys(style) as (keyof MLeaderStyle)[]) {
+            if (style[k] === undefined) delete style[k];
+          }
+          if (q.numOr(47) !== null) {
+            style.blockScale = { x: q.num(47, 1), y: q.num(49, 1), z: q.num(140, 1) };
+          }
+          const desc = decodeCadText(q.str(3, ''));
+          if (desc) style.description = desc;
+          const dt = q.str(300, '');
+          if (dt) style.defaultText = decodeCadText(dt);
+          const lt = ltypeNameByHandle.get(q.str(340, '').toUpperCase());
+          if (lt) style.linetype = lt;
+          const arrow = blockRecordName.get(q.str(341, '').toUpperCase());
+          if (arrow) style.arrowBlock = arrow;
+          const ts = styleNameByHandle.get(q.str(342, '').toUpperCase());
+          if (ts) style.textStyle = ts;
+          const bn = blockRecordName.get(q.str(343, '').toUpperCase());
+          if (bn) style.blockName = bn;
+          const h = q.str(5, '');
+          if (h) {
+            style.handle = h.toUpperCase();
+            pendingDictNames.push({ h: style.handle, set: (nm) => { style.name = nm; } });
+          }
+          const xd = parseXdata(rec.g);
+          if (xd) style.xdata = xd;
+          (drawing.mleaderStyles ??= []).push(style);
         } else if (type === 'MLINESTYLE') {
           const elements: MLineStyleElement[] = [];
           let cur: MLineStyleElement | null = null;
@@ -2203,6 +2402,10 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
     for (const { h, set } of pendingDictNames) {
       const nm = dictEntryName.get(h);
       if (nm) set(nm);
+    }
+    for (const a of pendingAttdefTags) {
+      const tag = a.attdef ? attdefTagByHandle.get(a.attdef) : undefined;
+      if (tag) a.tag = tag;
     }
 
     for (const { e, defHandle } of pendingImages) {

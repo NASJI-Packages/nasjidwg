@@ -294,8 +294,11 @@ describe('reader pins from the real-world sweep (campaign 6)', () => {
       w.rs(2); w.rc(0); w.rc(0x41); w.rc(0x42);   /* len, codepage, "AB" */
     }, () => { });
     const raw = decodeObjectBody(rec, ctx('R2000'));
-    expect(raw?.unknownObject).toBeUndefined();
     expect((raw?.xrecord?.values.length ?? 0)).toBeGreaterThan(0);
+    /* decoded, not failed: the seal beside the values is the dual one an
+       XRECORD always carries now (the record travels under its owner) */
+    expect(raw?.unknownObject?.typeCode).toBe(79);
+    expect(raw?.unknownObject?.data).toBeDefined();
   });
 });
 

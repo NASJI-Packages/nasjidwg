@@ -9,7 +9,8 @@
 
 import type {
   BlockDefinition, Drawing, Entity, FileVersion, HeaderUcs, Layer, MeshEntity,
-  PolylineEntity, PolylineVertex, TextStyle, XdataGroup
+  MLeaderStyle, PolylineEntity, PolylineVertex, TableStyle, TableStyleCell,
+  TextStyle, XdataGroup
 } from '../core/model.js';
 import { emptyDrawing } from '../core/model.js';
 import {
@@ -25,8 +26,17 @@ import { crc16 } from './bitwriter.js';
 import { decodeProxyGraphics } from './proxy.js';
 import { readPreR13 } from './pre13.js';
 import {
-  decodeObjectBody, encodingGroup, makeContext, toBase64, type RawObject
+  decodeObjectBody, encodingGroup, makeContext, toBase64, type RawObject,
+  type RawTableStyleCell
 } from './objects.js';
+
+/** The named-object sub-dictionaries whose contents the model carries as
+ *  its own (layouts, groups, line/table/multileader styles): consumed on
+ *  read and rebuilt by the writers, so they are not sealed. Every other
+ *  dictionary — the rest of the tree and every extension dictionary — is
+ *  retained sealed with its entries and travels under its owner. */
+const MODELED_DICTS = new Set(['ACAD_LAYOUT', 'ACAD_GROUP', 'ACAD_MLINESTYLE',
+  'ACAD_TABLESTYLE', 'ACAD_MLEADERSTYLE']);
 
 export interface DwgReadOptions {
   /** Verify per-object and section CRCs; mismatches become warnings. */
@@ -288,6 +298,7 @@ export const readDwg = (
           handle: raw.handle.toString(16).toUpperCase()
         };
         if (t.xrefDependent) layer.xrefDependent = true;
+        if (raw.xdict) layer.xdict = raw.xdict.toString(16).toUpperCase();
         drawing.layers.push(layer);
         if (t.ltypeHandle) {
           /* patched to a name after ltypes resolve */
@@ -302,7 +313,8 @@ export const readDwg = (
           description: t.description,
           pattern: t.pattern ?? [],
           handle: raw.handle.toString(16).toUpperCase(),
-          ...(t.xrefDependent ? { xrefDependent: true } : {})
+          ...(t.xrefDependent ? { xrefDependent: true } : {}),
+          ...(raw.xdict ? { xdict: raw.xdict.toString(16).toUpperCase() } : {})
         });
         break;
       case 'style':
@@ -317,6 +329,7 @@ export const readDwg = (
           };
           if (t.shapeFile) st.shapeFile = true;
           if (t.xrefDependent) st.xrefDependent = true;
+          if (raw.xdict) st.xdict = raw.xdict.toString(16).toUpperCase();
           if (t.xdata) styleEed.push({ st, xd: t.xdata });
           drawing.textStyles.push(st);
         }
@@ -402,6 +415,11 @@ export const readDwg = (
         ?? (pending.length === tableContents.length ? tableContents[i] : undefined);
       if (!tc?.tableContent || !raw.entity) continue;
       const previous = raw.entity;
+      /* the handle maps ride the companion; the entity pass below
+         resolves them like the inline grid's */
+      const { cellBlocks, cellTextStyles, ...grid } = tc.tableContent;
+      if (cellBlocks) raw.tableCellBlocks = cellBlocks;
+      if (cellTextStyles) raw.tableCellTextStyles = cellTextStyles;
       raw.entity = {
         type: 'table',
         layer: previous.layer, color: previous.color,
@@ -411,7 +429,7 @@ export const readDwg = (
           ? previous.position : { x: 0, y: 0, z: 0 },
         direction: previous.type === 'table'
           ? previous.direction : { x: 1, y: 0, z: 0 },
-        ...tc.tableContent
+        ...grid
       };
     }
   }
@@ -668,12 +686,24 @@ export const readDwg = (
       if (shapes.length) e.graphics = shapes;
       e.graphicsData = toBase64(raw.proxyGraphics);
     }
+    /* a label that names an ATTDEF by handle gets the definition's tag */
+    const attTagOf = (a: { attdef?: string; tag?: string }): void => {
+      if (!a.attdef || a.tag) return;
+      const tag = objects.get(parseInt(a.attdef, 16))?.attTag;
+      if (tag) a.tag = tag;
+    };
     if (e.type === 'mleader' && raw.mleaderBlock !== undefined) {
       const bh = blockHeaderByHandle.get(raw.mleaderBlock);
       if (bh?.table?.name) e.blockName = bh.table.name;
     }
+    if (e.type === 'mleader' && e.attributes) e.attributes.forEach(attTagOf);
     if (e.type === 'dimension' && raw.dimBlock !== undefined) {
       const bh = blockHeaderByHandle.get(raw.dimBlock);
+      if (bh?.table?.name) e.blockName = bh.table.name;
+    }
+    if (e.type === 'table' && raw.tableBlock !== undefined) {
+      /* the anonymous *T block holding the table's drawn geometry */
+      const bh = blockHeaderByHandle.get(raw.tableBlock);
       if (bh?.table?.name) e.blockName = bh.table.name;
     }
     if (e.type === 'table' && raw.tableCellBlocks) {
@@ -683,6 +713,17 @@ export const readDwg = (
         const cell = e.cells[index];
         if (name && cell) cell.blockName = name;
       }
+    }
+    if (e.type === 'table' && raw.tableCellTextStyles) {
+      /* a cell overriding its text style names the STYLE record */
+      for (const [index, handle] of raw.tableCellTextStyles) {
+        const nm = styleName.get(handle);
+        const cell = e.cells[index];
+        if (nm && cell) cell.textStyle = nm;
+      }
+    }
+    if (e.type === 'table') {
+      for (const cell of e.cells) cell?.attributes?.forEach(attTagOf);
     }
     if (e.type === 'dimension' && raw.dimStyleHandle !== undefined) {
       const nm = dimStyleName.get(raw.dimStyleHandle);
@@ -762,6 +803,7 @@ export const readDwg = (
       entities,
       handle: handle.toString(16).toUpperCase()
     };
+    if (bhRaw.xdict) def.xdict = bhRaw.xdict.toString(16).toUpperCase();
     if (t.xrefPath !== undefined) def.xref = { path: t.xrefPath, ...(t.xrefOverlay ? { overlay: true } : {}) };
     drawing.blocks[name] = def;
   }
@@ -892,6 +934,57 @@ export const readDwg = (
       if (nm && !dictNameOf.has(h)) dictNameOf.set(h, nm);
     });
   }
+  /* a table's / multileader's style is the ACAD_TABLESTYLE /
+     ACAD_MLEADERSTYLE entry its style handle is listed under */
+  for (const raw of order) {
+    const e = raw.entity;
+    if (!e) continue;
+    if (e.type === 'mleader' && raw.mleaderStyle) {
+      const nm = dictNameOf.get(raw.mleaderStyle);
+      if (nm) e.styleName = nm;
+    } else if (e.type === 'table' && raw.tableStyle) {
+      const nm = dictNameOf.get(raw.tableStyle);
+      if (nm) e.styleName = nm;
+    }
+  }
+
+  /* ---- the named-objects tree: the root dictionary (the header names
+     it; a dictionary owned by nothing is a root too) and every
+     dictionary reachable from it through entries alone. That tree is
+     the reader's own: its dictionaries are consumed, its records are
+     listed by name and re-anchored by the writers. Every OTHER
+     dictionary is an extension dictionary — of an entity, a table
+     record, an object, or a dictionary that is itself one — and the
+     chain below it belongs to its owner: those travel sealed, with the
+     XRECORDs they list, so a rewrite can hang them back where they
+     were. ---- */
+  const nodTree = new Set<number>();
+  /** Each tree dictionary's place: the keys from the root down to it
+   *  (`[]` for the root itself) — a sealed object owned by one of them
+   *  carries it as `dictPath`, the DXF reader's convention. */
+  const dictPathOf = new Map<number, string[]>();
+  {
+    const roots: number[] = [];
+    if (hv?.nodHandle) roots.push(hv.nodHandle);
+    for (const raw of order) {
+      if (raw.dictionary && !raw.owner) roots.push(raw.handle);
+    }
+    const queue: [number, string[]][] = roots.map((h) => [h, []]);
+    while (queue.length) {
+      const [h, path] = queue.pop()!;
+      if (nodTree.has(h)) continue;
+      nodTree.add(h);
+      dictPathOf.set(h, path);
+      const d = objects.get(h)?.dictionary;
+      if (!d) continue;
+      d.handles.forEach((eh, i) => {
+        if (objects.get(eh)?.dictionary && !nodTree.has(eh)) {
+          queue.push([eh, [...path, d.names[i]]]);
+        }
+      });
+    }
+  }
+  const hexOf = (h: number): string => h.toString(16).toUpperCase();
 
   for (const raw of order) {
     if (raw.xrecord && raw.xrecord.values.length) {
@@ -920,13 +1013,35 @@ export const readDwg = (
       });
     }
     if (raw.unknownObject) {
-      nameApps(raw.unknownObject.xdata);
-      (drawing.unknownObjects ??= []).push({
-        handle: raw.handle.toString(16).toUpperCase(),
-        name: dictNameOf.get(raw.handle),
-        ownerHandle: raw.owner?.toString(16).toUpperCase(),
-        ...raw.unknownObject
-      });
+      /* a dictionary of the named-objects tree, and an XRECORD one of
+         them lists, are the reader's own (consumed / re-anchored); the
+         seal is kept for everything else — the extension dictionaries
+         and their chains */
+      const treePath = raw.dictionary ? dictPathOf.get(raw.handle) : undefined;
+      const ownTree = treePath?.length === 0
+        || (treePath?.length === 1 && MODELED_DICTS.has(treePath[0].toUpperCase()))
+        || (raw.xrecord && raw.owner !== undefined && dictPathOf.get(raw.owner)?.length === 0);
+      if (!ownTree) {
+        nameApps(raw.unknownObject.xdata);
+        const d = raw.dictionary;
+        (drawing.unknownObjects ??= []).push({
+          handle: hexOf(raw.handle),
+          name: dictNameOf.get(raw.handle),
+          ownerHandle: raw.owner?.toString(16).toUpperCase(),
+          ...(raw.xdict ? { xdict: hexOf(raw.xdict) } : {}),
+          ...(raw.reactors?.length ? { reactors: raw.reactors.map(hexOf) } : {}),
+          ...(raw.owner !== undefined && dictPathOf.has(raw.owner)
+            ? { dictPath: dictPathOf.get(raw.owner) } : {}),
+          ...(d ? {
+            entries: d.names.map((name, i) => ({
+              name, handle: hexOf(d.handles[i]), code: d.codes[i]
+            })),
+            ...(d.hardOwner !== undefined ? { hardOwner: d.hardOwner } : {}),
+            ...(d.cloning !== undefined ? { cloning: d.cloning } : {})
+          } : {}),
+          ...raw.unknownObject
+        });
+      }
     }
     if (raw.layout) {
       const l = raw.layout;
@@ -934,6 +1049,8 @@ export const readDwg = (
         name: l.name,
         tabOrder: l.tabOrder,
         blockName: blockNameOf(l.blockHandle),
+        ...(l.blockHandle
+          ? { blockHandle: l.blockHandle.toString(16).toUpperCase() } : {}),
         limMin: l.limMin, limMax: l.limMax,
         extMin: l.extMin, extMax: l.extMax, insBase: l.insBase,
         paperSize: l.paperSize, plotStyleSheet: l.plotStyleSheet
@@ -962,6 +1079,58 @@ export const readDwg = (
           linetype: el.ltypeHandle ? ltypeName.get(el.ltypeHandle) : undefined
         }))
       });
+    }
+    if (raw.tableStyleObj) {
+      /* named by its ACAD_TABLESTYLE entry; the cell styles' text styles
+         and border linetypes resolve through the tables read above */
+      const ts = raw.tableStyleObj;
+      const cell = (c?: RawTableStyleCell): TableStyleCell | undefined => {
+        if (!c) return undefined;
+        const out: TableStyleCell = {
+          textStyle: c.textStyleHandle ? styleName.get(c.textStyleHandle) : undefined,
+          textHeight: c.textHeight, alignment: c.alignment,
+          textColor: c.textColor, fillColor: c.fillColor, fillOn: c.fillOn,
+          borders: c.borders?.map((b) => ({
+            lineweight: b.lineweight, visible: b.visible, color: b.color
+          }))
+        };
+        if (c.dataType !== undefined) out.dataType = c.dataType;
+        if (c.unitType !== undefined) out.unitType = c.unitType;
+        if (c.format) out.format = c.format;
+        return out;
+      };
+      nameApps(raw.xdata);
+      const style: TableStyle = {
+        name: dictNameOf.get(raw.handle) ?? ts.description ?? 'Standard',
+        handle: raw.handle.toString(16).toUpperCase(),
+        description: ts.description,
+        flowDirection: ts.flowDirection, flags: ts.flags,
+        horizontalMargin: ts.horizontalMargin, verticalMargin: ts.verticalMargin,
+        titleSuppressed: ts.titleSuppressed, headerSuppressed: ts.headerSuppressed,
+        data: cell(ts.data), title: cell(ts.title), header: cell(ts.header)
+      };
+      if (raw.xdata) style.xdata = raw.xdata;
+      (drawing.tableStyles ??= []).push(style);
+    }
+    if (raw.mleaderStyleObj) {
+      const { ltypeHandle, arrowHandle, textStyleHandle, blockHandle, ...rest } =
+        raw.mleaderStyleObj;
+      nameApps(raw.xdata);
+      const style: MLeaderStyle = {
+        name: dictNameOf.get(raw.handle) ?? rest.description ?? 'Standard',
+        handle: raw.handle.toString(16).toUpperCase(),
+        ...rest
+      };
+      const lt = ltypeHandle ? ltypeName.get(ltypeHandle) : undefined;
+      if (lt) style.linetype = lt;
+      const arrow = arrowHandle ? blockNameOf(arrowHandle) : undefined;
+      if (arrow) style.arrowBlock = arrow;
+      const tsn = textStyleHandle ? styleName.get(textStyleHandle) : undefined;
+      if (tsn) style.textStyle = tsn;
+      const bn = blockHandle ? blockNameOf(blockHandle) : undefined;
+      if (bn) style.blockName = bn;
+      if (raw.xdata) style.xdata = raw.xdata;
+      (drawing.mleaderStyles ??= []).push(style);
     }
     if (raw.ucs) (drawing.ucs ??= []).push(raw.ucs);
     if (raw.view) (drawing.views ??= []).push(raw.view);

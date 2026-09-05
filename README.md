@@ -241,9 +241,15 @@ visibility states (read *and* written back as a real
 BLOCKVISIBILITYPARAMETER) and parameters — a dynamic block's definition
 comes back under its true name, as the reference shows it — every
 layout (the further paper spaces travel as `*Paper_Space<n>` blocks with
-their LAYOUT objects, through DXF too), groups, mline styles, UCS, views,
-viewports, appids, dimension styles, image and underlay definitions,
-geographic placement, XRECORDs and XDATA. An external reference's block
+their LAYOUT objects, through DXF too), groups, mline styles, table
+styles and multileader styles (`drawing.tableStyles` /
+`drawing.mleaderStyles`, with every table and multileader naming its own
+through `styleName` — margins, text heights, colours, borders, landing
+gaps and arrowheads come back as the source drew them, in DWG and DXF,
+and are written back so the reference reads them rather than its
+defaults), UCS, views, viewports, appids, dimension styles, image and
+underlay definitions, geographic placement, XRECORDs and XDATA. An
+external reference's block
 is read with its path and overlay flag (`BlockDefinition.xref`); the
 layers, linetypes and styles that belong to it (`xref|name`) are read
 with `xrefDependent` set and left home by every writer, because they
@@ -258,6 +264,17 @@ application payload bit-for-bit, its cached display list byte-for-byte
 application class. The same sealed retention covers *every* record the
 library does not model — and even a known record whose decode fails: it
 rewinds and is kept whole instead of being reduced to its common data.
+And it keeps its place: an entity's extension dictionary (`xdict`), a
+block record's, a layer's, every sub-dictionary of the named-object tree
+is sealed with its entries decoded, the XRECORDs it lists bit-exact, and
+a rewrite hangs each sealed object back under its original owner
+whenever that owner is in the file — fields under their text, a clipped
+xref's SPATIAL_FILTER under its INSERT, a dynamic block's whole
+evaluation graph under its block record, a constraint network with its
+dependencies as reactors on the entities they watch. Under
+`preserveHandles` every link keeps its source number, so the chains the
+reference checks survive any number of rewrites; only a record whose
+owner is not written is re-homed under the named objects dictionary.
 
 Nothing is dropped quietly. A writer that cannot encode something
 reports it in a `skipped` list; something it writes in a simpler form

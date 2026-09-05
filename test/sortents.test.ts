@@ -66,8 +66,15 @@ describe('SORTENTSTABLE through DWG', () => {
       expect(back.warnings).toEqual([]);
       expect(types(back)).toEqual(['point', 'line', 'circle']);
       expect(back.entities.map((e) => e.handle)).toEqual(['30', '20', '10']);
-      /* nothing sealed: the table is consumed, not carried as an object */
-      expect(back.unknownObjects ?? []).toEqual([]);
+      /* the table is consumed, not carried as an object; what is carried
+         is the model-space block's extension dictionary that listed it —
+         sealed with its one entry, owned by the block record, so a
+         rewrite hangs it back where it was */
+      const sealed = back.unknownObjects ?? [];
+      expect(sealed.map((u) => u.sourceType)).toEqual(['DICTIONARY']);
+      expect(sealed[0].entries?.map((en) => en.name)).toEqual(['ACAD_SORTENTS']);
+      expect(sealed[0].ownerHandle)
+        .toBe(back.layouts?.find((l) => /^model$/i.test(l.name))?.blockHandle);
     });
 
   it('the table survives a second preserved generation', () => {

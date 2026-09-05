@@ -213,3 +213,57 @@ export const mtextPlainText = (frags: readonly MTextFragment[]): string =>
     (f.newParagraph ? '\n' : '') +
     (f.stacked ? f.stacked.upper + '/' + f.stacked.lower : f.text)
   ).join('');
+
+/** The paragraph codes (`\p…;`) an older release can show.
+ *
+ *  The 2008 release of the reference added paragraph alignment, spacing
+ *  before/after and typed tab stops, spelled `\px…;` with every distance
+ *  in multiples of the text height; the 2004 release knew indents and
+ *  plain tab stops (`\pi`, `\pl`, `\pr`, `\pt`) in drawing units; 2000
+ *  and R14 knew no paragraph codes at all. Saved into an older release,
+ *  the reference rewrites the text the way that release can show it
+ *  (and keeps the original under an ACAD_MTEXT_2008_RT xrecord in the
+ *  entity's extension dictionary). Measured on its own saves of a text
+ *  spelled `\pxqc;…\P\pxi-3,l3,t3;…` at height 2.5: the 2004 file
+ *  carries `\pi…,l7.5,t…;` — the distances scaled by the height, the
+ *  alignment and spacing gone (emulated by indents the reference
+ *  computes from the glyph widths, which is not attempted here) — and
+ *  a text without any `\px` keeps its 2004 codes untouched; the 2000
+ *  and R14 files carry no `\p…;` code at all (tabs emulated by widened
+ *  spaces there, again not attempted). `release` is the target
+ *  (13, 14, 2000, 2004, …); 2007 and later return the text as is. */
+export const flattenMtextParagraphs = (
+  text: string, release: number, height: number
+): string => {
+  if (release >= 2007) return text;
+  const BSL = String.fromCharCode(1);      /* placeholder for escaped \\ */
+  const s = String(text).replace(/\\\\/g, BSL);
+  const restore = (v: string): string => v.replace(new RegExp(BSL, 'g'), '\\\\');
+  if (release <= 2000) return restore(s.replace(/\\p[^;]*;/g, ''));
+  if (!/\\px/.test(s)) return text;
+  const unit = Number.isFinite(height) && height > 0 ? height : 1;
+  const num = /^-?(\d+\.?\d*|\.\d+)$/;
+  const scaled = (v: string): string => String(+(Number(v) * unit).toFixed(5));
+  return restore(s.replace(/\\p([^;]*);/g, (_m, body: string) => {
+    const kept: string[] = [];
+    const tabs: string[] = [];
+    let inTabs = false;
+    for (const prop of body.replace(/^x/, '').split(',')) {
+      if (inTabs) {
+        /* a typed stop (c/r/d prefix) is a 2008 spelling: dropped */
+        if (num.test(prop)) tabs.push(scaled(prop));
+        continue;
+      }
+      const key = prop[0], value = prop.slice(1);
+      if ((key === 'i' || key === 'l' || key === 'r') && num.test(value)) {
+        kept.push(key + scaled(value));
+      } else if (key === 't') {
+        inTabs = true;
+        if (num.test(value)) tabs.push(scaled(value));
+      }
+      /* q (alignment), b/a (spacing) and anything else: 2008 only */
+    }
+    if (tabs.length) kept.push('t' + tabs.join(','));
+    return kept.length ? '\\p' + kept.join(',') + ';' : '';
+  }));
+};

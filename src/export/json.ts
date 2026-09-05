@@ -41,6 +41,8 @@ export const readJson = (text: string): Drawing => {
     layouts: list(d.layouts),
     groups: list(d.groups),
     mlineStyles: list(d.mlineStyles),
+    tableStyles: list(d.tableStyles),
+    mleaderStyles: list(d.mleaderStyles),
     ucs: list(d.ucs),
     views: list(d.views),
     vports: list(d.vports),

@@ -56,6 +56,19 @@ export interface EntityCommon {
   extrusion?: Point3;
   /** Extended data (XDATA/EED), retained per registered application. */
   xdata?: XdataGroup[];
+  /** Handle (hex) of the entity's extension dictionary in the source
+   *  file, when it had one. The dictionary itself is retained sealed in
+   *  `drawing.unknownObjects` (owner = this entity) with everything it
+   *  lists — fields, round-trip records, filters — and the DWG writers
+   *  hang it back under the entity, so the chain the reference checks
+   *  survives a rewrite. */
+  xdict?: string;
+  /** The entity's persistent reactors (hex handles) as the source file
+   *  listed them — the objects that watch it: a constraint's dependency,
+   *  a field, a hatch's boundary link. The DWG writers write back every
+   *  one whose target is in the file (the hatch links are rebuilt from
+   *  the hatch regardless). */
+  reactors?: string[];
   /** The raw DWG record, retained when the file was read with
    *  `retainRecords`. A handle-stable rewrite into the same encoding
    *  generation can emit these bytes verbatim — untouched entities then
@@ -554,6 +567,27 @@ export interface MLeaderEntity extends EntityCommon {
   arrowSize?: number;
   hasLanding?: boolean;
   hasDogleg?: boolean;
+  /** Block content only: the value shown for each attribute definition
+   *  of the block (the reference's "block labels"). */
+  attributes?: MLeaderAttribute[];
+}
+
+/** One attribute value a block-content multileader carries (DXF 330 /
+ *  177 / 44 / 302). The ATTDEF is named by handle, as the file does; the
+ *  tag is added when the definition could be found. A writer resolves
+ *  the handle first and falls back to `index` (the 1-based position of
+ *  the ATTDEF among the block's attribute definitions). */
+export interface MLeaderAttribute {
+  /** Handle of the block's ATTDEF, uppercase hex, when known. */
+  attdef?: string;
+  /** The ATTDEF's tag, when it could be resolved. */
+  tag?: string;
+  /** Attribute index (DXF 177), 1-based in the reference's files. */
+  index: number;
+  /** Text width (DXF 44). */
+  width?: number;
+  /** The attribute's value (DXF 302). */
+  text: string;
 }
 
 /** A light source (POINT/SPOT/DISTANT). */
@@ -572,6 +606,31 @@ export interface LightEntity extends EntityCommon {
   castShadows?: boolean;
 }
 
+/** One edge of a table cell, as the cell overrides it. Each field is
+ *  absent when the edge takes the table style's value. The reference
+ *  keeps a shared edge on the cell below or to the right as ITS top or
+ *  left: a bottom or right override written here is read back by it as
+ *  the neighbour's top or left (proven on its own re-save), so a producer
+ *  that wants the reference to show an edge states it on that cell. */
+export interface TableBorder {
+  color?: Color;
+  /** Lineweight code as the file stores it: hundredths of a millimetre
+   *  (0..211), or -1 ByLayer, -2 ByBlock, -3 default. */
+  lineweight?: number;
+  /** False hides the edge (the file's "invisibility" flag inverted; the
+   *  reference's own Standard style writes 0 for its visible borders). */
+  visible?: boolean;
+}
+
+/** A block cell's attribute value, or a multileader label's — the same
+ *  shape (see MLeaderAttribute). */
+export interface TableCellAttribute {
+  attdef?: string;
+  tag?: string;
+  index?: number;
+  text: string;
+}
+
 export interface TableCell {
   /** 1 text, 2 block. */
   contentType?: number;
@@ -584,6 +643,29 @@ export interface TableCell {
   spanRows?: number;
   /** Attachment/alignment code as stored. */
   alignment?: number;
+  /* ---- per-cell overrides (each absent when the style applies) ---- */
+  /** Text style name (DXF 7). */
+  textStyle?: string;
+  /** Content colour (DXF 64). */
+  textColor?: Color;
+  /** Background fill colour (DXF 63). */
+  fillColor?: Color;
+  /** Background fill switch (DXF 283 inverted — the file stores "fill
+   *  none"): false turns the fill off; true, with `fillColor`, on. */
+  fillEnabled?: boolean;
+  /** Content rotation in radians (DXF 145). */
+  rotation?: number;
+  /** Edge overrides: colour (DXF 69/65/66/68), lineweight (279/275/276/
+   *  278) and visibility (289/285/286/288) per top/right/bottom/left. */
+  borders?: { top?: TableBorder; right?: TableBorder; bottom?: TableBorder; left?: TableBorder };
+  /** True for a cell another cell's span covers (DXF 173). Readers set
+   *  it from the file; writers derive it from the spans when absent. */
+  merged?: boolean;
+  /** Auto-fit flag (DXF 174). */
+  autofit?: boolean;
+  /** Block cell: the values of the block's attribute definitions
+   *  (DXF 179 count, 331 handle, 300 text). */
+  attributes?: TableCellAttribute[];
 }
 
 /** ACAD_TABLE: a grid of cells anchored at an insertion point. */
@@ -599,6 +681,16 @@ export interface TableEntity extends EntityCommon {
   /** Name of the block record holding the rendered geometry. */
   blockName?: string;
   styleName?: string;
+  /* ---- table-level overrides of the style (DXF 93 flag word) ---- */
+  /** The title row is suppressed (DXF 280, flag 0x01). */
+  titleSuppressed?: boolean;
+  /** The header row is suppressed (DXF 281, flag 0x02). */
+  headerSuppressed?: boolean;
+  /** Flow direction (DXF 70, flag 0x04): 0 down, 1 up. */
+  flowDirection?: number;
+  /** Cell margins (DXF 40 / 41, flags 0x08 / 0x10). */
+  horizontalMargin?: number;
+  verticalMargin?: number;
 }
 
 /** Proxy graphics: the fallback vector image a producer stores so other
@@ -695,8 +787,24 @@ export interface UnknownEntity extends EntityCommon {
   tags?: [number, string][];
 }
 
+/** One entry of a sealed DICTIONARY: the key, the target's handle (hex)
+ *  and the reference code the record listed it with. */
+export interface DictionaryEntry {
+  name: string;
+  handle: string;
+  /** 2 = soft owner, 3 = hard owner (the record's own spelling). */
+  code?: number;
+}
+
 /** A dictionary-side record the semantic layer does not model: retained
- *  sealed exactly like UnknownEntity, listed with its dictionary name. */
+ *  sealed exactly like UnknownEntity, listed with its dictionary name.
+ *
+ *  Extension dictionaries are here too: a DICTIONARY that hangs off an
+ *  entity, a table record or another object (not the named-objects
+ *  tree) is retained sealed with its `entries` decoded, and so is every
+ *  XRECORD such a dictionary lists — the reader consumes the named
+ *  objects dictionary's own tree, but the chain below an owner is the
+ *  owner's, and travels with it. */
 export interface UnknownObject {
   handle?: string;
   /** Name under which the owning dictionary lists it. */
@@ -710,9 +818,32 @@ export interface UnknownObject {
   strData?: string;
   strBits?: number;
   refs?: { code: number; value: string }[];
-  /** Handle of the source file's owner (hex) — recorded so a future
-   *  rewrite can restore the original parent chain. */
+  /** Handle of the source file's owner (hex). The DWG writers restore
+   *  the parent chain from it: when the owner is written — an entity, a
+   *  block header, a table record, another sealed object, a sealed
+   *  extension dictionary — the record goes out under it (under
+   *  `preserveHandles` with its original number), and only a record
+   *  whose owner is not in the file is re-homed under the named objects
+   *  dictionary. */
   ownerHandle?: string;
+  /** Handle (hex) of the record's own extension dictionary in the source
+   *  file, when it had one; that dictionary is sealed beside it, owned by
+   *  this handle. */
+  xdict?: string;
+  /** The record's persistent reactors (hex handles), as the source file
+   *  listed them. Written back for every target that is in the file. */
+  reactors?: string[];
+  /** A sealed DICTIONARY's entries, decoded: the key each target is
+   *  listed under, the target's handle (hex) and the reference code the
+   *  record used (2 soft owner, 3 hard owner). The DWG writers re-encode
+   *  a sealed dictionary from these — the grammar is fully known — so
+   *  entries whose targets are not written are left out rather than
+   *  dangling, and a writer can list records of its own beside them. */
+  entries?: DictionaryEntry[];
+  /** A sealed DICTIONARY's hard-owner flag and duplicate-record cloning
+   *  code, as the record carried them. */
+  hardOwner?: boolean;
+  cloning?: number;
   /** Where the record hangs on the named-objects tree: the dictionary
    *  keys from the named objects dictionary down to the dictionary that
    *  owns it — `['ACAD_SCALELIST']` for a SCALE listed under the scale
@@ -801,6 +932,9 @@ export interface Layer {
    *  attachment's own; with no such block it stays home — the reference
    *  audits an ordinary record with a bar in its name. */
   xrefDependent?: boolean;
+  /** Handle (hex) of the record's extension dictionary in the source
+   *  file; sealed in `drawing.unknownObjects`, owned by this record. */
+  xdict?: string;
 }
 
 export interface Linetype {
@@ -812,6 +946,8 @@ export interface Linetype {
   handle?: string;
   /** Belongs to an external reference; see Layer.xrefDependent. */
   xrefDependent?: boolean;
+  /** Extension dictionary handle (hex); see Layer.xdict. */
+  xdict?: string;
 }
 
 export interface TextStyle {
@@ -837,6 +973,8 @@ export interface TextStyle {
   xrefDependent?: boolean;
   bold?: boolean;
   italic?: boolean;
+  /** Extension dictionary handle (hex); see Layer.xdict. */
+  xdict?: string;
   /** Source-file handle (hex), for handle-stable rewrites. */
   handle?: string;
 }
@@ -903,6 +1041,11 @@ export interface BlockDefinition {
   parameters?: BlockParameter[];
   /** Action kinds the block defines (move, stretch, flip, …). */
   actions?: string[];
+  /** Handle (hex) of the block record's extension dictionary in the
+   *  source file — where a dynamic block's evaluation graph and a
+   *  space's draw-order table hang. Sealed in `drawing.unknownObjects`,
+   *  owned by `handle`. */
+  xdict?: string;
 }
 
 /** A named paper-space layout (DXF LAYOUT object). */
@@ -912,6 +1055,12 @@ export interface Layout {
   tabOrder?: number;
   /** Name of the block record holding this layout's entities. */
   blockName?: string;
+  /** Source-file handle (hex) of that block record. The two space
+   *  blocks are not listed in `drawing.blocks`, so this is where a
+   *  rewrite learns which source number *Model_Space and the current
+   *  paper space had — what a sealed record owned by one of them, or
+   *  pointing at one, is followed through. */
+  blockHandle?: string;
   limMin?: Point2;
   limMax?: Point2;
   extMin?: Point3;
@@ -946,6 +1095,115 @@ export interface MLineStyle {
   startAngle?: number;             /* radians */
   endAngle?: number;
   elements: MLineStyleElement[];
+}
+
+/** One edge of a table cell as a table style draws it. */
+export interface TableStyleBorder {
+  /** Lineweight in the reference's 1/100 mm units; -1 ByLayer, -2 ByBlock,
+   *  -3 default. */
+  lineweight?: number;
+  visible?: boolean;
+  color?: Color;
+}
+
+/** How a table style formats one kind of cell (title, header or data). */
+export interface TableStyleCell {
+  textStyle?: string;
+  textHeight?: number;
+  /** Cell alignment as stored: 1 top-left … 5 middle-centre … 9
+   *  bottom-right. */
+  alignment?: number;
+  textColor?: Color;
+  fillColor?: Color;
+  /** Whether the fill colour paints the cell background. */
+  fillOn?: boolean;
+  /** The six edges in the reference's order: top, horizontal inside,
+   *  bottom, left, vertical inside, right. */
+  borders?: TableStyleBorder[];
+  /** Cell data type / unit type and the format string (R2007+). */
+  dataType?: number;
+  unitType?: number;
+  format?: string;
+}
+
+/** A table style (DXF TABLESTYLE object), named by its entry under the
+ *  ACAD_TABLESTYLE dictionary. */
+export interface TableStyle {
+  name: string;
+  /** Source-file handle (hex), for handle-stable rewrites. */
+  handle?: string;
+  description?: string;
+  /** 0 down, 1 up. */
+  flowDirection?: number;
+  flags?: number;
+  horizontalMargin?: number;
+  verticalMargin?: number;
+  titleSuppressed?: boolean;
+  headerSuppressed?: boolean;
+  data?: TableStyleCell;
+  title?: TableStyleCell;
+  header?: TableStyleCell;
+  xdata?: XdataGroup[];
+}
+
+/** A multileader style (DXF MLEADERSTYLE object), named by its entry
+ *  under the ACAD_MLEADERSTYLE dictionary. */
+export interface MLeaderStyle {
+  name: string;
+  /** Source-file handle (hex), for handle-stable rewrites. */
+  handle?: string;
+  description?: string;
+  /** 0 none, 1 block, 2 mtext, 3 tolerance. */
+  contentType?: number;
+  /** 0 content first, 1 leader first. */
+  drawMLeaderOrder?: number;
+  drawLeaderOrder?: number;
+  maxLeaderPoints?: number;
+  firstSegmentAngle?: number;
+  secondSegmentAngle?: number;
+  /** 0 invisible, 1 straight, 2 spline. */
+  leaderType?: number;
+  lineColor?: Color;
+  linetype?: string;
+  /** Lineweight in 1/100 mm; -1 ByLayer, -2 ByBlock, -3 default. */
+  lineweight?: number;
+  landing?: boolean;
+  landingGap?: number;
+  dogleg?: boolean;
+  doglegLength?: number;
+  /** Arrowhead block name; absent for the closed filled default. */
+  arrowBlock?: string;
+  arrowSize?: number;
+  defaultText?: string;
+  textStyle?: string;
+  textLeftAttachment?: number;
+  textRightAttachment?: number;
+  /** 0 as inserted, 1 horizontal, 2 always right-reading. */
+  textAngleType?: number;
+  /** 0 left, 1 centre, 2 right. */
+  textAlignment?: number;
+  textColor?: Color;
+  textHeight?: number;
+  textFrame?: boolean;
+  alwaysAlignLeft?: boolean;
+  alignSpace?: number;
+  blockName?: string;
+  blockColor?: Color;
+  blockScale?: Point3;
+  useBlockScale?: boolean;
+  blockRotation?: number;
+  useBlockRotation?: boolean;
+  /** 0 by extents, 1 by base point. */
+  blockConnection?: number;
+  scale?: number;
+  propertyChanged?: boolean;
+  annotative?: boolean;
+  breakSize?: number;
+  /** R2010+: 0 horizontal, 1 vertical; and the vertical attachments. */
+  attachmentDirection?: number;
+  topAttachment?: number;
+  bottomAttachment?: number;
+  xdata?: XdataGroup[];
 }
 
 /** A named UCS (DXF UCS table record). */
@@ -1119,6 +1377,11 @@ export interface Drawing {
   groups?: Group[];
   /** Multiline styles referenced by MLINE entities. */
   mlineStyles?: MLineStyle[];
+  /** Table styles (ACAD_TABLESTYLE), named by TableEntity.styleName. */
+  tableStyles?: TableStyle[];
+  /** Multileader styles (ACAD_MLEADERSTYLE), named by
+   *  MLeaderEntity.styleName. */
+  mleaderStyles?: MLeaderStyle[];
   /** Named coordinate systems. */
   ucs?: Ucs[];
   /** Named views. */

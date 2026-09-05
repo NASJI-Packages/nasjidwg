@@ -21,14 +21,29 @@ import type {
   Face3DEntity,
   FileVersion, GeoData, HatchBoundary, HatchDefLine, HatchEdge, HatchGradient,
   HatchLoopFlags,
-  MeshEntity, MLineVertex, Point2, Point3, PolylineVertex, ProxyObject,
-  TableCell,
+  MeshEntity, MLeaderAttribute, MLeaderStyle, MLineVertex, Point2, Point3,
+  PolylineVertex,
+  ProxyObject, TableBorder, TableCell, TableStyle, TableStyleCell,
   TextHAlign, TextVAlign, UnknownObject, ViewportEntity, VPort, XdataGroup,
   XdataValue
 } from '../core/model.js';
 import type { DwgClassInfo } from './classes.js';
 /* The structural member types, checked once per record — a regex test per
  * 1.7M records showed up in profiles. */
+/** Objects decoded into the model AND retained sealed: the members of an
+ *  ownership chain the writers re-attach under the original owner rather
+ *  than re-create — extension dictionaries with the XRECORDs they list,
+ *  and the nodes of a dynamic block's evaluation graph. */
+const DUAL_SEALED = new Set([
+  'DICTIONARY', 'XRECORD', 'BLOCKVISIBILITYPARAMETER',
+  'BLOCKLINEARPARAMETER', 'BLOCKROTATIONPARAMETER', 'BLOCKFLIPPARAMETER',
+  'BLOCKALIGNMENTPARAMETER', 'BLOCKBASEPOINTPARAMETER', 'BLOCKXYPARAMETER',
+  'BLOCKPOLARPARAMETER', 'BLOCKPOINTPARAMETER', 'BLOCKLOOKUPPARAMETER',
+  'BLOCKMOVEACTION', 'BLOCKROTATEACTION', 'BLOCKSCALEACTION',
+  'BLOCKSTRETCHACTION', 'BLOCKPOLARSTRETCHACTION', 'BLOCKFLIPACTION',
+  'BLOCKARRAYACTION', 'BLOCKLOOKUPACTION'
+]);
+
 const STRUCTURAL_TYPES = new Set([
   'POLYLINE_2D', 'POLYLINE_3D', 'BLOCK', 'ENDBLK', 'SEQEND']);
 
@@ -122,6 +137,29 @@ export interface TableRecord {
   paperSpace?: number;
 }
 
+/** One cell style of a TABLESTYLE record, its text style and border
+ *  linetypes still as handles (the assembler names them). */
+export interface RawTableStyleCell extends Omit<TableStyleCell, 'textStyle' | 'borders'> {
+  textStyleHandle?: number;
+  borders?: { lineweight?: number; visible?: boolean; color?: Color; ltypeHandle?: number }[];
+}
+
+/** TABLESTYLE record payload: everything but the dictionary name. */
+export interface RawTableStyle extends Omit<TableStyle, 'name' | 'handle' | 'data' | 'title' | 'header' | 'xdata'> {
+  data?: RawTableStyleCell;
+  title?: RawTableStyleCell;
+  header?: RawTableStyleCell;
+}
+
+/** MLEADERSTYLE record payload, its four references still as handles. */
+export interface RawMLeaderStyle extends Omit<MLeaderStyle,
+  'name' | 'handle' | 'linetype' | 'arrowBlock' | 'textStyle' | 'blockName' | 'xdata'> {
+  ltypeHandle?: number;
+  arrowHandle?: number;
+  textStyleHandle?: number;
+  blockHandle?: number;
+}
+
 export interface RawObject {
   handle: number;
   typeName: string;
@@ -133,6 +171,10 @@ export interface RawObject {
   /* common entity relations */
   entmode?: number;                       /* 0 owner block, 1 paper, 2 model */
   owner?: number;
+  /** The record's extension dictionary, when it has one. */
+  xdict?: number;
+  /** Persistent reactors (objects only; entity reactors are rebuilt). */
+  reactors?: number[];
   layerHandle?: number;
   ltypeFlags?: number;
   ltypeHandle?: number;
@@ -182,8 +224,12 @@ export interface RawObject {
   imageDef?: { path?: string };
   /** DIMENSION_*: DIMSTYLE handle, resolved to a name by the assembler. */
   dimStyleHandle?: number;
-  /** DICTIONARY: entry names paired with their target handles. */
-  dictionary?: { names: string[]; handles: number[] };
+  /** DICTIONARY: entry names paired with their target handles, the
+   *  reference code each entry used, and the record's two flags. */
+  dictionary?: {
+    names: string[]; handles: number[]; codes: number[];
+    cloning?: number; hardOwner?: boolean;
+  };
   /** ACAD_PROXY_OBJECT (0x1F3): the retained record, named by the
    *  assembler from its owning dictionary. */
   proxyObject?: Omit<ProxyObject, 'handle' | 'name'>;
@@ -232,9 +278,19 @@ export interface RawObject {
   tableBlock?: number;
   tableStyle?: number;
   tableContent?: TableGrid;
+  /** TABLESTYLE / MLEADERSTYLE object payloads, named by the assembler
+   *  from the ACAD_TABLESTYLE / ACAD_MLEADERSTYLE dictionaries. */
+  tableStyleObj?: RawTableStyle;
+  mleaderStyleObj?: RawMLeaderStyle;
   /** ACAD_TABLE: block record handle per block-content cell, by cell
    *  index (the assembler resolves the names). */
   tableCellBlocks?: Map<number, number>;
+  /** ACAD_TABLE: text-style handle per cell that overrides its style,
+   *  by cell index (the assembler resolves the names). */
+  tableCellTextStyles?: Map<number, number>;
+  /** ATTDEF: the definition's tag, for the labels that name it by
+   *  handle (multileader block labels, table block cells). */
+  attTag?: string;
   /** GEODATA payload. */
   geoData?: GeoData;
   /** PDF/DGN/DWF UNDERLAY: definition handle to resolve into a path. */
@@ -644,8 +700,19 @@ class Ctx {
       visFlags, shadowFlags
     };
     if (entmode === 0) this.ownerHandle = this.handle(handle);
-    for (let i = 0; i < numReactors; i++) hr.h();
-    if (v < 2004 || !xdicMissing) hr.h(); /* extension dictionary */
+    /* persistent reactors: kept (a constraint's dependency hangs on the
+       entity it watches as one); the array only exists when there are
+       any, which on a million-entity drawing is almost never */
+    if (numReactors > 0 && numReactors < 100000) {
+      const reactors: number[] = [];
+      for (let i = 0; i < numReactors; i++) reactors.push(this.handle(handle));
+      this.reactors = reactors;
+    } else {
+      for (let i = 0; i < numReactors; i++) hr.h();
+    }
+    /* the extension dictionary: kept, so the sealed dictionary behind it
+       can be hung back under the entity on a rewrite */
+    if (v < 2004 || !xdicMissing) this.xdictHandle = this.handle(handle);
     if (v <= 14) {
       /* R13/R14: layer + ltype come BEFORE the prev/next chain */
       this.layerHandle = this.handle(handle);
@@ -672,6 +739,12 @@ class Ctx {
   }
 
   ownerHandle?: number;
+  /** The record's extension dictionary (0 = none). */
+  xdictHandle = 0;
+  /** Persistent reactors, captured for objects (entity reactors are the
+   *  hatch back-links the writer rebuilds, and a per-entity array would
+   *  be GC pressure on a million-entity drawing). */
+  reactors?: number[];
   prevHandle?: number;
   nextHandle?: number;
   layerHandle?: number;
@@ -700,8 +773,14 @@ class Ctx {
     if (v >= 2013) r.b();                 /* has_ds_data */
     if (!isControl) {
       this.ownerHandle = this.handle(handle);
-      for (let i = 0; i < this.numReactors; i++) this.hr.h();
-      if (v < 2004 || !this.xdicMissing) this.hr.h();
+      if (this.numReactors > 0 && this.numReactors < 100000) {
+        const reactors: number[] = [];
+        for (let i = 0; i < this.numReactors; i++) reactors.push(this.handle(handle));
+        this.reactors = reactors;
+      } else {
+        for (let i = 0; i < this.numReactors; i++) this.hr.h();
+      }
+      if (v < 2004 || !this.xdicMissing) this.xdictHandle = this.handle(handle);
     }
     return { handle };
   }
@@ -733,7 +812,7 @@ const H_ALIGN: TextHAlign[] = ['left', 'center', 'right', 'aligned', 'middle', '
 const V_ALIGN: TextVAlign[] = ['baseline', 'bottom', 'middle', 'top'];
 
 const decodeTextLike = (
-  x: Ctx, kind: 'text' | 'attrib' | 'attdef'
+  x: Ctx, kind: 'text' | 'attrib' | 'attdef', raw?: RawObject
 ): Entity => {
   const { r, v } = x;
   /** ATTRIB/ATTDEF close with tag + field length + flags (bit 1 invisible,
@@ -747,7 +826,10 @@ const decodeTextLike = (
       if (v >= 2010) r.rc();              /* class version */
       if (v >= 2018) single = r.rc() <= 1;
     } catch { single = false; }
-    x.text();                             /* tag */
+    const tag = x.text();
+    /* the tag stays on the raw record: a multileader's block label or a
+       table's block cell names the definition by handle */
+    if (raw && kind === 'attdef' && tag) raw.attTag = tag;
     if (!single) return 0;
     try {
       r.bs();                             /* field length */
@@ -908,7 +990,7 @@ const decodeEntitySpecific = (
   switch (typeName) {
     case 'TEXT': return decodeTextLike(x, 'text');
     case 'ATTRIB': return decodeTextLike(x, 'attrib');
-    case 'ATTDEF': return decodeTextLike(x, 'attdef');
+    case 'ATTDEF': return decodeTextLike(x, 'attdef', raw);
 
     case 'LINE': {
       if (v >= 2000) {
@@ -2355,6 +2437,54 @@ const decodeMLeader = (x: Ctx, raw: RawObject): Entity => {
   x.hr.h();                               /* arrow handle */
   const arrow = r.bd();
   if (arrow) e.arrowSize = arrow;
+  /* The rest of the common data, bit-walked against the reference's own
+     saves of its multileader sample at 2000, 2004, 2007, 2010, 2013 and
+     2018 (every record lands on its last data bit with every handle and
+     string consumed): content type, text style, the four text attachment
+     shorts, text colour, frame flag, block record, block colour, scale,
+     rotation, connection type, annotative flag; before R2010 a list of
+     arrowheads (B is-default + H); then the block labels — BL count, and
+     per label H attdef, TV text, BS index, BD width — the text-direction
+     bit, the IPE alignment and attachment-point shorts, two bits the
+     reference closes every release with (0, 1), and from R2010 the three
+     attachment-direction shorts (and R2013's trailing flag). R2010+ has
+     NO arrowhead list. The labels are the point: a block-content note's
+     attribute values live here and nowhere else. A malformed tail keeps
+     the leaders and content already decoded. */
+  try {
+    r.bs();                               /* content type */
+    x.hr.h();                             /* text style */
+    r.bs(); r.bs(); r.bs(); r.bs();       /* text left/right/angle/align */
+    x.cmc();                              /* text colour */
+    r.b();                                /* frame text */
+    x.hr.h();                             /* block content */
+    x.cmc();                              /* block colour */
+    r.bd3();                              /* block scale */
+    r.bd();                               /* block rotation */
+    r.bs();                               /* block connection */
+    r.b();                                /* annotative */
+    if (v < 2010) {
+      const numArrows = r.bl();
+      if (numArrows > 10000) throw new RangeError('mleader arrowheads');
+      for (let i = 0; i < numArrows; i++) { r.b(); x.hr.h(); }
+    }
+    const numLabels = r.bl();
+    if (numLabels > 10000) throw new RangeError('mleader labels');
+    const labels: MLeaderAttribute[] = [];
+    for (let i = 0; i < numLabels; i++) {
+      const attdef = x.handle(raw.handle);
+      const text = x.text();
+      const index = r.bs();
+      const width = r.bd();
+      const label: MLeaderAttribute = { index, text };
+      if (attdef) label.attdef = attdef.toString(16).toUpperCase();
+      if (width) label.width = width;
+      labels.push(label);
+    }
+    if (labels.length) e.attributes = labels;
+  } catch {
+    /* the tail is informative only; the note itself is complete */
+  }
   return e;
 };
 
@@ -2480,39 +2610,135 @@ const readBlockPropInfo = (x: Ctx): void => {
 
 /* ---- R2010+ ACAD_TABLE: the linked TABLECONTENT structure ---- */
 
-/** Formatting attached to a cell, column or row. */
-const readContentFormat = (x: Ctx): void => {
+/** A CMC's colour, with the "no colour" method (0xC8, what an unfilled
+ *  cell's background carries) told apart from a real one. */
+const cmcOrNone = (x: Ctx): Color | undefined => {
   const { r } = x;
-  r.bl(); r.bl();                         /* override + property flags */
-  r.bl(); r.bl();                         /* value data type and unit type */
-  x.text();                               /* value format string */
-  r.bd(); r.bd();                         /* rotation, block scale */
-  r.bl();                                 /* cell alignment */
-  x.cmc(true);                            /* content colour */
-  x.hr.h();                               /* text style */
-  r.bd();                                 /* text height */
+  const pos = r.pos;
+  r.bs();
+  const method = (r.bl() >>> 24) & 0xff;
+  r.pos = pos;
+  const c = x.cmc(true).color;
+  return method === 0xc8 ? undefined : c;
 };
 
-const readCellStyle = (x: Ctx): void => {
+/** Formatting attached to a cell, column or row — the R2010+ content
+ *  format. `override` carries the format's own override flags (0x40 = text
+ *  style, 0x01/0x02 = value data/unit type, pinned against the reference's
+ *  2018 saves of its samples); the rest is what the format states. */
+interface ContentFormatData {
+  override: number;
+  rotation: number;
+  alignment: number;
+  color?: Color;
+  textStyle: number;
+  textHeight: number;
+}
+const readContentFormat = (x: Ctx): ContentFormatData => {
+  const { r } = x;
+  const override = r.bl();
+  r.bl();                                 /* property flags */
+  r.bl(); r.bl();                         /* value data type and unit type */
+  x.text();                               /* value format string */
+  const rotation = r.bd();
+  r.bd();                                 /* block scale */
+  const alignment = r.bl();
+  const color = cmcOrNone(x);
+  const textStyle = x.handle(0);
+  const textHeight = r.bd();
+  return { override, rotation, alignment, color, textStyle, textHeight };
+};
+
+/** One overridden grid line of an R2010+ cell style: `mask` names the
+ *  edge (1 top, 2 right, 4 bottom, 8 left, 16/32 the inside lines) and
+ *  `override` what the cell states for it (0x02 lineweight, 0x08 colour,
+ *  0x10 invisibility — the reference writes 0x1A for an edge set through
+ *  its dialog). */
+interface CellBorderData {
+  mask: number; override: number;
+  color?: Color; lineweight: number; invisible: boolean;
+}
+/** An R2010+ cell style's data, when the record carries any. */
+interface CellStyleData {
+  propOverride: number;
+  background?: Color;
+  format: ContentFormatData;
+  margins?: number[];
+  borders: CellBorderData[];
+}
+/** Bit-walked against the reference's 2018 saves: an aligned cell sets
+ *  0x10 in the property override flags and states the alignment in its
+ *  own content format; a text-style override shows as 0x40 in the
+ *  content's format flags with the style handle in the cell style's
+ *  format; an edge override is a border entry with its mask and flags. */
+const readCellStyle = (x: Ctx): CellStyleData | undefined => {
   const { r } = x;
   r.bl();                                 /* style type */
-  if (!r.bs()) return;                    /* no overrides: nothing follows */
-  r.bl(); r.bl();                         /* property override + merge flags */
-  x.cmc(true);                            /* background colour */
+  if (!r.bs()) return undefined;          /* no overrides: nothing follows */
+  const propOverride = r.bl();
+  r.bl();                                 /* merge flags */
+  const background = cmcOrNone(x);
   r.bl();                                 /* content layout */
-  readContentFormat(x);
-  if (r.bs()) for (let i = 0; i < 6; i++) r.bd();     /* margin overrides */
+  const format = readContentFormat(x);
+  let margins: number[] | undefined;
+  if (r.bs()) {
+    margins = [];
+    for (let i = 0; i < 6; i++) margins.push(r.bd());
+  }
   const numBorders = r.bl();
   if (numBorders > 6) throw new RangeError('table cell borders');
+  const borders: CellBorderData[] = [];
   for (let i = 0; i < numBorders; i++) {
-    if (!r.bl()) continue;                /* index mask */
-    r.bl(); r.bl();                       /* overrides, border type */
-    x.cmc(true);                          /* colour */
-    r.bl();                               /* lineweight */
+    const mask = r.bl();
+    if (!mask) continue;                  /* index mask */
+    const override = r.bl();
+    r.bl();                               /* border type */
+    const color = cmcOrNone(x);
+    const lineweight = r.bl();
     x.hr.h();                             /* linetype */
-    r.bl();                               /* visible */
+    const invisible = r.bl() !== 0;
     r.bd();                               /* double line spacing */
+    borders.push({ mask, override, color, lineweight, invisible });
   }
+  return { propOverride, background, format, margins, borders };
+};
+
+/** What an R2010+ cell style says about its cell, in model terms. The
+ *  content format flags (`contentOverride`) come from the cell's content
+ *  when it carries a format of its own. Returns the text-style handle to
+ *  resolve, when the cell overrides it. */
+const applyCellStyle = (
+  cell: TableCell, style: CellStyleData, content: ContentFormatData | undefined
+): number | undefined => {
+  const f = style.format;
+  /* the cell style: 0x10 alignment (its format's value), 0x200 the
+     background colour; the content's own format: 0x04 rotation, 0x20
+     colour, 0x80 text height, each with the value beside the flag —
+     bit-walked on the reference's 2018 conversion of this library's
+     R2000 fixture carrying every override at once */
+  if (style.propOverride & 0x10) cell.alignment = f.alignment;
+  if (style.propOverride & 0x200 && style.background) cell.fillColor = style.background;
+  if (content) {
+    if (content.override & 0x04 && content.rotation) cell.rotation = content.rotation;
+    if (content.override & 0x20 && content.color) cell.textColor = content.color;
+    if (content.override & 0x80 && content.textHeight > 0) cell.textHeight = content.textHeight;
+  }
+  for (const b of style.borders) {
+    if (!b.override) continue;
+    const edge: TableBorder = {};
+    if (b.override & 0x08 && b.color) edge.color = b.color;
+    if (b.override & 0x02) edge.lineweight = b.lineweight;
+    if (b.override & 0x10) edge.visible = !b.invisible;
+    if (!Object.keys(edge).length) continue;
+    const key = b.mask === 1 ? 'top' : b.mask === 2 ? 'right'
+      : b.mask === 4 ? 'bottom' : b.mask === 8 ? 'left' : undefined;
+    if (!key) continue;
+    (cell.borders ??= {})[key] = edge;
+  }
+  if (content && content.override & 0x40) {
+    return content.textStyle || f.textStyle || undefined;
+  }
+  return undefined;
 };
 
 /** Named values a cell, column or row may carry beside its content. */
@@ -2529,6 +2755,13 @@ interface TableGrid {
   /** Horizontal direction vector; only the R2010+ entity's inline tail
    *  carries it. */
   direction?: Point3;
+  /** Title/header rows absent from the row styles (ids 1 and 2). */
+  titleSuppressed?: boolean;
+  headerSuppressed?: boolean;
+  /** Handles the assembler resolves, by cell index: block records of
+   *  block cells, text styles of cells overriding theirs. */
+  cellBlocks?: Map<number, number>;
+  cellTextStyles?: Map<number, number>;
 }
 
 /** The linked-table structure R2010 introduced, shared by the ACAD_TABLE
@@ -2555,11 +2788,15 @@ const readTableContent = (x: Ctx, entityTail = false): TableGrid => {
   if (numRows * numColumns > 200000) throw new RangeError('table size');
   const rowHeights: number[] = [];
   const cells: TableCell[] = [];
+  const cellBlocks = new Map<number, number>();
+  const cellTextStyles = new Map<number, number>();
+  const rowStyleIds: number[] = [];
   for (let rowIdx = 0; rowIdx < numRows; rowIdx++) {
     const numCells = r.bl();
     if (numCells > 10000) throw new RangeError('table row cells');
     for (let colIdx = 0; colIdx < numCells; colIdx++) {
       const cell: TableCell = {};
+      const cellIndex = rowIdx * numColumns + colIdx;
       r.bl();                             /* cell flag */
       x.text();                           /* tooltip */
       r.bl();                             /* custom data flag */
@@ -2570,22 +2807,52 @@ const readTableContent = (x: Ctx, entityTail = false): TableGrid => {
       }
       const numContents = r.bl();
       if (numContents > 10000) throw new RangeError('table cell contents');
+      let content: ContentFormatData | undefined;
       for (let k = 0; k < numContents; k++) {
         const contentType = r.bl();
+        let blockRef: number | undefined;
         if (contentType === 1) {
           const text = readTableValue(x);
           if (text && !cell.text) cell.text = text;
           cell.contentType = 1;
         } else if (contentType === 2 || contentType === 4) {
-          x.hr.h();                       /* field or block reference */
+          /* the reference writes a block's record handle AFTER the content
+             format's (walked against its 2018 saves: the format's text
+             style is a soft null, the block a hard pointer) */
+          blockRef = -1;
           cell.contentType = contentType === 4 ? 2 : 1;
         }
         const numAttrs = r.bl();
         if (numAttrs > 10000) throw new RangeError('table cell attributes');
-        for (let a = 0; a < numAttrs; a++) { x.hr.h(); x.text(); r.bl(); }
-        if (r.bs()) readContentFormat(x);
+        const attrs: NonNullable<TableCell['attributes']> = [];
+        for (let a = 0; a < numAttrs; a++) {
+          const text = x.text();
+          const index = r.bl();
+          attrs.push({ index, text });
+        }
+        if (r.bs()) {
+          const cf = readContentFormat(x);
+          content = content ? { ...cf, override: content.override | cf.override } : cf;
+        }
+        /* the handle stream, in the reference's order (walked on its 2018
+           save of a schedule of attributed block cells): the content
+           format's text style, then the block record, then one ATTDEF per
+           attribute value */
+        if (blockRef !== undefined) {
+          const h = x.handle(0);
+          if (contentType === 4 && h) cellBlocks.set(cellIndex, h);
+        }
+        for (const a of attrs) {
+          const attdef = x.handle(0);
+          if (attdef) a.attdef = attdef.toString(16).toUpperCase();
+        }
+        if (attrs.length) cell.attributes = attrs;
       }
-      readCellStyle(x);                   /* the cell's own formatting */
+      const style = readCellStyle(x);     /* the cell's own formatting */
+      if (style) {
+        const sh = applyCellStyle(cell, style, content);
+        if (sh) cellTextStyles.set(cellIndex, sh);
+      }
       r.bl();                             /* style id */
       if (r.bl()) {                       /* cell geometry */
         r.bl();                           /* geometry flag */
@@ -2607,23 +2874,24 @@ const readTableContent = (x: Ctx, entityTail = false): TableGrid => {
     r.bl();                               /* row custom data flag */
     readCustomData(x);
     readCellStyle(x);
-    r.bl();                               /* style id */
+    rowStyleIds.push(r.bl());             /* style id: 1 title, 2 header, 3 data */
     rowHeights.push(r.bd());              /* row height */
   }
 
-  /* The grid is complete here; the trailing field references and merge
-     list are extras whose tail moved between releases, so a short read
-     there must not cost the table. The R2010+ entity's inline copy of
-     this structure (entityTail) inserts two unknown longs (4, 0 in every
-     AutoCAD-2027-minted file) before the merge list and follows it with
-     another unknown (6), the horizontal direction vector and the break
-     data — token-walked against five real 2018 tables. */
+  /* The grid is complete here; what follows is informative, so a short
+     read there must not cost the table. After the field references comes
+     a cell style for the table as a whole (style type 4 — the "4, 0"
+     pair the reference's tables without one show), then the merge list,
+     and in the entity's inline copy (entityTail) an unknown long (6, or
+     38), the horizontal direction vector and the break data. Walked to
+     the last bit against the reference's 2018 saves of five tables
+     carrying 1 to 13 merged ranges. */
   let direction: Point3 | undefined;
   try {
     const numFieldRefs = r.bl();
     if (numFieldRefs > 100000) throw new RangeError('table field refs');
     for (let i = 0; i < numFieldRefs; i++) x.hr.h();
-    if (entityTail) { r.bl(); r.bl(); }
+    readCellStyle(x);                     /* the table's own style */
     const numMerged = r.bl();
     if (numMerged > 100000) throw new RangeError('table merges');
     for (let i = 0; i < numMerged; i++) {
@@ -2633,6 +2901,12 @@ const readTableContent = (x: Ctx, entityTail = false): TableGrid => {
       if (cell) {
         if (rightCol > leftCol) cell.spanColumns = rightCol - leftCol + 1;
         if (bottomRow > topRow) cell.spanRows = bottomRow - topRow + 1;
+        for (let rr = topRow; rr <= bottomRow; rr++) {
+          for (let cc = leftCol; cc <= rightCol; cc++) {
+            const covered = cells[rr * numColumns + cc];
+            if (covered && covered !== cell) covered.merged = true;
+          }
+        }
       }
     }
     if (entityTail) {
@@ -2646,6 +2920,11 @@ const readTableContent = (x: Ctx, entityTail = false): TableGrid => {
   } catch { /* the grid stands on its own */ }
   const grid: TableGrid = { numRows, numColumns, rowHeights, columnWidths, cells };
   if (direction) grid.direction = direction;   /* keep spreads clobber-safe */
+  /* a suppressed title or header row simply has no row of its style */
+  if (rowStyleIds.length && !rowStyleIds.includes(1)) grid.titleSuppressed = true;
+  if (rowStyleIds.length > 1 && !rowStyleIds.includes(2)) grid.headerSuppressed = true;
+  if (cellBlocks.size) grid.cellBlocks = cellBlocks;
+  if (cellTextStyles.size) grid.cellTextStyles = cellTextStyles;
   return grid;
 };
 
@@ -2685,6 +2964,14 @@ const decodeTable = (x: Ctx, raw: RawObject): Entity => {
       const grid = readTableContent(x, true);
       if (grid.numRows <= 0 || grid.numColumns <= 0
           || r.pos > x.dataEnd) throw new RangeError('table inline grid');
+      if (grid.cellBlocks) raw.tableCellBlocks = grid.cellBlocks;
+      if (grid.cellTextStyles) raw.tableCellTextStyles = grid.cellTextStyles;
+      /* the TABLESTYLE is the last hard pointer of the handle stream,
+         behind the per-cell geometry and one soft pointer */
+      while (x.hr.pos + 8 <= x.hr.endBit) {
+        const ref = x.hr.h();
+        if (ref.code === 5 && ref.value) raw.tableStyle = ref.value;
+      }
       return {
         type: 'table', layer: '0', color: { kind: 'byLayer' },
         position: pt3(tx, ty, tz),
@@ -2692,6 +2979,8 @@ const decodeTable = (x: Ctx, raw: RawObject): Entity => {
         numRows: grid.numRows, numColumns: grid.numColumns,
         rowHeights: grid.rowHeights, columnWidths: grid.columnWidths,
         cells: grid.cells,
+        ...(grid.titleSuppressed ? { titleSuppressed: true } : {}),
+        ...(grid.headerSuppressed ? { headerSuppressed: true } : {}),
         ...(tblExt ? { extrusion: tblExt } : {})
       };
     } catch {
@@ -2726,7 +3015,7 @@ const decodeTable = (x: Ctx, raw: RawObject): Entity => {
     x.hr.h();                             /* seqend */
   }
   /* AcDbTable part */
-  x.hr.h();                               /* table style */
+  raw.tableStyle = x.handle(raw.handle);  /* table style */
   r.bs();                                 /* flag for table value */
   const [dx2, dy2, dz2] = r.bd3();
   const numColumns = r.bl();
@@ -2741,6 +3030,7 @@ const decodeTable = (x: Ctx, raw: RawObject): Entity => {
   const total = numColumns * numRows;
   if (total > 200000) throw new RangeError('table cells');
   const cellBlocks = new Map<number, number>();
+  const cellTextStyles = new Map<number, number>();
   /* The pre-2010 cell, verified bit-exact against the reference's own
      tables — a 32x12 schedule, a 28x14 one with a block cell, a 7x8 legend
      and two 17x2 / 16x2 block-and-text grids, each saved by it to 2000,
@@ -2776,14 +3066,17 @@ const decodeTable = (x: Ctx, raw: RawObject): Entity => {
     const type = r.bs();
     if (type !== 1 && type !== 2) throw new RangeError('table cell type');
     cell.contentType = type;
-    r.rc();                               /* flags */
-    r.b();                                /* is merged */
-    r.b();                                /* autofit */
+    r.rc();                               /* flags: the edges overridden
+                                             below (1 top, 2 right, 4
+                                             bottom, 8 left) */
+    if (r.b()) cell.merged = true;
+    if (r.b()) cell.autofit = true;
     const spanCols = r.bl();
     const spanRows = r.bl();
     if (spanCols > 1) cell.spanColumns = spanCols;
     if (spanRows > 1) cell.spanRows = spanRows;
-    r.bd();                               /* rotation */
+    const rotation = r.bd();
+    if (rotation) cell.rotation = rotation;
     if (type === 1) {
       x.hr.h();                           /* text style */
       if (v < 2007 || legacy) cell.text = x.text() || undefined;
@@ -2793,29 +3086,44 @@ const decodeTable = (x: Ctx, raw: RawObject): Entity => {
       if (r.b()) {                        /* attribute values follow */
         const numAttrs = r.bs();
         if (numAttrs > 10000) throw new RangeError('table attrs');
-        for (let k = 0; k < numAttrs; k++) { x.hr.h(); r.bs(); x.text(); }
+        const attrs: NonNullable<TableCell['attributes']> = [];
+        for (let k = 0; k < numAttrs; k++) {
+          const attdef = x.handle(raw.handle);
+          const attIndex = r.bs();
+          const text = x.text();
+          attrs.push({ attdef: attdef.toString(16).toUpperCase(), index: attIndex, text });
+        }
+        if (attrs.length) cell.attributes = attrs;
       }
     }
     if (r.b()) {                          /* per-cell overrides */
       const flags = r.bl();
       r.rc();                             /* virtual edge */
       if (flags & 0x01) cell.alignment = r.bs();
-      if (flags & 0x02) r.b();            /* bg fill none */
-      if (flags & 0x04) x.cmc(true);      /* bg colour */
-      if (flags & 0x08) x.cmc(true);      /* content colour */
-      if (flags & 0x10) x.hr.h();         /* text style */
-      if (flags & 0x20) cell.textHeight = r.bd();
-      /* the grid colour/weight/visibility groups, in the spec's order */
-      const grid: [number, 'cmc' | 'bs'][] = [
-        [0x00040, 'cmc'], [0x00400, 'bs'], [0x04000, 'bs'],
-        [0x00080, 'cmc'], [0x00800, 'bs'], [0x08000, 'bs'],
-        [0x00100, 'cmc'], [0x01000, 'bs'], [0x10000, 'bs'],
-        [0x00200, 'cmc'], [0x02000, 'bs'], [0x20000, 'bs']
-      ];
-      for (const [bit, kind] of grid) {
-        if (!(flags & bit)) continue;
-        if (kind === 'cmc') x.cmc(true); else r.bs();
+      if (flags & 0x02) cell.fillEnabled = r.b() === 0;   /* "fill none" */
+      if (flags & 0x04) cell.fillColor = x.cmc(true).color;
+      if (flags & 0x08) cell.textColor = x.cmc(true).color;
+      if (flags & 0x10) {
+        const sh = x.handle(raw.handle);
+        if (sh) cellTextStyles.set(index, sh);
       }
+      if (flags & 0x20) cell.textHeight = r.bd();
+      /* the grid colour/weight/visibility groups, in the spec's order:
+         top, right, bottom, left — the DXF 69/65/66/68, 279/275/276/278
+         and 289/285/286/288 groups of the reference's own R2000 export
+         (pinned on its Text-and-Tables sample: 0x2200 spells left,
+         0x4440 top). The visibility short is an invisibility flag: the
+         reference's Standard style writes 0 for its visible borders. */
+      const edges: ('top' | 'right' | 'bottom' | 'left')[] = ['top', 'right', 'bottom', 'left'];
+      edges.forEach((edge, i) => {
+        const colourBit = 0x40 << i, lwBit = 0x400 << i, visBit = 0x4000 << i;
+        if (!(flags & (colourBit | lwBit | visBit))) return;
+        const b: TableBorder = {};
+        if (flags & colourBit) b.color = x.cmc(true).color;
+        if (flags & lwBit) b.lineweight = r.bs();
+        if (flags & visBit) b.visible = r.bs() === 0;
+        (cell.borders ??= {})[edge] = b;
+      });
     }
     if (v >= 2007 && !legacy) {
       r.bl();                             /* extended cell flags */
@@ -2830,13 +3138,17 @@ const decodeTable = (x: Ctx, raw: RawObject): Entity => {
      the flag bit alone; both pinned against the reference (flags 3 and 2
      leave 15 and 14 bits). The rest follow the specification's order and
      nothing the model carries, so a short read here never costs the grid. */
+  const tableOv: Pick<Extract<Entity, { type: 'table' }>,
+    'titleSuppressed' | 'headerSuppressed' | 'flowDirection'
+    | 'horizontalMargin' | 'verticalMargin'> = {};
   const readTail = (): void => {
     if (r.b()) {                          /* table overrides */
       const flags = r.bl();
-      if (flags & 0x000001) r.b();        /* title suppressed */
-      if (flags & 0x000004) r.bs();       /* flow direction */
-      if (flags & 0x000008) r.bd();       /* horizontal cell margin */
-      if (flags & 0x000010) r.bd();       /* vertical cell margin */
+      if (flags & 0x000001) { if (r.b()) tableOv.titleSuppressed = true; }
+      if (flags & 0x000002) tableOv.headerSuppressed = true;
+      if (flags & 0x000004) tableOv.flowDirection = r.bs();
+      if (flags & 0x000008) tableOv.horizontalMargin = r.bd();
+      if (flags & 0x000010) tableOv.verticalMargin = r.bd();
       for (const bit of [0x20, 0x40, 0x80]) if (flags & bit) x.cmc(true);
       for (const bit of [0x100, 0x200, 0x400]) if (flags & bit) r.b();
       for (const bit of [0x800, 0x1000, 0x2000]) if (flags & bit) x.cmc(true);
@@ -2881,6 +3193,7 @@ const decodeTable = (x: Ctx, raw: RawObject): Entity => {
     readCells(false);
   }
   if (cellBlocks.size) raw.tableCellBlocks = cellBlocks;
+  if (cellTextStyles.size) raw.tableCellTextStyles = cellTextStyles;
   return {
     type: 'table', layer: '0', color: { kind: 'byLayer' },
     position: pt3(ix, iy, iz),
@@ -2889,6 +3202,7 @@ const decodeTable = (x: Ctx, raw: RawObject): Entity => {
     direction: isFinite(dx2) && isFinite(dy2) && isFinite(dz2)
       ? pt3(dx2, dy2, dz2) : pt3(1, 0, 0),
     numRows, numColumns, rowHeights, columnWidths, cells,
+    ...tableOv,
     ...(tblExtOld ? { extrusion: tblExtOld } : {})
   };
 };
@@ -2918,9 +3232,243 @@ const simplifyEdgeLoop = (edges: HatchEdge[]): HatchBoundary => {
  * table / object decoders
  * ------------------------------------------------------------------ */
 
+/* ---- TABLESTYLE / MLEADERSTYLE ---- */
+
+/** A decoder that stops short of, or runs past, the record's data end
+ *  did not read the record it thought it was reading: the caller seals
+ *  the record instead of trusting a partial decode. */
+const requireDataEnd = (x: Ctx, what: string): void => {
+  if (x.r.pos > x.dataEnd || x.dataEnd - x.r.pos >= 8) {
+    throw new RangeError(`${what}: ${x.r.pos} of ${x.dataEnd} data bits`);
+  }
+};
+
+/** TABLESTYLE before R2010: the description, the table-level switches
+ *  and the data, title and header cell styles in that order — text style
+ *  (a handle), height, alignment, text and fill colour, the fill switch,
+ *  six borders (lineweight, visibility, colour) and, from R2007, the
+ *  value's data/unit type and format string. The colours take the 2004
+ *  CMC layout in every release, R2000 included, and the 2000/2004
+ *  description carries a trailing NUL — both walked bit-exact against
+ *  the reference's own 2000, 2004 and 2007 saves of its tables sample. */
+const readTableStyleLegacy = (x: Ctx, owner: number): RawTableStyle => {
+  const { r, v } = x;
+  const description = x.text().replace(/\0+$/, '');
+  const flowDirection = r.bs();
+  const flags = r.bs();
+  const horizontalMargin = r.bd();
+  const verticalMargin = r.bd();
+  const titleSuppressed = r.b() === 1;
+  const headerSuppressed = r.b() === 1;
+  const cell = (): RawTableStyleCell => {
+    const textStyleHandle = x.hr.hAbs(owner);
+    const textHeight = r.bd();
+    const alignment = r.bs();
+    const textColor = x.cmc(true).color;
+    const fillColor = x.cmc(true).color;
+    const fillOn = r.b() === 1;
+    const borders: NonNullable<RawTableStyleCell['borders']> = [];
+    for (let i = 0; i < 6; i++) {
+      const lineweight = r.bs();
+      const visible = r.b() === 1;
+      const color = x.cmc(true).color;
+      borders.push({ lineweight, visible, color });
+    }
+    const c: RawTableStyleCell = {
+      textStyleHandle, textHeight, alignment, textColor, fillColor, fillOn, borders
+    };
+    if (v >= 2007) {
+      c.dataType = r.bl();
+      c.unitType = r.bl();
+      c.format = x.text() || undefined;
+    }
+    return c;
+  };
+  const data = cell();
+  const title = cell();
+  const header = cell();
+  requireDataEnd(x, 'TABLESTYLE');
+  return {
+    description: description || undefined, flowDirection, flags,
+    horizontalMargin, verticalMargin, titleSuppressed, headerSuppressed,
+    data, title, header
+  };
+};
+
+/** One cell style of the R2010+ TABLESTYLE: the table's cell-style
+ *  grammar (type, data flag, override and merge flags, background, content
+ *  layout, content format, margins, borders) — token-walked to the bit
+ *  against the reference's 2010, 2013 and 2018 saves of three drawings.
+ *  A border's BL after its linetype counts INVISIBILITY (1 = hidden):
+ *  the same style's pre-2010 record says visible = 1 where this says 0. */
+const readTableStyleCell2010 = (
+  x: Ctx, owner: number
+): RawTableStyleCell & { margins?: number[]; overrides?: number } => {
+  const { r } = x;
+  r.bl();                                 /* style type: 1 table, 5 cell */
+  const hasMerge = r.bs();
+  const overrides = r.bl();               /* property override flags */
+  if (hasMerge) r.bl();                   /* merge flags */
+  const bg = x.cmc(true);
+  r.bl();                                 /* content layout */
+  r.bl(); r.bl();                         /* format override + property flags */
+  const dataType = r.bl();
+  const unitType = r.bl();
+  const format = x.text();
+  r.bd(); r.bd();                         /* rotation, block scale */
+  const alignment = r.bl();
+  const textColor = x.cmc(true).color;
+  const textStyleHandle = x.hr.hAbs(owner);
+  const textHeight = r.bd();
+  let margins: number[] | undefined;
+  if (r.bs()) {
+    margins = [];
+    for (let i = 0; i < 6; i++) margins.push(r.bd());
+  }
+  const numBorders = r.bl();
+  if (numBorders > 6) throw new RangeError('table style borders');
+  const borders: NonNullable<RawTableStyleCell['borders']> = [];
+  for (let i = 0; i < numBorders; i++) {
+    if (!r.bl()) continue;                /* edge mask */
+    r.bl(); r.bl();                       /* overrides, border type */
+    const color = x.cmc(true).color;
+    const lineweight = r.bl();
+    const ltypeHandle = x.hr.hAbs(owner);
+    const visible = r.bl() === 0;
+    r.bd();                               /* double-line spacing */
+    borders.push({ lineweight, visible, color, ltypeHandle });
+  }
+  /* the fill: a 0xC8 "none" method means no fill; the legacy record
+     spells the same as fill colour 7 with the switch off */
+  const fillOn = bg.color.kind !== 'byBlock' || bg.index !== 0;
+  const c: RawTableStyleCell & { margins?: number[]; overrides?: number } = {
+    textStyleHandle, textHeight, alignment, textColor,
+    fillColor: fillOn ? bg.color : { kind: 'aci', index: 7 }, fillOn,
+    borders: borders.length === 6 ? borders : undefined,
+    dataType, unitType, format: format || undefined, overrides
+  };
+  if (margins) c.margins = margins;
+  return c;
+};
+
+/** TABLESTYLE from R2010: a byte, the name, the flag word (the pre-2010
+ *  group 71), then the table's own cell style (id 101, class 5, named
+ *  "Table": the margins live in it as top/left/bottom/right plus two
+ *  spacings, and a flow direction of "up" as override bit 0x10000) and a
+ *  map of named cell styles, each an id, the cell style, the id again, a
+ *  class word and the name: _TITLE, _HEADER and _DATA. A hard-owner NULL
+ *  precedes the first text style in the handle stream. The title and
+ *  header suppression switches are not stored in this record (the
+ *  reference keeps them elsewhere). */
+const readTableStyle2010 = (x: Ctx, owner: number): RawTableStyle => {
+  const { r } = x;
+  r.rc();                                 /* unknown, 0 */
+  const description = x.text();
+  const flags = r.bl();
+  x.hr.h();                               /* unknown hard owner (NULL) */
+  r.bl(); r.bl();                         /* default cell style id / class */
+  const table = readTableStyleCell2010(x, owner);
+  x.text();                               /* default cell style name */
+  r.bl(); r.bl();                         /* constants 4, 2 */
+  const count = r.bl();
+  if (count > 64) throw new RangeError('table style cell styles');
+  const out: RawTableStyle = {
+    description: description || undefined,
+    flowDirection: (table.overrides ?? 0) & 0x10000 ? 1 : 0, flags,
+    horizontalMargin: table.margins?.[1],
+    verticalMargin: table.margins?.[0],
+    titleSuppressed: false, headerSuppressed: false
+  };
+  for (let i = 0; i < count; i++) {
+    r.bl();                               /* id */
+    const cell = readTableStyleCell2010(x, owner);
+    delete cell.margins;
+    delete cell.overrides;
+    const id = r.bl();
+    r.bl();                               /* class: 1 title/header, 2 data */
+    const name = x.text().toUpperCase();
+    if (name === '_TITLE' || (!name && id === 1)) out.title = cell;
+    else if (name === '_HEADER' || (!name && id === 2)) out.header = cell;
+    else if (name === '_DATA' || (!name && id === 3)) out.data = cell;
+  }
+  requireDataEnd(x, 'TABLESTYLE');
+  return out;
+};
+
+/** MLEADERSTYLE (an R2008 class; the reference writes it into 2000 and
+ *  2004 saves too): the writer's own field order, walked bit-exact
+ *  against the reference's 2000 … 2018 saves of its multileader sample.
+ *  R2010 prefixes a class version and appends the attachment trio,
+ *  R2013 one more flag. */
+const readMLeaderStyle = (x: Ctx, owner: number): RawMLeaderStyle => {
+  const { r, v } = x;
+  const s: RawMLeaderStyle = {};
+  if (v >= 2010) r.bs();                  /* class version (2) */
+  s.contentType = r.bs();
+  s.drawMLeaderOrder = r.bs();
+  s.drawLeaderOrder = r.bs();
+  s.maxLeaderPoints = r.bl();
+  s.firstSegmentAngle = r.bd();
+  s.secondSegmentAngle = r.bd();
+  s.leaderType = r.bs();
+  s.lineColor = x.cmc().color;
+  s.ltypeHandle = x.hr.hAbs(owner);
+  s.lineweight = r.bl();
+  s.landing = r.b() === 1;
+  s.landingGap = r.bd();
+  s.dogleg = r.b() === 1;
+  s.doglegLength = r.bd();
+  s.description = x.text() || undefined;
+  s.arrowHandle = x.hr.hAbs(owner);
+  s.arrowSize = r.bd();
+  s.defaultText = x.text() || undefined;
+  s.textStyleHandle = x.hr.hAbs(owner);
+  s.textLeftAttachment = r.bs();
+  s.textRightAttachment = r.bs();
+  s.textAngleType = r.bs();
+  s.textAlignment = r.bs();
+  s.textColor = x.cmc().color;
+  s.textHeight = r.bd();
+  s.textFrame = r.b() === 1;
+  s.alwaysAlignLeft = r.b() === 1;
+  s.alignSpace = r.bd();
+  s.blockHandle = x.hr.hAbs(owner);
+  s.blockColor = x.cmc().color;
+  const [sx, sy, sz] = r.bd3();
+  s.blockScale = pt3(sx, sy, sz);
+  s.useBlockScale = r.b() === 1;
+  s.blockRotation = r.bd();
+  s.useBlockRotation = r.b() === 1;
+  s.blockConnection = r.bs();
+  s.scale = r.bd();
+  s.propertyChanged = r.b() === 1;
+  s.annotative = r.b() === 1;
+  s.breakSize = r.bd();
+  if (v >= 2010) {
+    s.attachmentDirection = r.bs();
+    s.bottomAttachment = r.bs();
+    s.topAttachment = r.bs();
+  }
+  if (v >= 2013) r.b();                   /* extended text flag */
+  requireDataEnd(x, 'MLEADERSTYLE');
+  return s;
+};
+
 const decodeObjectSpecific = (x: Ctx, typeName: string, raw: RawObject): void => {
   const { r, v } = x;
   switch (typeName) {
+    case 'TABLESTYLE': {
+      raw.tableStyleObj = v >= 2010
+        ? readTableStyle2010(x, raw.handle)
+        : readTableStyleLegacy(x, raw.handle);
+      return;
+    }
+
+    case 'MLEADERSTYLE': {
+      raw.mleaderStyleObj = readMLeaderStyle(x, raw.handle);
+      return;
+    }
+
     case 'ACAD_PROXY_OBJECT': {
       /* The dictionary-owned twin of the proxy entity: same prologue, same
          opaque tail, retained the same way so it can be written back. */
@@ -3147,6 +3695,8 @@ const decodeObjectSpecific = (x: Ctx, typeName: string, raw: RawObject): void =>
     case 'TABLECONTENT': {
       /* the grid an R2010+ ACAD_TABLE points at */
       raw.tableContent = readTableContent(x);
+      if (raw.tableContent.cellBlocks) raw.tableCellBlocks = raw.tableContent.cellBlocks;
+      if (raw.tableContent.cellTextStyles) raw.tableCellTextStyles = raw.tableContent.cellTextStyles;
       return;
     }
 
@@ -3384,16 +3934,29 @@ const decodeObjectSpecific = (x: Ctx, typeName: string, raw: RawObject): void =>
     case 'DICTIONARY': {
       const num = r.bl();
       if (num > 100000) return;
-      if (v >= 2000) r.bs();              /* cloning */
+      const cloning = v >= 2000 ? r.bs() : undefined;   /* cloning */
       /* the hard-owner RC arrives with R13c3; plain R13 (AC1012) runs the
          entry names straight on from the count. Reading it there shifts
          every following string by a byte and loses the dictionary. */
-      if (v >= 14) r.rc();                /* is hard owner */
+      const hardOwner = v >= 14 ? r.rc() !== 0 : undefined;
       const names: string[] = [];
       for (let i = 0; i < num; i++) names.push(x.text());
       const handles: number[] = [];
-      for (let i = 0; i < num; i++) handles.push(x.handle(raw.handle));
-      raw.dictionary = { names, handles };
+      const codes: number[] = [];
+      for (let i = 0; i < num; i++) {
+        /* the code is kept with the target: a sealed extension
+           dictionary is re-encoded from its entries on a rewrite, and
+           spells each one the way the source did (soft or hard owner) */
+        const ref = x.hr.h();
+        codes.push(ref.code);
+        handles.push(
+          ref.code === 0x6 ? raw.handle + 1
+            : ref.code === 0x8 ? raw.handle - 1
+              : ref.code === 0xA ? raw.handle + ref.value
+                : ref.code === 0xC ? raw.handle - ref.value
+                  : ref.value);
+      }
+      raw.dictionary = { names, handles, codes, cloning, hardOwner };
       return;
     }
 
@@ -3782,6 +4345,7 @@ export const decodeObjectBody = (
     raw.hasDsData = x.hasDsData || undefined;
     raw.proxyGraphics = x.proxyGraphics;
     raw.owner = x.ownerHandle;
+    if (x.xdictHandle) raw.xdict = x.xdictHandle;
     raw.layerHandle = x.layerHandle;
     raw.ltypeFlags = common.ltypeFlags;
     raw.ltypeHandle = x.ltypeHandle;
@@ -3826,6 +4390,8 @@ export const decodeObjectBody = (
       /* the type-specific decode is what reads the style reference */
       raw.styleHandle = x.styleHandle;
       entity.handle = raw.handle.toString(16).toUpperCase();
+      if (x.xdictHandle) entity.xdict = x.xdictHandle.toString(16).toUpperCase();
+      if (x.reactors) entity.reactors = x.reactors.map((h) => h.toString(16).toUpperCase());
       entity.color = common.color;
       if (common.ltypeScale !== 1) entity.linetypeScale = common.ltypeScale;
       if (common.lineweight !== undefined) entity.lineweight = common.lineweight;
@@ -3849,6 +4415,8 @@ export const decodeObjectBody = (
   const common = x.commonObject(isControl);
   raw.handle = common.handle;
   raw.owner = x.ownerHandle;
+  if (x.xdictHandle) raw.xdict = x.xdictHandle;
+  if (x.reactors) raw.reactors = x.reactors;
   const dpos = r.pos;
   const hpos = x.hr.pos;
   const spos = x.sr?.pos;
@@ -3868,7 +4436,7 @@ export const decodeObjectBody = (
     || raw.imageDef || raw.underlayDef || raw.visibility || raw.blockParam
     || raw.blockAction || raw.tableContent || raw.geoData || raw.mlineStyle
     || raw.table || raw.proxyObject || raw.ucs || raw.view || raw.vport
-    || raw.sortents;
+    || raw.sortents || raw.tableStyleObj || raw.mleaderStyleObj;
   if ((failed && !modeled) || (cls && !modeled && !isControl)) {
     r.pos = dpos;
     x.hr.pos = hpos;
@@ -3883,6 +4451,27 @@ export const decodeObjectBody = (
       ...captureSealed(x),
       /* the seal starts past the common prologue, so the EED read there
          is carried beside it — a record may be nothing but its EED */
+      ...(x.xdata ? { xdata: x.xdata } : {})
+    };
+  } else if (!failed && modeled && DUAL_SEALED.has(typeName)) {
+    /* Modeled AND sealed: the records of an ownership chain the writer
+       re-attaches rather than re-creates — an extension dictionary and
+       the XRECORDs it lists, the nodes of a dynamic block's evaluation
+       graph. The decoded view feeds the model (dictionary names, xrecord
+       values, the block's parameters and states); the seal is what goes
+       back out under the original owner. The reader keeps the seal only
+       where the chain is not its own to rebuild (see reader.ts). */
+    r.pos = dpos;
+    x.hr.pos = hpos;
+    if (x.sr && spos !== undefined) x.sr.pos = spos;
+    raw.unknownObject = {
+      sourceType: cls?.dxfName ?? typeName,
+      appClass: cls
+        ? { dxfName: cls.dxfName, cppName: cls.cppName, appName: cls.appName }
+        : undefined,
+      typeCode: FIXED_TYPES[type] ? type : undefined,
+      encoding: encodingGroup(ctx.v),
+      ...captureSealed(x),
       ...(x.xdata ? { xdata: x.xdata } : {})
     };
   }

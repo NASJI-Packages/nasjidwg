@@ -24,6 +24,9 @@ export interface HeaderVars {
   textStyleHandle?: number;
   celtypeHandle?: number;
   dimStyleHandle?: number;
+  /** The named objects dictionary's handle: the root the reader walks
+   *  to tell the dictionary tree from the extension dictionaries. */
+  nodHandle?: number;
   handseed?: number;
   celColorIndex?: number;
   /** UCSORG/UCSXDIR/UCSYDIR: the current coordinate system. A drawing laid
@@ -270,7 +273,8 @@ const readHeaderVarsWith = (
     }
     for (let i = 0; i < 9; i++) H();      /* control objects */
     if (v <= 2000) H();                   /* VX control */
-    H(); H(); H();                        /* group/mlinestyle/NOD dicts */
+    H(); H();                             /* group/mlinestyle dicts */
+    out.nodHandle = H() || undefined;     /* the named objects dictionary */
     if (v >= 2000) {
       r.bs(); r.bs();                     /* TSTACKALIGN/SIZE */
       if (v < 2007) { text(); text(); }   /* HYPERLINKBASE, STYLESHEET */
