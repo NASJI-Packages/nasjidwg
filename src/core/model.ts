@@ -713,6 +713,18 @@ export interface UnknownObject {
   /** Handle of the source file's owner (hex) — recorded so a future
    *  rewrite can restore the original parent chain. */
   ownerHandle?: string;
+  /** Where the record hangs on the named-objects tree: the dictionary
+   *  keys from the named objects dictionary down to the dictionary that
+   *  owns it — `['ACAD_SCALELIST']` for a SCALE listed under the scale
+   *  list as `name`, `[]` for a record straight under the named objects
+   *  dictionary. Set only when that dictionary is reachable from the
+   *  named objects dictionary through dictionaries alone. Absent for a
+   *  record that hangs off an extension dictionary of an entity, table
+   *  record or other object: the writers rebuild that owner from the
+   *  model and cannot re-attach the record (the DXF writer leaves such a
+   *  record out — listed under the named objects dictionary it would
+   *  only dangle, and the reference audits every pointer of it). */
+  dictPath?: string[];
   /** DXF-side sealed retention: raw tags, verbatim. */
   tags?: [number, string][];
   /** The record's own extended data (EED), decoded — the DXF tags carry

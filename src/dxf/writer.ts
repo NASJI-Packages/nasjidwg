@@ -265,9 +265,37 @@ export const writeDxf = (drawing: Drawing): string => {
   /* Unknown objects that arrived through DXF carry their raw tags; those
      go back out verbatim under the named objects dictionary. Ones sealed
      by the DWG readers carry bits instead of tags — a different medium —
-     and stay out of a DXF, exactly as before. */
+     and stay out of a DXF, exactly as before.
+     One exception, on the version axis: the reference reads every record
+     with the filer of the DECLARED version, and a class whose spelling
+     changed after R2000 cannot travel verbatim from a later file into
+     this AC1015 one. The known cases are the records that embed typed
+     values — TABLECONTENT's cells, DATALINK's connection data — whose
+     R2008+ spelling (93/90/…/94/300/302/304 ACVALUE_END) makes the R2000
+     filer stop with "Premature end of object", and the whole file is
+     discarded. Such a record is recognized by its class when the source
+     was beyond R2000, and by the ACVALUE_END marker itself whatever the
+     source said. The table's content is written natively from the
+     model, so leaving the record out loses nothing visible; from an
+     R2000 source the record is in R2000 spelling and travels. */
+  const POST_R2000_SPELLING = new Set(['TABLECONTENT', 'DATALINK']);
+  const sourceBeyondR2000 =
+    ['R2004', 'R2007', 'R2010', 'R2013', 'R2018'].includes(drawing.header.version ?? '');
+  const spelledPastR2000 = (o: { sourceType: string; tags?: [number, string][] }): boolean =>
+    (sourceBeyondR2000 && POST_R2000_SPELLING.has(o.sourceType.toUpperCase()))
+    || !!o.tags?.some(([c, v]) => c === 304 && v.trim().toUpperCase() === 'ACVALUE_END');
+  /* And on the placement axis: a record with a source owner but no
+     place on the named-objects tree (dictPath) hung off the extension
+     dictionary of an entity, a table record or another object — a
+     table's TABLECONTENT, an MTEXT's FIELDs, a dynamic block's
+     evaluation graph. That owner is rebuilt from the model without its
+     extension dictionary, so the record cannot be re-attached; listed
+     under the named objects dictionary instead it would only dangle,
+     and AUDIT reports each of its pointers ("Incorrect object node id").
+     Such a record stays in the model and out of the file. */
   const sealedObjs = (drawing.unknownObjects ?? [])
-    .filter((o) => o.tags && o.tags.length);
+    .filter((o) => o.tags && o.tags.length && !spelledPastR2000(o)
+      && (o.dictPath !== undefined || o.ownerHandle === undefined));
   const proxyClasses = new Map<string, { cpp: string; app: string; ent: boolean }>();
   const proxyClassKey = (
     appClass: { dxfName: string } | undefined, sourceType: string | undefined,
@@ -474,11 +502,21 @@ export const writeDxf = (drawing: Drawing): string => {
   /* the point glyph and its size (PDMODE 1 = a POINT draws nothing) */
   if (isNum(hdr.vars?.PDMODE)) { w(9, '$PDMODE'); w(70, hdr.vars!.PDMODE as number); }
   if (isNum(hdr.vars?.PDSIZE)) { w(9, '$PDSIZE'); w(40, fmt(hdr.vars!.PDSIZE as number)); }
-  /* unknown vars the reader preserved travel back as [code, value] pairs */
+  /* unknown vars the reader preserved travel back as [code, value] pairs
+     — except the handle-valued ones: $HANDSEED is this writer's own (a
+     carried one would follow it and win, and a seed below the numbers
+     used here has the reference reseating records into collisions —
+     "Bad handle … already in use", file discarded), and a pointer such
+     as $CMATERIAL or $INTERFEREOBJVS names an object of the source's
+     numbering, which is gone */
   for (const [name, v] of Object.entries(hdr.vars ?? {})) {
     if (!Array.isArray(v)) continue;
     const groups = v as unknown[];
     if (!groups.every((g) => Array.isArray(g) && g.length === 2 && isNum(g[0]))) continue;
+    if (groups.some((g) => {
+      const c = (g as [number, unknown])[0];
+      return c === 5 || c === 105 || (c >= 320 && c <= 369);
+    })) continue;
     w(9, name);
     for (const g of groups as [number, string | number][]) w(g[0], g[1]);
   }
@@ -573,6 +611,37 @@ export const writeDxf = (drawing: Drawing): string => {
     for (const [key, pc] of proxyClasses) {
       w(0, 'CLASS'); w(1, key); w(2, pc.cpp); w(3, pc.app);
       w(90, pc.ent ? 4095 : 0); w(280, 1); w(281, pc.ent ? 1 : 0);
+    }
+    /* Sealed records re-declare the class their source declared for
+       them, application name included: a class the reference loads on
+       demand (WIPEOUTVARIABLES from the WipeOut module, say) is skipped
+       on open without its CLASS record, and the dictionary entry naming
+       the record is then audited away. Classes already declared above
+       are not repeated. */
+    {
+      const declared = new Set<string>([
+        'ACDBDICTIONARYWDFLT', 'ACDBPLACEHOLDER',
+        ...(usesImages ? ['IMAGE', 'WIPEOUT', 'IMAGEDEF', 'RASTERVARIABLES'] : []),
+        ...underlayKinds.flatMap((k) => [k.toUpperCase() + 'UNDERLAY', k.toUpperCase() + 'DEFINITION']),
+        ...(usesTables ? ['ACAD_TABLE', 'TABLESTYLE'] : []),
+        ...(usesMLeaders ? ['MULTILEADER', 'MLEADERSTYLE'] : []),
+        ...[...proxyClasses.keys()].map((k) => k.toUpperCase())
+      ]);
+      const sealedClasses: { cls: { dxfName: string; cppName: string; appName: string }; ent: boolean }[] = [];
+      for (const o of sealedObjs) if (o.appClass) sealedClasses.push({ cls: o.appClass, ent: false });
+      for (const e of allEntities()) {
+        if (e.type === 'unknown' && e.tags?.length && e.appClass) {
+          sealedClasses.push({ cls: e.appClass, ent: true });
+        }
+      }
+      for (const { cls: c, ent } of sealedClasses) {
+        const key = c.dxfName.toUpperCase();
+        if (!key || declared.has(key)) continue;
+        declared.add(key);
+        w(0, 'CLASS'); w(1, c.dxfName); w(2, c.cppName || c.dxfName);
+        w(3, c.appName || 'ObjectDBX Classes');
+        w(90, ent ? 4095 : 0); w(280, 0); w(281, ent ? 1 : 0);
+      }
     }
     w(0, 'ENDSEC');
   }
@@ -861,9 +930,22 @@ export const writeDxf = (drawing: Drawing): string => {
      point at nothing (every object here is renumbered) and AUDIT strips
      each one as "not an entity". */
   const newHandleOf = new Map<string, string>();
+  /* the same map for the dictionary side — proxy objects, sealed
+     records, xrecords — filled as their numbers are allocated */
+  const objHandleOf = new Map<string, string>();
+  /** The number a source handle got in this file, whichever side it is
+   *  on; undefined when the object it named was not written here. */
+  const outHandleOf = (src: string): string | undefined => {
+    const k = src.trim().toUpperCase();
+    return newHandleOf.get(k) ?? objHandleOf.get(k);
+  };
+  /* the number each written entity got, source handle or not */
+  const writtenHandle = new WeakMap<Entity, string>();
   /* a leader's annotation (group 340) must name the entity it annotates
      under the number that entity gets HERE, whichever of the two is
-     written first: those targets are numbered ahead of time */
+     written first: those targets are numbered ahead of time — and so is
+     every entity an xdata 1005 names (a column MTEXT's further columns,
+     among others), for the same reason */
   const allWritten = (): Entity[] => {
     const out = [...drawing.entities, ...(drawing.paperSpace ?? [])];
     for (const nm of blockNames) out.push(...blocks[nm].entities);
@@ -871,10 +953,16 @@ export const writeDxf = (drawing: Drawing): string => {
   };
   {
     const present = new Set(allWritten().map((e) => e.handle?.toUpperCase()).filter((h): h is string => !!h));
+    const ahead = (h: string): void => {
+      const k = h.toUpperCase();
+      if (present.has(k) && !newHandleOf.has(k)) newHandleOf.set(k, handle());
+    };
     for (const e of allWritten()) {
-      if (e.type === 'leader' && e.annotation && present.has(e.annotation.toUpperCase())
-          && !newHandleOf.has(e.annotation.toUpperCase())) {
-        newHandleOf.set(e.annotation.toUpperCase(), handle());
+      if (e.type === 'leader' && e.annotation) ahead(e.annotation);
+      for (const g of e.xdata ?? []) {
+        for (const v of g.values) {
+          if ('value' in v && v.code === 1005) ahead(String(v.value));
+        }
       }
     }
   }
@@ -883,6 +971,7 @@ export const writeDxf = (drawing: Drawing): string => {
     const h = pre ?? handle();
     w(0, dxfName); w(5, h);
     if (ent.handle) newHandleOf.set(ent.handle.toUpperCase(), h);
+    writtenHandle.set(ent, h);
     w(330, currentOwner);
     w(100, 'AcDbEntity');
     if (inPaperSpace) w(67, 1);
@@ -925,6 +1014,16 @@ export const writeDxf = (drawing: Drawing): string => {
     refs?: { code: number; value: string }[];
     proxyVersion?: number; proxyMaint?: number; fromDxf?: boolean;
   }): void => {
+    /* In the order the reference's own R2000 DXF spells a proxy: the
+       packed version word (95: version low, maintenance high) and the
+       origin flag (70) first, then the display list, the entity data,
+       the references, and 94 closing the record. The documented order
+       lists 94/95/70 last, but a 94 ahead of 95 and 70 ends the record
+       early in the reference's reader — a file whose proxy objects were
+       spelled that way lost its named objects dictionary on open
+       ("GroupTable dictionary was not defined") and was discarded. */
+    w(95, (p.proxyMaint ?? 0) * 0x10000 + (p.proxyVersion ?? 0));
+    w(70, p.fromDxf ? 1 : 0);
     if (p.graphicsData) {
       const bytes = fromBase64(p.graphicsData);
       w(92, bytes.length);
@@ -940,9 +1039,6 @@ export const writeDxf = (drawing: Drawing): string => {
       w(ref.code === 3 || ref.code === 5 ? 340 : 330, ref.value);
     }
     w(94, 0);                            /* end of the reference run */
-    /* 95 is the documented packed word: version low, maintenance high */
-    w(95, (p.proxyMaint ?? 0) * 0x10000 + (p.proxyVersion ?? 0));
-    w(70, p.fromDxf ? 1 : 0);
   };
 
   /* MTEXT body: symbols encoded, brackets mirrored for CAD's non-mirroring
@@ -1151,10 +1247,11 @@ export const writeDxf = (drawing: Drawing): string => {
           w(v.code + 20, fmt(v.point.z ?? 0));
         } else if (v.code === 1005) {
           /* the source drawing's handle space is gone — every object was
-             renumbered — so a carried 1005 can only dangle. AUDIT flags
-             each one ("XData Handle Unknown") and nulls it; null it here
-             instead, which is the same end state without the noise. */
-          w(1005, 0);
+             renumbered — so a carried 1005 is repointed at the number its
+             target got here, and nulled when the target was not written:
+             AUDIT flags a dangling one ("XData Handle Unknown") and nulls
+             it, which is the same end state without the noise. */
+          w(1005, outHandleOf(String(v.value)) ?? 0);
         } else {
           w(v.code, typeof v.value === 'number' ? fmt(v.value) : v.value);
         }
@@ -1168,9 +1265,18 @@ export const writeDxf = (drawing: Drawing): string => {
    *  ours for the output file to cohere: the record's own handle (group 5,
    *  or 105 for the DIMVAR-style records, ahead of the first subclass
    *  marker) becomes the freshly allocated one, and a bare owner group 330
-   *  in that same region is repointed at the real owner. A 330 inside a
-   *  102-fenced run (reactors, extension dictionary) is application data
-   *  and passes untouched; so does everything past the first 100. */
+   *  in that same region is repointed at the real owner. Everything past
+   *  the first 100 passes untouched.
+   *  The 102 fences of that same region name objects of the source file:
+   *  `{ACAD_REACTORS` the records watching this one, `{ACAD_XDICTIONARY`
+   *  its extension dictionary. Every object here is renumbered and no
+   *  dictionary is carried, so a fence left verbatim points at nothing
+   *  — or at whatever record happens to hold that number now — and AUDIT
+   *  reports each extension dictionary it cannot reach ("Cannot access …
+   *  Removed"). A reactor is therefore repointed at the number its target
+   *  got here and dropped when the target was not written; the extension
+   *  dictionary fence goes altogether; a fence of any other name is an
+   *  application's own and travels verbatim. */
   const writeSealedTags = (
     tags: readonly [number, string][], newHandle: string, owner: string
   ): void => {
@@ -1185,13 +1291,34 @@ export const writeDxf = (drawing: Drawing): string => {
       if (c === 5 || c === 105) hasHandle = true;
     }
     if (!hasHandle) w(5, newHandle);
-    let fenced = false;
     let handleDone = false, ownerDone = false;
     for (let i = 0; i < tags.length; i++) {
       const [c, v] = tags[i];
-      if (c === 102) {
-        fenced = !fenced;
-      } else if (i < firstSubclass && !fenced) {
+      if (c === 102 && i < firstSubclass && v.trim().startsWith('{')) {
+        /* a fenced run: everything up to the closing 102 */
+        let j = i + 1;
+        while (j < tags.length && tags[j][0] !== 102) j++;
+        const name = v.trim().toUpperCase();
+        if (name === '{ACAD_REACTORS') {
+          const kept: [number, string][] = [];
+          for (let k = i + 1; k < j; k++) {
+            const h = outHandleOf(tags[k][1]);
+            if (h) kept.push([tags[k][0], h]);
+          }
+          if (kept.length) {
+            out.push('102', v);
+            for (const [rc, rv] of kept) out.push(String(rc), rv);
+            out.push('102', '}');
+          }
+        } else if (name !== '{ACAD_XDICTIONARY') {
+          for (let k = i; k <= j && k < tags.length; k++) {
+            out.push(String(tags[k][0]), tags[k][1]);
+          }
+        }
+        i = j;
+        continue;
+      }
+      if (i < firstSubclass) {
         if ((c === 5 || c === 105) && !handleDone) {
           handleDone = true;
           w(c, newHandle);
@@ -2303,7 +2430,10 @@ export const writeDxf = (drawing: Drawing): string => {
 
   /* ---- OBJECTS (root dictionary, layouts, groups, mline styles, images) ---- */
   const groups = drawing.groups ?? [];
-  const xrecords = drawing.xrecords ?? [];
+  /* the column-MTEXT recompose record is derived below from the MTEXTs
+     themselves; a carried one would name source handles and double it */
+  const xrecords = (drawing.xrecords ?? [])
+    .filter((x) => (x.name ?? '').toUpperCase() !== 'ACDB_RECOMPOSE_DATA');
   const geo = drawing.geoData;
   /* Unconditional: a DXF without the root dictionary (and the group and
      plot-style dictionaries under it) is discarded by DXFIN outright. */
@@ -2323,6 +2453,109 @@ export const writeDxf = (drawing: Drawing): string => {
     const mlHandles = mlStyleHandles;         /* fixed before the entities */
     const proxyObjHandles = proxyObjs.map(() => handle());
     const sealedObjHandles = sealedObjs.map(() => handle());
+    proxyObjs.forEach((p, i) => {
+      if (p.handle) objHandleOf.set(p.handle.toUpperCase(), proxyObjHandles[i]);
+    });
+    sealedObjs.forEach((o, i) => {
+      if (o.handle) objHandleOf.set(o.handle.toUpperCase(), sealedObjHandles[i]);
+    });
+    /* Column MTEXT in an R2000 file: the further columns are MTEXT
+       entities of their own, named by handle in the first column's
+       ACAD_MTEXT_COLUMNS xdata (the 1005 above, repointed). The reference
+       re-attaches them on load only for the parents an
+       ACDB_RECOMPOSE_DATA record under the named objects dictionary
+       lists — 90 = 1, then one 330 per parent — with the record the
+       columns load as one MTEXT, without it as two (externally proven on
+       the reference's own R2000 DXF of its Text-and-Tables sample; the
+       DWG writers write the same record). */
+    const isColumnParent = (e: Entity): boolean => e.type === 'mtext'
+      && !!e.xdata?.some((g) => g.values.some((v) => 'value' in v
+        && v.code === 1000 && v.value === 'ACAD_MTEXT_COLUMNS_BEGIN'));
+    const columnParents = allWritten().filter(isColumnParent)
+      .map((e) => writtenHandle.get(e))
+      .filter((h): h is string => !!h);
+    const recomposeHandle = columnParents.length ? handle() : '';
+
+    /* ---- the named-objects tree the sealed records hang from. Each
+       carries the keys of the dictionaries from the named objects
+       dictionary down to its owner (dictPath) and its own key (name).
+       A dictionary this writer synthesizes anyway (the named ones below)
+       takes the sealed entries as extra entries — a key that collides
+       with a synthesized entry loses, record and all — and every other
+       dictionary on a path is rebuilt as a plain DICTIONARY, so a SCALE
+       lands under ACAD_SCALELIST and a MATERIAL under ACAD_MATERIAL as
+       in the source, not flattened into the named objects dictionary
+       where two "Standard"s would collide. ---- */
+    interface DictNode {
+      path: string[]; handle: string; keys: Set<string>; entries: [string, string][];
+    }
+    const upper = (s: string): string => s.toUpperCase();
+    const synthesizedTop = new Map<string, { handle: string; keys: string[] }>();
+    const synth = (name: string, h: string, keys: string[]): void => {
+      if (h) synthesizedTop.set(name, { handle: h, keys });
+    };
+    synth('ACAD_PLOTSTYLENAME', plotStyleDictHandle, ['Normal']);
+    synth('ACAD_GROUP', groupDictHandle, groups.map((g) => g.name));
+    synth('ACAD_LAYOUT', layoutDictHandle, outLayouts.map(({ l }) => l.name));
+    synth('ACAD_MLINESTYLE', mlDictHandle, mlStyles.map((m) => m.name));
+    synth('ACAD_TABLESTYLE', tableStyleDictHandle, ['Standard']);
+    synth('ACAD_MLEADERSTYLE', mleaderStyleDictHandle, ['Standard']);
+    synth('ACAD_IMAGE_DICT', imgDictHandle,
+      [...imageDefs.keys()].map((_, i) => 'ND_IMAGE_' + (i + 1)));
+    for (const [kind, h] of underlayDicts) {
+      synth('ACAD_' + kind.toUpperCase() + 'DEFINITIONS', h,
+        [...underlayDefs.values()].filter((d) => d.kind === kind)
+          .map((_, i) => kind.toUpperCase() + '_' + (i + 1)));
+    }
+    const nodes = new Map<string, DictNode>();
+    const nodeKey = (p: string[]): string => p.map(upper).join(' ');
+    const rebuiltDicts: DictNode[] = [];
+    nodes.set('', {
+      path: [], handle: rootHandle, entries: [],
+      keys: new Set([
+        ...synthesizedTop.keys(),
+        ...(geoHandle ? ['ACAD_GEOGRAPHICDATA'] : []),
+        ...proxyObjs.map((p, i) => upper(p.name ?? ('PROXY_OBJECT_' + (i + 1)))),
+        ...(recomposeHandle ? ['ACDB_RECOMPOSE_DATA'] : [])
+      ])
+    });
+    const nodeFor = (path: string[]): DictNode | null => {
+      const k = nodeKey(path);
+      const have = nodes.get(k);
+      if (have) return have;
+      const parent = nodeFor(path.slice(0, -1));
+      if (!parent) return null;
+      const name = path[path.length - 1];
+      const top = path.length === 1 ? synthesizedTop.get(upper(name)) : undefined;
+      let n: DictNode;
+      if (top) {
+        n = { path, handle: top.handle, keys: new Set(top.keys.map(upper)), entries: [] };
+      } else {
+        /* a synthesized entry that is not a dictionary holds the key */
+        if (parent.keys.has(upper(name))) return null;
+        n = { path, handle: handle(), keys: new Set(), entries: [] };
+        parent.entries.push([name, n.handle]);
+        parent.keys.add(upper(name));
+        rebuiltDicts.push(n);
+      }
+      nodes.set(k, n);
+      return n;
+    };
+    /* the owner each sealed record leaves under; null = not placed */
+    const sealedOwner: (string | null)[] = sealedObjs.map((o, i) => {
+      const n = nodeFor(o.dictPath ?? []);
+      if (!n) return null;
+      const key = o.name ?? ('SEALED_OBJECT_' + (i + 1));
+      if (n.keys.has(upper(key))) return null;
+      n.keys.add(upper(key));
+      n.entries.push([key, sealedObjHandles[i]]);
+      return n.handle;
+    });
+    /** The extra entries a synthesized dictionary lists: sealed records
+     *  placed under it and rebuilt dictionaries below it. */
+    const extraEntries = (name: string): void => {
+      for (const [k, h] of nodes.get(nodeKey([name]))?.entries ?? []) { w(3, k); w(350, h); }
+    };
 
     w(0, 'DICTIONARY'); w(5, rootHandle); w(330, 0);
     w(100, 'AcDbDictionary'); w(281, 1);
@@ -2344,11 +2577,10 @@ export const writeDxf = (drawing: Drawing): string => {
       w(3, p.name ?? ('PROXY_OBJECT_' + (i + 1)));
       w(350, proxyObjHandles[i]);
     });
-    /* sealed unknown objects sit beside them under their retained names */
-    sealedObjs.forEach((o, i) => {
-      w(3, o.name ?? ('SEALED_OBJECT_' + (i + 1)));
-      w(350, sealedObjHandles[i]);
-    });
+    /* sealed records placed straight under the named objects dictionary,
+       and the rebuilt dictionaries the others hang from */
+    for (const [k, h] of nodes.get('')?.entries ?? []) { w(3, k); w(350, h); }
+    if (recomposeHandle) { w(3, 'ACDB_RECOMPOSE_DATA'); w(350, recomposeHandle); }
 
     /* the plot-style dictionary every LAYER's group 390 points into:
        a with-default dictionary whose one entry, Normal, is a
@@ -2356,6 +2588,7 @@ export const writeDxf = (drawing: Drawing): string => {
     w(0, 'ACDBDICTIONARYWDFLT'); w(5, plotStyleDictHandle); w(330, rootHandle);
     w(100, 'AcDbDictionary'); w(281, 1);
     w(3, 'Normal'); w(350, plotStyleHolderHandle);
+    extraEntries('ACAD_PLOTSTYLENAME');
     w(100, 'AcDbDictionaryWithDefault'); w(340, plotStyleHolderHandle);
     w(0, 'ACDBPLACEHOLDER'); w(5, plotStyleHolderHandle); w(330, plotStyleDictHandle);
 
@@ -2371,12 +2604,24 @@ export const writeDxf = (drawing: Drawing): string => {
       writeXdata(p);
     });
 
+    /* ---- the rebuilt dictionaries of the named-objects tree, each
+       under its parent, listing the sealed records and dictionaries
+       placed below it ---- */
+    for (const n of rebuiltDicts) {
+      const parent = nodes.get(nodeKey(n.path.slice(0, -1)));
+      w(0, 'DICTIONARY'); w(5, n.handle); w(330, parent?.handle ?? rootHandle);
+      w(100, 'AcDbDictionary'); w(281, 1);
+      for (const [k, h] of n.entries) { w(3, k); w(350, h); }
+    }
+
     /* ---- sealed unknown objects: the retained record, verbatim, with
-       only the handle renumbered and the owner repointed at the named
-       objects dictionary that now lists it ---- */
+       only the handle renumbered and the owner repointed at the
+       dictionary that now lists it ---- */
     sealedObjs.forEach((o, i) => {
+      const owner = sealedOwner[i];
+      if (!owner) return;
       w(0, o.sourceType);
-      writeSealedTags(o.tags ?? [], sealedObjHandles[i], rootHandle);
+      writeSealedTags(o.tags ?? [], sealedObjHandles[i], owner);
     });
 
     for (const [kind, dictH] of underlayDicts) {
@@ -2384,6 +2629,7 @@ export const writeDxf = (drawing: Drawing): string => {
       w(0, 'DICTIONARY'); w(5, dictH); w(330, rootHandle);
       w(100, 'AcDbDictionary'); w(281, 1);
       defs.forEach((d, i) => { w(3, kind.toUpperCase() + '_' + (i + 1)); w(350, d.handle); });
+      extraEntries('ACAD_' + kind.toUpperCase() + 'DEFINITIONS');
       for (const d of defs) {
         w(0, kind.toUpperCase() + 'DEFINITION');
         w(5, d.handle); w(330, dictH);
@@ -2434,6 +2680,7 @@ export const writeDxf = (drawing: Drawing): string => {
       w(0, 'DICTIONARY'); w(5, layoutDictHandle); w(330, rootHandle);
       w(100, 'AcDbDictionary'); w(281, 1);
       outLayouts.forEach(({ l, h }) => { w(3, l.name); w(350, h); });
+      extraEntries('ACAD_LAYOUT');
       outLayouts.forEach(({ l, h, brh }, i) => {
         w(0, 'LAYOUT'); w(5, h); w(330, layoutDictHandle);
         w(100, 'AcDbPlotSettings');
@@ -2456,6 +2703,7 @@ export const writeDxf = (drawing: Drawing): string => {
       w(0, 'DICTIONARY'); w(5, groupDictHandle); w(330, rootHandle);
       w(100, 'AcDbDictionary'); w(281, 1);
       groups.forEach((g, i) => { w(3, g.name); w(350, groupHandles[i]); });
+      extraEntries('ACAD_GROUP');
       groups.forEach((g, i) => {
         w(0, 'GROUP'); w(5, groupHandles[i]); w(330, groupDictHandle);
         w(100, 'AcDbGroup');
@@ -2472,6 +2720,7 @@ export const writeDxf = (drawing: Drawing): string => {
       w(0, 'DICTIONARY'); w(5, mlDictHandle); w(330, rootHandle);
       w(100, 'AcDbDictionary'); w(281, 1);
       mlStyles.forEach((m, i) => { w(3, m.name); w(350, mlHandles[i]); });
+      extraEntries('ACAD_MLINESTYLE');
       mlStyles.forEach((m, i) => {
         w(0, 'MLINESTYLE'); w(5, mlHandles[i]); w(330, mlDictHandle);
         w(100, 'AcDbMlineStyle');
@@ -2499,6 +2748,7 @@ export const writeDxf = (drawing: Drawing): string => {
       w(0, 'DICTIONARY'); w(5, tableStyleDictHandle); w(330, rootHandle);
       w(100, 'AcDbDictionary'); w(281, 1);
       w(3, 'Standard'); w(350, tableStyleHandle);
+      extraEntries('ACAD_TABLESTYLE');
       w(0, 'TABLESTYLE'); w(5, tableStyleHandle); w(330, tableStyleDictHandle);
       w(100, 'AcDbTableStyle');
       w(3, 'Standard'); w(70, 0); w(71, 0);
@@ -2521,6 +2771,7 @@ export const writeDxf = (drawing: Drawing): string => {
       w(0, 'DICTIONARY'); w(5, mleaderStyleDictHandle); w(330, rootHandle);
       w(100, 'AcDbDictionary'); w(281, 1);
       w(3, 'Standard'); w(350, mleaderStyleHandle);
+      extraEntries('ACAD_MLEADERSTYLE');
       w(0, 'MLEADERSTYLE'); w(5, mleaderStyleHandle); w(330, mleaderStyleDictHandle);
       w(100, 'AcDbMLeaderStyle');
       w(170, 2);                          /* content type: mtext */
@@ -2557,15 +2808,31 @@ export const writeDxf = (drawing: Drawing): string => {
       w(143, 0.125);                      /* break size */
       w(1001, 'ACAD_MLEADERVER'); w(1070, 2);
     }
+    if (recomposeHandle) {
+      w(0, 'XRECORD'); w(5, recomposeHandle); w(330, rootHandle);
+      w(100, 'AcDbXrecord'); w(280, 1);
+      w(90, 1);
+      for (const h of columnParents) w(330, h);
+    }
     if (xrecords.length) {
       /* application data lives under its own dictionary so the records
          keep an owner without inventing a place in the standard tree */
       const xrDictHandle = handle();
       const xrHandles = xrecords.map(() => handle());
+      xrecords.forEach((x, i) => {
+        if (x.handle) objHandleOf.set(x.handle.toUpperCase(), xrHandles[i]);
+      });
       w(0, 'DICTIONARY'); w(5, xrDictHandle); w(330, rootHandle);
       w(100, 'AcDbDictionary'); w(281, 1);
+      /* one dictionary for records that came from many: a key already
+         taken gets a ~n suffix, the way the DWG writers spell it */
+      const xrKeys = new Set<string>();
       xrecords.forEach((x, i) => {
-        w(3, x.name ?? ('ND_XRECORD_' + (i + 1)));
+        const base = x.name ?? ('ND_XRECORD_' + (i + 1));
+        let key = base;
+        for (let n = 2; xrKeys.has(key.toUpperCase()); n++) key = `${base}~${n}`;
+        xrKeys.add(key.toUpperCase());
+        w(3, key);
         w(350, xrHandles[i]);
       });
       xrecords.forEach((x, i) => {
@@ -2576,6 +2843,13 @@ export const writeDxf = (drawing: Drawing): string => {
             w(v.code, fmt(v.point.x));
             w(v.code + 10, fmt(v.point.y));
             w(v.code + 20, fmt(v.point.z ?? 0));
+          } else if (v.code >= 320 && v.code <= 369) {
+            /* a pointer in the data names an object of the source file:
+               repointed at the number that object got here, nulled when
+               it was not written. A 360 is an ownership claim — left
+               verbatim it would claim whatever record holds that number
+               now ("Bad handle … already in use", file discarded). */
+            w(v.code, outHandleOf(String(v.value)) ?? 0);
           } else {
             w(v.code, typeof v.value === 'number' ? fmt(v.value) : v.value);
           }
@@ -2590,6 +2864,7 @@ export const writeDxf = (drawing: Drawing): string => {
         w(3, 'ND_IMAGE_' + (++defIdx));
         w(350, def.handle);
       }
+      extraEntries('ACAD_IMAGE_DICT');
       for (const [key, def] of imageDefs) {
         const path = key.slice(0, key.lastIndexOf('|'));
         w(0, 'IMAGEDEF'); w(5, def.handle); w(330, imgDictHandle);

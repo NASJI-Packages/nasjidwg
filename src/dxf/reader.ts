@@ -240,6 +240,17 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
      so a proxy's group 91 resolves back to the application's naming. */
   const proxyClassById =
     new Map<number, { dxfName: string; cppName: string; appName: string }>();
+  /* the same records by DXF name (upper-cased): what a sealed record of a
+     class-based type carries out as its appClass, so the DXF writer can
+     re-declare the class — a demand-loaded one (WIPEOUTVARIABLES, say)
+     is skipped by the reference without its CLASS record */
+  const classByDxfName =
+    new Map<string, { dxfName: string; cppName: string; appName: string }>();
+  /* every DICTIONARY, by handle: its owner and entries, so that once the
+     file is read each sealed object can be placed on the tree — reachable
+     from the named objects dictionary through dictionaries alone, or
+     hanging off some record's extension dictionary */
+  const dictRecords = new Map<string, { owner: string; entries: [string, string][] }>();
   /* Which name each DICTIONARY lists a handle under: how a proxy object
      gets its dictionary name back after the OBJECTS section is parsed. */
   const dictEntryName = new Map<string, string>();
@@ -404,9 +415,11 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
       while (k < end) {
         const rec = collectGroups(k, end);
         const q = G(rec.g);
-        proxyClassById.set(id++, {
+        const cls = {
           dxfName: q.str(1, ''), cppName: q.str(2, ''), appName: q.str(3, '')
-        });
+        };
+        proxyClassById.set(id++, cls);
+        if (cls.dxfName) classByDxfName.set(cls.dxfName.toUpperCase(), cls);
         k = findNext0(rec.next, 'CLASS', end);
       }
     };
@@ -767,6 +780,8 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
       kept[type] = (kept[type] ?? 0) + 1;
       const u: UnknownEntity =
         { ...baseProps(q), type: 'unknown', sourceType: type };
+      const cls = classByDxfName.get(type);
+      if (cls) u.appClass = { ...cls };
       if (g.length) u.tags = g.map(([c, v]): Group => [c, v]);
       return u;
     };
@@ -1841,15 +1856,25 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
         const q = G(rec.g);
         if (type === 'DICTIONARY' || type === 'ACDBDICTIONARYWDFLT') {
           /* remember which name each entry handle is listed under; a
-             group 3 binds to the next 350/360 that follows it */
+             group 3 binds to the next 350/360 that follows it. The
+             dictionary itself is recorded with its owner (the bare 330
+             outside the 102 fences) for the placement pass at the end. */
           let entryName: string | null = null;
+          const entries: [string, string][] = [];
+          let owner = '';
+          let fenced = false;
           for (const [c, v] of rec.g) {
+            if (c === 102) { fenced = !fenced; continue; }
             if (c === 3) entryName = decodeCadText(v.trim());
             else if ((c === 350 || c === 360) && entryName) {
-              dictEntryName.set(v.trim().toUpperCase(), entryName);
+              const eh = v.trim().toUpperCase();
+              dictEntryName.set(eh, entryName);
+              entries.push([entryName, eh]);
               entryName = null;
-            }
+            } else if (c === 330 && !fenced && !owner) owner = v.trim().toUpperCase();
           }
+          const dh = q.str(5, '').toUpperCase();
+          if (dh) dictRecords.set(dh, { owner, entries });
         } else if (type === 'ACDBPLACEHOLDER') {
           /* plot-style plumbing. The writer synthesizes the canonical
              ACAD_PLOTSTYLENAME dictionary and placeholder on every
@@ -1931,7 +1956,14 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
           (drawing.groups ??= []).push(g2);
         } else if (type === 'XRECORD') {
           /* everything after the AcDbXrecord marker (minus the cloning
-             flag) is the application's own payload */
+             flag) is the application's own payload — every group of it,
+             the handle-typed ones (5, 330, 340, 360 …) and 102 included.
+             The record's own 102 fences (reactors, extension dictionary)
+             and its owner sit BEFORE the marker and are not data; past
+             it a 102 is a string the application wrote (the reference's
+             own table round-trip record opens with one, and its xref
+             records fence their payload in `102 {AcDbXrefObjectId`),
+             and a 360 names an object the record owns. */
           const values: XdataValue[] = [];
           let inBody = false;
           let pendingPt: { code: number; x: number; y: number; z: number } | null = null;
@@ -1946,7 +1978,7 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
           };
           for (const [c, v] of rec.g) {
             if (c === 100) { inBody = /AcDbXrecord/i.test(v); continue; }
-            if (!inBody || c === 280 || c === 5 || c === 330 || c === 102) continue;
+            if (!inBody || c === 280) continue;
             const nv = parseFloat(v);
             if ((c >= 10 && c <= 19) || (c >= 210 && c <= 219)) {
               flushPt();
@@ -2068,6 +2100,8 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
           const uo: UnknownObject = { sourceType: type };
           const h = q.str(5, '');
           if (h) uo.handle = h.toUpperCase();
+          const cls = classByDxfName.get(type);
+          if (cls) uo.appClass = { ...cls };
           /* the owner is the first 330 outside a 102-fenced run — a fence
              holds reactor members and the extension dictionary, never the
              parent — and it stops mattering past the first subclass */
@@ -2189,11 +2223,62 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
         if (nm) po.name = nm;
       }
     }
-    /* sealed unknown objects ride the same plumbing */
+    /* sealed unknown objects and xrecords ride the same plumbing */
     for (const uo of drawing.unknownObjects ?? []) {
       if (uo.name === undefined && uo.handle) {
         const nm = dictEntryName.get(uo.handle);
         if (nm) uo.name = nm;
+      }
+    }
+    for (const xr of drawing.xrecords ?? []) {
+      if (xr.name === undefined && xr.handle) {
+        const nm = dictEntryName.get(xr.handle);
+        if (nm) xr.name = nm;
+      }
+    }
+
+    /* ---- placement: which sealed objects the named objects dictionary
+       reaches through dictionaries alone. The NOD is the dictionary
+       owned by 0; from it every entry that is itself a dictionary is
+       walked, and every entry that is a sealed object gets the chain of
+       keys down to it. An extension dictionary — one owned by an entity,
+       a table record or an object — is never on that walk, so whatever
+       hangs off it stays without a path: attached to a record the
+       writers rebuild from the model. */
+    if (dictRecords.size) {
+      let nod = '';
+      for (const [h, d] of dictRecords) {
+        if (d.owner === '0') { nod = h; break; }
+      }
+      if (!nod) nod = dictRecords.keys().next().value ?? '';
+      /* the path of every reachable dictionary, and for every object a
+         reachable dictionary lists: the listing dictionary's path and
+         the key it is listed under */
+      const dictPathOf = new Map<string, string[]>();
+      const listedAs = new Map<string, { path: string[]; key: string }>();
+      const queue: [string, string[]][] = [[nod, []]];
+      for (let qi = 0; qi < queue.length; qi++) {
+        const [h, path] = queue[qi];
+        if (dictPathOf.has(h)) continue;
+        dictPathOf.set(h, path);
+        const d = dictRecords.get(h);
+        if (!d) continue;
+        for (const [key, eh] of d.entries) {
+          if (dictRecords.has(eh)) queue.push([eh, [...path, key]]);
+          else if (!listedAs.has(eh)) listedAs.set(eh, { path, key });
+        }
+      }
+      for (const uo of drawing.unknownObjects ?? []) {
+        const listed = uo.handle ? listedAs.get(uo.handle) : undefined;
+        if (listed) {
+          uo.dictPath = listed.path;
+          uo.name = listed.key;
+          continue;
+        }
+        /* owned by a reachable dictionary without being listed: placed
+           there, unnamed */
+        const ownerPath = uo.ownerHandle ? dictPathOf.get(uo.ownerHandle) : undefined;
+        if (ownerPath) uo.dictPath = ownerPath;
       }
     }
 
