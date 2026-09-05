@@ -542,7 +542,8 @@ four independent mechanisms:
    layout, and the reference converts plain 2D heavy polylines to light
    ones as it opens an R14 file, so the census is compared with that in
    mind); the reference's DXF of each, read and re-emitted as 2018,
-   reopens clean with the same census.
+   reopens clean with the same census; and our own DXF of each opens in
+   the reference with zero AUDIT errors and the same census.
 4. **Real drawings** — during development the reader was run over 317
    real files (139 MB, 1982→2027: AutoCAD's sample libraries, field
    drawings, vintage releases) with CRC verification on: zero throws,
