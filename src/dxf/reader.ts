@@ -11,10 +11,11 @@ import type {
   Drawing, Entity,
   Face3DEntity, FileVersion, GeoData, HatchBoundary, HatchDefLine, HatchEdge,
   HatchEntity, HatchGradient, HatchLoopFlags, ImageEntity, Layer, LeaderEntity, Linetype,
-  Group as EntityGroup, Layout, MeshEntity, MLineEntity, MLineStyle,
+  Group as EntityGroup, Layout, MeshEntity, MLeaderEntity, MLeaderLeader,
+  MLineEntity, MLineStyle,
   MLineStyleElement, MLineVertex, MTextEntity, Point2, Point3,
   PolylineEntity, PolylineVertex, ProxyEntity, ProxyObject, ShapeEntity,
-  SplineEntity, TextEntity,
+  SplineEntity, TableCell, TableEntity, TextEntity,
   TextHAlign, TextStyle, TextVAlign, ToleranceEntity, UnderlayEntity,
   UnknownEntity, UnknownObject,
   View, VPort, XdataGroup, XdataValue, XRecord
@@ -101,7 +102,11 @@ const bytesToB64 = (bytes: Uint8Array): string => {
  *  graphics bytes and 93 the entity-data BITS — each followed by 310 hex
  *  chunks — then the handle references run to the 94 end marker, 95
  *  carries the packed version word (maintenance in the high word) and 70
- *  the from-DXF origin flag. The walk starts collecting only once the
+ *  the from-DXF origin flag. The 2018 spelling the reference writes today
+ *  says the same things under other numbers: 160 opens the graphics
+ *  bytes, 161/162 the entity data (its size in bits and in bytes), and
+ *  the version word is split into 71 (the drawing format) and 97 (the
+ *  maintenance release). The walk starts collecting only once the
  *  proxy's own groups begin, so the common section's owner handle never
  *  masquerades as a reference. Forgiving throughout: whatever is
  *  malformed is simply left out. */
@@ -121,7 +126,9 @@ const parseProxyPayload = (g: Group[]): ProxyPayload => {
   let refsDone = false;
   let target: 'graphics' | 'data' = 'graphics';
   let graphicsHex = '', dataHex = '';
-  let bits = 0;
+  /* every size the record states for the entity data, in whichever
+     spelling; the one that fits the bytes is the bit count (below) */
+  const sizes: number[] = [];
   const refs: { code: number; value: string }[] = [];
   for (const [c, v] of g) {
     if (c === 100) { if (/AcDbProxy/i.test(v)) inProxy = true; continue; }
@@ -133,11 +140,17 @@ const parseProxyPayload = (g: Group[]): ProxyPayload => {
       out.proxyVersion = word & 0xffff;
       const maint = word >>> 16;
       if (maint) out.proxyMaint = maint;
+    } else if (c === 71) out.proxyVersion = (parseInt(v, 10) || 0) & 0xffff;
+    else if (c === 97) {
+      const maint = parseInt(v, 10) || 0;
+      if (maint) out.proxyMaint = maint;
     } else if (c === 70) out.fromDxf = parseInt(v, 10) !== 0;
     else if (refsDone) continue;
-    else if (c === 92) target = 'graphics';
-    else if (c === 93) { target = 'data'; bits = parseInt(v, 10) || 0; }
-    else if (c === 310) {
+    else if (c === 92 || c === 160) target = 'graphics';
+    else if (c === 93 || c === 161 || c === 162) {
+      target = 'data';
+      sizes.push(parseInt(v, 10) || 0);
+    } else if (c === 310) {
       if (target === 'data') dataHex += v; else graphicsHex += v;
     }
     /* soft references (330/350) were code 4 in the source record, hard
@@ -150,9 +163,11 @@ const parseProxyPayload = (g: Group[]): ProxyPayload => {
   if (dataHex) {
     const bytes = hexToBytes(dataHex);
     out.data = bytes;
-    /* 93 states the exact bit length; a missing or impossible count falls
-       back to whole bytes */
-    out.dataBits = bits > 0 && bits <= bytes.length * 8 ? bits : bytes.length * 8;
+    /* the stated bit length is whichever size lands inside the last
+       byte (a byte count never does, past the first byte); a missing or
+       impossible count falls back to whole bytes */
+    const bits = sizes.find((n) => n > (bytes.length - 1) * 8 && n <= bytes.length * 8);
+    out.dataBits = bits ?? bytes.length * 8;
   }
   if (refs.length) out.refs = refs;
   return out;
@@ -231,6 +246,19 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
   /* SORTENTSTABLE draw-order tables, applied once the entity runs are
      placed (OBJECTS may precede ENTITIES). */
   const sortTables: { ents: string[]; sorts: string[] }[] = [];
+  /* BLOCK_RECORD and STYLE names by handle: what a table cell's 340, a
+     multileader's 341/344 block and 340/343 text style resolve through. */
+  const blockRecordName = new Map<string, string>();
+  const styleNameByHandle = new Map<string, string>();
+  /* The block each BLOCK_RECORD handle defines, in the model's naming
+     (the numbered extra paper spaces included), and the LAYOUT objects
+     waiting to be linked to theirs once every section is in. */
+  const blockNameByRecord = new Map<string, string>();
+  const pendingLayouts: { l: Layout; recH: string }[] = [];
+  /* style names that resolve through a dictionary (TABLESTYLE and
+     MLEADERSTYLE are listed by name under the NOD), settled at the end:
+     an entity inside a BLOCK is converted before OBJECTS is read */
+  const pendingDictNames: { h: string; set: (name: string) => void }[] = [];
 
   const ensureLayer = (name: string): Layer => {
     /* names travel as \U+XXXX escapes — decode so an Arabic layer name
@@ -729,6 +757,207 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
       return e;
     };
 
+    /* recognized but not modeled: kept, not lost. Beyond the common
+       properties (which are read FROM the groups, never consumed), the
+       record's raw tags are retained verbatim — group code and value
+       string exactly as tokenized — so the DXF writer can re-emit the
+       record untouched. This is the DXF-medium twin of the DWG side's
+       bit-sealed retention. */
+    const sealUnknown = (type: string, g: Group[], q: Q): UnknownEntity => {
+      kept[type] = (kept[type] ?? 0) + 1;
+      const u: UnknownEntity =
+        { ...baseProps(q), type: 'unknown', sourceType: type };
+      if (g.length) u.tags = g.map(([c, v]): Group => [c, v]);
+      return u;
+    };
+
+    /* ------------- ACAD_TABLE, in the reference's spelling -------------
+     * A block-reference prologue (2 names the geometry block, 10 the
+     * insertion point), then AcDbTable: 342 the style, 11 the row
+     * direction, 91 rows and 92 columns, one 141 per row height, one
+     * 142 per column width, and the cells row by row, each opened by its
+     * 171 type (1 text, 2 block). Inside a cell 175/176 are the merge
+     * extents in columns/rows (a cell merged INTO another carries 173),
+     * 170 the alignment, 140 a text height, 340 the block record, and
+     * the text comes either as 3-chunked group 1 (older files) or inside
+     * the 301 CELL_VALUE … 304 ACVALUE_END block (R2008 on) — 1 the raw
+     * string, 302 its formatted form. Positional throughout: a 91 inside
+     * a cell is an override flag, not the row count. */
+    const parseTableEntity = (g: Group[], q: Q): TableEntity | null => {
+      let inTable = false;
+      let numRows = 0, numColumns = 0;
+      const rowHeights: number[] = [], columnWidths: number[] = [];
+      const cells: TableCell[] = [];
+      let cell: TableCell | null = null;
+      let inValue = false;
+      let chunks = '';
+      let styleHandle = '';
+      let dir: Point3 | undefined;
+      for (const [c, v] of g) {
+        if (c === 100) { inTable = /^AcDbTable$/i.test(v.trim()); continue; }
+        if (!inTable) continue;
+        const nv = parseFloat(v);
+        if (c === 171) {
+          cell = {};
+          const t = parseInt(v, 10);
+          if (t === 1 || t === 2) cell.contentType = t;
+          cells.push(cell);
+          inValue = false;
+          chunks = '';
+          continue;
+        }
+        if (!cell) {
+          if (c === 91 && !numRows) numRows = parseInt(v, 10) || 0;
+          else if (c === 92 && !numColumns) numColumns = parseInt(v, 10) || 0;
+          else if (c === 141) rowHeights.push(isFinite(nv) ? nv : 0);
+          else if (c === 142) columnWidths.push(isFinite(nv) ? nv : 0);
+          else if (c === 342) styleHandle = v.trim().toUpperCase();
+          else if (c === 11) dir = { x: isFinite(nv) ? nv : 1, y: 0, z: 0 };
+          else if (c === 21 && dir) dir.y = isFinite(nv) ? nv : 0;
+          else if (c === 31 && dir) dir.z = isFinite(nv) ? nv : 0;
+          continue;
+        }
+        if (c === 301) { inValue = /CELL_VALUE/i.test(v); continue; }
+        if (c === 304 && /ACVALUE_END/i.test(v)) { inValue = false; continue; }
+        if (c === 175) { const n = parseInt(v, 10); if (n > 1) cell.spanColumns = n; }
+        else if (c === 176) { const n = parseInt(v, 10); if (n > 1) cell.spanRows = n; }
+        else if (c === 170) { const n = parseInt(v, 10); if (isFinite(n)) cell.alignment = n; }
+        else if (c === 140) { if (nv > 0) cell.textHeight = nv; }
+        else if (c === 340) {
+          const nm = blockRecordName.get(v.trim().toUpperCase());
+          if (nm) cell.blockName = nm;
+        } else if (c === 3) chunks += v;
+        else if (c === 1) {
+          const t = decodeCadText(chunks + v);
+          chunks = '';
+          if (t) cell.text = t;
+        } else if (c === 302 && inValue && cell.text === undefined && v.trim()) {
+          cell.text = decodeCadText(v);
+        }
+      }
+      if (!(numRows > 0) || !(numColumns > 0) || numRows * numColumns > 1e6) return null;
+      /* every cell and size exists, whatever the record spelled out */
+      while (cells.length < numRows * numColumns) cells.push({});
+      cells.length = numRows * numColumns;
+      while (rowHeights.length < numRows) rowHeights.push(rowHeights[rowHeights.length - 1] ?? 1);
+      while (columnWidths.length < numColumns) columnWidths.push(columnWidths[columnWidths.length - 1] ?? 1);
+      const e: TableEntity = {
+        ...baseProps(q), type: 'table',
+        position: pt3(q, 10, 20, 30),
+        numRows, numColumns, rowHeights, columnWidths, cells
+      };
+      if (dir) e.direction = dir;
+      const bn = decodeCadText(q.str(2, ''));
+      if (bn) e.blockName = bn;
+      if (styleHandle) pendingDictNames.push({ h: styleHandle, set: (nm) => { e.styleName = nm; } });
+      return e;
+    };
+
+    /* ------------- MULTILEADER, in the reference's spelling -------------
+     * After AcDbMLeader the record is a tree of fenced blocks: 300
+     * CONTEXT_DATA{ … 301 } holds the scale (40), text height (41),
+     * arrow size (140), the text (290 flag, 304 contents, 340 style, 12
+     * position, 42 rotation) or the block (296 flag, 341 record, 15
+     * position, 16 scale, 46 rotation), and one 302 LEADER{ … 303 } per
+     * leader — its landing point (10), dogleg vector (11) and length
+     * (40) — with a 304 LEADER_LINE{ … 305 } per line whose points are
+     * 10/20/30 runs. The groups after the context repeat the style-level
+     * facts: 340 the MLEADERSTYLE, 290/291 the landing and dogleg
+     * switches, 42 the arrow size, 343 the text style, 344 the block. */
+    const parseMLeader = (g: Group[], q: Q): MLeaderEntity | null => {
+      const e: MLeaderEntity = { ...baseProps(q), type: 'mleader', leaders: [] };
+      let state: 'top' | 'ctx' | 'leader' | 'line' = 'top';
+      let inBody = false;
+      let leader: MLeaderLeader | null = null;
+      let line: Point3[] | null = null;
+      let pt: Point3 | null = null;
+      let styleHandle = '', textStyleHandle = '', blockHandle = '';
+      let hasText: boolean | undefined, hasBlock: boolean | undefined;
+      let text: string | undefined;
+      const num = (v: string): number => { const n = parseFloat(v); return isFinite(n) ? n : 0; };
+      for (const [c, v] of g) {
+        if (c === 100) { inBody = /AcDbMLeader/i.test(v); continue; }
+        if (!inBody) continue;
+        const s = v.trim();
+        if (c === 300 && /^CONTEXT_DATA\{/i.test(s)) { state = 'ctx'; continue; }
+        if (c === 302 && /^LEADER\{/i.test(s)) {
+          leader = { lines: [] };
+          e.leaders.push(leader);
+          state = 'leader';
+          continue;
+        }
+        if (c === 304 && /^LEADER_LINE\{/i.test(s)) { line = []; pt = null; state = 'line'; continue; }
+        if (s === '}') {
+          if (c === 305 && state === 'line') {
+            if (leader && line && line.length) leader.lines.push(line);
+            line = null; state = 'leader'; continue;
+          }
+          if (c === 303 && state === 'leader') { leader = null; state = 'ctx'; continue; }
+          if (c === 301 && state === 'ctx') { state = 'top'; continue; }
+        }
+        switch (state) {
+          case 'line':
+            if (c === 10) { pt = { x: num(v), y: 0, z: 0 }; line!.push(pt); }
+            else if (c === 20 && pt) pt.y = num(v);
+            else if (c === 30 && pt) pt.z = num(v);
+            break;
+          case 'leader':
+            if (!leader) break;
+            if (c === 10) leader.landing = { x: num(v), y: 0, z: 0 };
+            else if (c === 20 && leader.landing) leader.landing.y = num(v);
+            else if (c === 30 && leader.landing) leader.landing.z = num(v);
+            else if (c === 11) leader.doglegVector = { x: num(v), y: 0, z: 0 };
+            else if (c === 21 && leader.doglegVector) leader.doglegVector.y = num(v);
+            else if (c === 31 && leader.doglegVector) leader.doglegVector.z = num(v);
+            else if (c === 40) { const d = num(v); if (d) leader.doglegLength = d; }
+            break;
+          case 'ctx':
+            if (c === 40) { const sc = num(v); if (sc > 0) e.scale = sc; }
+            else if (c === 41) { const h = num(v); if (h > 0) e.textHeight = h; }
+            else if (c === 140) { const a = num(v); if (a > 0) e.arrowSize = a; }
+            else if (c === 290) hasText = parseInt(v, 10) === 1;
+            else if (c === 304) text = (text ?? '') + v;
+            else if (c === 340) textStyleHandle = s.toUpperCase();
+            else if (c === 12) e.textPosition = { x: num(v), y: 0, z: 0 };
+            else if (c === 22 && e.textPosition) e.textPosition.y = num(v);
+            else if (c === 32 && e.textPosition) e.textPosition.z = num(v);
+            else if (c === 42) { const r = num(v); if (r) e.textRotation = r; }
+            else if (c === 296) hasBlock = parseInt(v, 10) === 1;
+            else if (c === 341) blockHandle = s.toUpperCase();
+            else if (c === 15) e.blockPosition = { x: num(v), y: 0, z: 0 };
+            else if (c === 25 && e.blockPosition) e.blockPosition.y = num(v);
+            else if (c === 35 && e.blockPosition) e.blockPosition.z = num(v);
+            else if (c === 16) e.blockScale = { x: num(v), y: 1, z: 1 };
+            else if (c === 26 && e.blockScale) e.blockScale.y = num(v);
+            else if (c === 36 && e.blockScale) e.blockScale.z = num(v);
+            else if (c === 46) { const r = num(v); if (r) e.blockRotation = r; }
+            break;
+          default:
+            if (c === 340) styleHandle = s.toUpperCase();
+            else if (c === 290) { if (parseInt(v, 10) === 1) e.hasLanding = true; }
+            else if (c === 291) { if (parseInt(v, 10) === 1) e.hasDogleg = true; }
+            else if (c === 42 && e.arrowSize === undefined) {
+              const a = num(v);
+              if (a > 0) e.arrowSize = a;
+            } else if (c === 343 && !textStyleHandle) textStyleHandle = s.toUpperCase();
+            else if (c === 344 && !blockHandle) blockHandle = s.toUpperCase();
+            break;
+        }
+      }
+      if (text !== undefined && hasText !== false) e.text = decodeCadText(text);
+      if (blockHandle && hasBlock !== false) {
+        const nm = blockRecordName.get(blockHandle);
+        if (nm) e.blockName = nm;
+      }
+      if (textStyleHandle) {
+        const nm = styleNameByHandle.get(textStyleHandle);
+        if (nm) e.textStyle = nm;
+      }
+      if (styleHandle) pendingDictNames.push({ h: styleHandle, set: (nm) => { e.styleName = nm; } });
+      if (!e.leaders.length && e.text === undefined && !e.blockName) return null;
+      return e;
+    };
+
     const convertEntity = (type: string, g: Group[]): Entity | null => {
       const q = G(g);
       switch (type) {
@@ -746,8 +975,8 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
           };
 
         case 'LWPOLYLINE': {
-          /* positional walk: 40/41/42 belong to the vertex opened by the
-             preceding 10 */
+          /* positional walk: 40/41/42/91 belong to the vertex opened by
+             the preceding 10 */
           const vertices: PolylineVertex[] = [];
           let cur: PolylineVertex | null = null;
           for (const [c, v] of g) {
@@ -757,12 +986,15 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
             else if (c === 40 && cur && isFinite(nv)) cur.startWidth = nv;
             else if (c === 41 && cur && isFinite(nv)) cur.endWidth = nv;
             else if (c === 42 && cur && isFinite(nv) && nv !== 0) cur.bulge = nv;
+            else if (c === 91 && cur && isFinite(nv) && nv !== 0) cur.id = nv;
           }
           if (vertices.length < 2) return null;
+          const lwFlag = q.int(70, 0);
           const e: PolylineEntity = {
             ...baseProps(q), type: 'polyline', vertices,
-            closed: (q.int(70, 0) & 1) === 1
+            closed: (lwFlag & 1) === 1
           };
+          if (lwFlag & 128) e.plineGen = true;
           const cw = q.numOr(43);
           if (cw != null && cw > 0) e.constantWidth = cw;
           const el = q.numOr(38);
@@ -1254,19 +1486,15 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
         case 'SEQEND':
           return null;                       /* skip silently */
 
-        default: {
-          /* recognized but not modeled: kept, not lost. Beyond the common
-             properties (which are read FROM the groups, never consumed),
-             the record's raw tags are retained verbatim — group code and
-             value string exactly as tokenized — so the DXF writer can
-             re-emit the record untouched. This is the DXF-medium twin of
-             the DWG side's bit-sealed retention. */
-          kept[type] = (kept[type] ?? 0) + 1;
-          const u: UnknownEntity =
-            { ...baseProps(q), type: 'unknown', sourceType: type };
-          if (g.length) u.tags = g.map(([c, v]): Group => [c, v]);
-          return u;
-        }
+        case 'ACAD_TABLE':
+          /* a record that does not state its grid is kept sealed instead */
+          return parseTableEntity(g, q) ?? sealUnknown(type, g, q);
+
+        case 'MULTILEADER':
+          return parseMLeader(g, q) ?? sealUnknown(type, g, q);
+
+        default:
+          return sealUnknown(type, g, q);
       }
     };
 
@@ -1289,8 +1517,13 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
           const isGrid = (flag & 16) !== 0 && (flag & 64) === 0;
           const isPface = (flag & 64) !== 0;
           const closed = (flag & 1) === 1;
+          const is3d = (flag & 8) !== 0 && !isGrid && !isPface;
+          const splineFit = (flag & 4) !== 0;
           const dsw = q.num(40, 0), dew = q.num(41, 0);
           const vertices: PolylineVertex[] = [];
+          /* a spline-fit polyline's frame (VERTEX 70 = 16) is kept apart
+             from the fitted curve (8) it draws */
+          const frame: PolylineVertex[] = [];
           const meshVerts: Point3[] = [];
           const faces: number[][] = [];
           let k = rec.next;
@@ -1307,12 +1540,17 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
               meshVerts.push({ x: vq.num(10, 0), y: vq.num(20, 0), z: vq.num(30, 0) });
             } else {
               const p: PolylineVertex = { x: vq.num(10, 0), y: vq.num(20, 0) };
+              if (is3d) p.z = vq.num(30, 0);
               const b = vq.num(42, 0);
               if (isFinite(b) && b !== 0) p.bulge = b;
               const sw = vq.num(40, dsw), ew = vq.num(41, dew);
               if (sw > 0) p.startWidth = sw;
               if (ew > 0) p.endWidth = ew;
-              vertices.push(p);
+              const id = vq.int(91, 0);
+              if (id) p.id = id;
+              if (vflag & 1) p.curveFit = true;
+              if (vflag & 2) p.tangent = vq.num(50, 0) * Math.PI / 180;
+              if (splineFit && (vflag & 16)) frame.push(p); else vertices.push(p);
             }
             k = vr.next;
           }
@@ -1334,10 +1572,18 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
               me.faces = faces;
             }
             entOut = me;
-          } else if (vertices.length >= 2) {
-            const pe: PolylineEntity = { ...baseProps(q), type: 'polyline', vertices, closed };
+          } else if (vertices.length + frame.length >= 2) {
+            const drawn = vertices.length >= 2 ? vertices : [...frame, ...vertices];
+            const pe: PolylineEntity = {
+              ...baseProps(q), type: 'polyline', vertices: drawn, closed,
+              heavy: is3d ? '3d' : '2d'
+            };
+            if (vertices.length >= 2 && frame.length) pe.frame = frame;
+            if (splineFit) pe.fit = q.int(75, 0) === 6 ? 'cubic' : 'quadratic';
+            else if (flag & 2) pe.fit = 'curve';
+            if (flag & 128) pe.plineGen = true;
             const el = q.num(30, 0);
-            if (el !== 0) pe.elevation = el;
+            if (!is3d && el !== 0) pe.elevation = el;
             entOut = pe;
           }
           i = k;
@@ -1395,6 +1641,7 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
               ly.on = c62 >= 0;                /* negative 62 = layer off */
               ly.frozen = (flags & 1) === 1;
               ly.locked = (flags & 4) === 4;
+              if (flags & 16) ly.xrefDependent = true;
               const lt = q.str(6, '');
               if (lt) ly.linetype = lt;
               const lw = q.int(370, -1);
@@ -1402,9 +1649,13 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
               if (q.int(290, 1) === 0) ly.plottable = false;
             } else if (tName === 'LTYPE') {
               const rec2: Linetype = { name: nm, pattern: q.nums(49) };
+              if (q.int(70, 0) & 16) rec2.xrefDependent = true;
               const d = q.str(3, '');
               if (d) rec2.description = d;
               drawing.linetypes.push(rec2);
+            } else if (tName === 'BLOCK_RECORD') {
+              const h = q.str(5, '');
+              if (h) blockRecordName.set(h.toUpperCase(), decodeCadText(nm));
             } else if (tName === 'APPID') {
               (drawing.appIds ??= []).push(decodeCadText(nm));
             } else if (tName === 'DIMSTYLE') {
@@ -1488,6 +1739,11 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
               (drawing.vports ??= []).push(vp);
             } else if (tName === 'STYLE') {
               const st: TextStyle = { name: decodeCadText(nm) };
+              const sh = q.str(5, '');
+              if (sh) styleNameByHandle.set(sh.toUpperCase(), st.name);
+              const stFlags = q.int(70, 0);
+              if (stFlags & 1) st.shapeFile = true;
+              if (stFlags & 16) st.xrefDependent = true;
               const font = q.str(3, '');
               if (font) st.font = font;
               const big = q.str(4, '');
@@ -1525,11 +1781,31 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
       while (i < end) {
         const rec = collectGroups(i, end);
         const q = G(rec.g);
-        const nm = decodeCadText(q.str(2, ''));
+        const rawName = decodeCadText(q.str(2, ''));
         const blkEnd = findNext0(rec.next, 'ENDBLK', end);
-        /* layout system blocks are the writer's own — skip their defs */
-        const isSystem = /^\*(model_space|paper_space)/i.test(nm);
-        if (nm && !isSystem && !(nm in drawing.blocks)) {
+        /* the BLOCK_RECORD behind the definition is its owner (330) */
+        const recH = q.str(330, '').toUpperCase();
+        /* The two CURRENT-space blocks are the writer's own: their
+           entities are in ENTITIES (the paper ones flagged 67). Every
+           other paper-space block is a whole non-current layout — the
+           reference's DXF spells them *Paper_Space0, *Paper_Space29, …
+           with their entities inside — and is kept as a block named
+           *Paper_Space2, *Paper_Space3, … in file order, exactly as the
+           DWG reader numbers the layouts it finds, so the LAYOUT objects
+           link to them and a rewrite carries every tab. */
+        const isModel = /^\*model_space$/i.test(rawName);
+        const isPaper = /^\*paper_space$/i.test(rawName);
+        const isExtraPaper = !isPaper && /^\*paper_space/i.test(rawName);
+        let nm = rawName;
+        if (isModel) nm = '*Model_Space';
+        else if (isPaper) nm = '*Paper_Space';
+        else if (isExtraPaper) {
+          let n = 2;
+          while (('*Paper_Space' + n) in drawing.blocks) n++;
+          nm = '*Paper_Space' + n;
+        }
+        if (recH && nm) blockNameByRecord.set(recH, nm);
+        if (nm && !isModel && !isPaper && !(nm in drawing.blocks)) {
           /* nested inserts stay nested: blocks keep their inserts (the old
              flattening was an app-schema constraint, not a library concern) */
           const def: BlockDefinition = {
@@ -1537,6 +1813,8 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
             basePoint: pt3(q, 10, 20, 30),
             entities: parseEntities(rec.next, blkEnd)
           };
+          /* the record handle, as the DWG reader keeps a block header's */
+          if (isExtraPaper && recH) def.handle = recH;
           drawing.blocks[nm] = def;
         }
         i = findNext0(blkEnd + 1, 'BLOCK', end);
@@ -1584,6 +1862,10 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
           if (p.proxyVersion !== undefined) po.proxyVersion = p.proxyVersion;
           if (p.proxyMaint !== undefined) po.proxyMaint = p.proxyMaint;
           if (p.fromDxf !== undefined) po.fromDxf = p.fromDxf;
+          /* some applications keep the whole object here: the reference's
+             dbConnect records are nothing but their DCO15 xdata */
+          const xd = parseXdata(rec.g);
+          if (xd) po.xdata = xd;
           (drawing.proxyObjects ??= []).push(po);
         } else if (type === 'IMAGEDEF') {
           const h = q.str(5, '').toUpperCase();
@@ -1614,6 +1896,18 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
             if (ps) l.paperSize = ps;
             const ss = q.str(7, '');
             if (ss) l.plotStyleSheet = ss;
+            /* the block record it lays out is the 330 past the AcDbLayout
+               marker (the one before it is the owning dictionary);
+               resolved once every section is in */
+            let inLayout = false;
+            for (const [c, v] of rec.g) {
+              if (c === 100) { inLayout = /AcDbLayout/i.test(v); continue; }
+              if (inLayout && c === 330) {
+                const h = v.trim().toUpperCase();
+                if (h && h !== '0') pendingLayouts.push({ l, recH: h });
+                break;
+              }
+            }
             (drawing.layouts ??= []).push(l);
           }
         } else if (type === 'GROUP') {
@@ -1778,6 +2072,8 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
             }
           }
           if (rec.g.length) uo.tags = rec.g.map(([c, v]): Group => [c, v]);
+          const xd = parseXdata(rec.g);
+          if (xd) uo.xdata = xd;
           (drawing.unknownObjects ??= []).push(uo);
         }
         k = findNext0(rec.next, null, end);
@@ -1852,6 +2148,17 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
         keyed.sort((a, b) => (a.k - b.k) || (a.i - b.i));
         for (let i = 0; i < keyed.length; i++) list[i] = keyed[i].e;
       }
+    }
+
+    /* layouts name their blocks the way the DWG reader does: the two
+       current spaces by their canonical names, the others *Paper_Space<n> */
+    for (const { l, recH } of pendingLayouts) {
+      const nm = blockNameByRecord.get(recH);
+      if (nm) l.blockName = nm;
+    }
+    for (const { h, set } of pendingDictNames) {
+      const nm = dictEntryName.get(h);
+      if (nm) set(nm);
     }
 
     for (const { e, defHandle } of pendingImages) {

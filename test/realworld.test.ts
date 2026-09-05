@@ -374,3 +374,119 @@ describe('extra paper-space layouts (campaign 6)', () => {
     expect(back.warnings).toEqual([]);
   });
 });
+
+/* ------------------------------------------------------------------ */
+
+describe('pre-2010 ACAD_TABLE cells in the reference\'s own grammar', () => {
+  /* Pinned against the reference's own tables — the 32x12 door schedule,
+     the 28x14 room-finish schedule with a block cell and the 7x8 legend of
+     the A-03 sheet, plus two block-and-text grids of the mechanical sample
+     — each as it saved them to 2000, 2004 and 2007: every record walks to
+     its last data bit with every handle and string-stream entry consumed,
+     and every cell's text, span and block matches its DXF of the drawing.
+     Two misreadings had sealed all of them: a block cell's attribute flag
+     was taken for its override flag, and the R2007 value (extended flags,
+     format flags, data type, data, unit type, two strings) was expected
+     ahead of the overrides instead of after them. The record below is the
+     smallest grid that exercises all of it. */
+  const TABLE_CLASS = 500;
+  const tableCtx = (version: RecVersion) => makeContext(version, new Map([[TABLE_CLASS, {
+    classNum: TABLE_CLASS, dxfName: 'ACAD_TABLE', cppName: 'AcDbTable',
+    appName: 'ObjectDBX Classes', isEntity: true
+  }]]));
+
+  const tableRecord = (version: 'R2000' | 'R2007'): Uint8Array => {
+    const v = versionRank(version);
+    const w = new BitWriter();
+    const sw = v >= 2007 ? new BitWriter() : null;
+    const str = (s: string): void => { if (sw) sw.tu(s); else w.t(s); };
+    w.bs(TABLE_CLASS);
+    const sizeAt = w.pos;
+    w.rl(0);                              /* bitsize, patched below */
+    w.h(0, 0x40);                         /* handle */
+    w.bs(0);                              /* no EED */
+    w.b(0);                               /* no graphics */
+    w.bb(2);                              /* entmode: model space */
+    w.bl(0);                              /* reactors */
+    w.b(1);                               /* nolinks (2000) / xdict missing */
+    w.bs(256);                            /* colour: bylayer */
+    w.bd(1);                              /* ltype scale */
+    w.bb(0); w.bb(0);                     /* ltype, plotstyle flags */
+    if (v >= 2007) { w.bb(0); w.rc(0); }  /* material, shadow */
+    w.bs(0);                              /* invisible */
+    w.rc(29);                             /* lineweight: bylayer */
+    /* AcDbBlockReference */
+    w.bd3(1, 2, 0); w.bb(3); w.bd(0); w.bd3(0, 0, 1); w.b(0);
+    /* AcDbTable: 2 rows x 2 columns */
+    w.bs(22); w.bd3(1, 0, 0); w.bl(2); w.bl(2);
+    w.bd(3); w.bd(4); w.bd(0.5); w.bd(0.6);
+    const head = (type: number, merged: number, cols: number, rows: number): void => {
+      w.bs(type); w.rc(0); w.b(merged); w.b(0); w.bl(cols); w.bl(rows); w.bd(0);
+    };
+    /* the R2007 value: as a "general" blob (the 2007-era files), as a
+       string with the rendered text in the string stream (the re-saves),
+       or absent */
+    const value = (text: string | null, form: 'blob' | 'string' = 'blob'): void => {
+      if (!sw) return;
+      w.bl(0);                            /* extended cell flags */
+      if (text === null) { w.bl(1); w.bl(4); w.bl(0); str(''); str(''); return; }
+      w.bl(6);
+      const utf16 = (s: string): void => {
+        for (const ch of s) { w.rc(ch.charCodeAt(0) & 0xff); w.rc(ch.charCodeAt(0) >> 8); }
+        w.rc(0); w.rc(0);
+      };
+      if (form === 'blob') { w.bl(512); w.bl((text.length + 1) * 2); utf16(text); }
+      else { w.bl(4); w.bs((text.length + 1) * 2); utf16(text); }
+      w.bl(0);                            /* unit type */
+      str('');                            /* format string */
+      str(form === 'blob' ? '' : text);   /* rendered text */
+    };
+    /* cell 0: the title across both columns, with alignment, text style
+       and height overrides */
+    head(1, 0, 2, 1); if (!sw) str('Title');
+    w.b(1); w.bl(0x31); w.rc(0); w.bs(5); w.bd(0.25);
+    value('Title');
+    /* cell 1: merged away */
+    head(1, 1, 1, 1); if (!sw) str(''); w.b(0); value(null);
+    /* cell 2: a block with one attribute value, then a left-edge override
+       group (colour, lineweight -1, visibility) */
+    head(2, 0, 1, 1); w.bd(1); w.b(1); w.bs(1); w.bs(0); str('A-1');
+    w.b(1); w.bl(0x62200); w.rc(0); w.bs(1); w.bl(1); w.rc(0); w.bs(0xffff); w.bs(1);
+    value(null);
+    /* cell 3: plain text */
+    head(1, 0, 1, 1); if (!sw) str('Data'); w.b(0); value('Data', 'string');
+    /* the tail: title and header suppressed, no border overrides */
+    w.b(1); w.bl(3); w.b(1); w.b(0); w.b(0); w.b(0);
+    if (sw) { w.appendBits(sw); w.rs(sw.pos); w.b(1); }
+    w.patchRl(sizeAt, w.pos);
+    /* handles: the common ones, then block header and table style, then
+       per cell — text style (+ override style), or block + attdef */
+    if (v < 2004) w.h(3, 0);              /* xdict */
+    w.h(5, 0x10);                         /* layer */
+    w.h(5, 0x50); w.h(5, 0x51);
+    w.h(5, 0x52); w.h(5, 0x53);
+    w.h(5, 0x52);
+    w.h(5, 0x60); w.h(5, 0x61);
+    w.h(5, 0x52);
+    w.align();
+    return w.bytes();
+  };
+
+  it.each(['R2000', 'R2007'] as const)('%s: block cells, overrides and the tail all land', (version) => {
+    const raw = decodeObjectBody(tableRecord(version), tableCtx(version));
+    const e = raw?.entity;
+    expect(e?.type).toBe('table');
+    if (e?.type !== 'table') return;
+    expect([e.numRows, e.numColumns]).toEqual([2, 2]);
+    expect(e.columnWidths).toEqual([3, 4]);
+    expect(e.rowHeights).toEqual([0.5, 0.6]);
+    expect(e.cells[0]).toMatchObject({
+      contentType: 1, text: 'Title', spanColumns: 2, alignment: 5, textHeight: 0.25
+    });
+    expect(e.cells[1].text).toBeUndefined();
+    expect(e.cells[2].contentType).toBe(2);
+    expect(e.cells[3].text).toBe('Data');
+    expect(raw?.tableBlock).toBe(0x50);
+    expect(raw?.tableCellBlocks?.get(2)).toBe(0x60);
+  });
+});

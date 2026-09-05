@@ -90,13 +90,30 @@ const ourCounts = (drawing) => {
   const ents = {};
   const extraPaper = Object.entries(drawing.blocks ?? {})
     .filter(([nm]) => /^\*paper_space/i.test(nm)).flatMap(([, b]) => b.entities);
-  for (const e of [...drawing.entities, ...(drawing.paperSpace ?? []), ...extraPaper]) {
+  const all = [...drawing.entities, ...(drawing.paperSpace ?? []), ...extraPaper];
+  /* the further columns of a multi-column MTEXT are entities of their
+     own in the file, named by handle in the first column's
+     ACAD_MTEXT_COLUMNS xdata; the reference folds them into one */
+  const columnChildren = new Set();
+  for (const e of all) {
+    if (e.type !== 'mtext') continue;
+    for (const g of e.xdata ?? []) {
+      if (!g.values.some((v) => typeof v.value === 'string' && /ACAD_MTEXT_COLUMN/i.test(v.value))) continue;
+      for (const v of g.values) if (v.code === 1005 && typeof v.value === 'string') columnChildren.add(v.value.toUpperCase());
+    }
+  }
+  for (const e of all) {
+    if (e.type === 'mtext' && e.handle && columnChildren.has(e.handle.toUpperCase())) continue;
     let name = DXF_NAME[e.type] ?? e.type.toUpperCase();
-    if (e.type === 'polyline' && e.is3d) name = 'POLYLINE';
+    /* a heavy polyline (VERTEX records) is the reference's POLYLINE; the
+       inline one its LWPOLYLINE */
+    if (e.type === 'polyline' && (e.heavy || e.vertices.some((v) => v.z !== undefined))) name = 'POLYLINE';
     if (e.type === 'ray' && e.infinite) name = 'XLINE';
     if (e.type === 'acis') name = e.solidKind ? e.solidKind.toUpperCase() : '3DSOLID';
     if (e.type === 'proxy') name = 'ACAD_PROXY_ENTITY';
-    if (e.type === 'unknown') name = (e.dxfName ?? 'UNKNOWN').toUpperCase();
+    if (e.type === 'image' && e.wipeout) name = 'WIPEOUT';
+    if (e.type === 'text' && e.attribute === 'attdef') name = 'ATTDEF';
+    if (e.type === 'unknown') name = (e.sourceType ?? e.appClass?.dxfName ?? 'UNKNOWN').toUpperCase();
     ents[name] = (ents[name] ?? 0) + 1;
   }
   return ents;

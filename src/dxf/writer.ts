@@ -94,7 +94,8 @@ export const writeDxf = (drawing: Drawing): string => {
   let handleCounter = 0x100;
   const handle = (): string => (handleCounter++).toString(16).toUpperCase();
 
-  const layers: Layer[] = drawing.layers.length ? drawing.layers : [{
+  const ownLayers = drawing.layers.filter((l) => !l.xrefDependent);
+  const layers: Layer[] = ownLayers.length ? ownLayers : [{
     name: '0', color: { kind: 'aci', index: 7 },
     on: true, frozen: false, locked: false
   }];
@@ -102,6 +103,12 @@ export const writeDxf = (drawing: Drawing): string => {
   const blocks = drawing.blocks;
   const blockNames = Object.keys(blocks).filter((nm) =>
     blocks[nm] && !isSystemBlock(nm) && !blocks[nm].isLayout);
+  /* the non-current paper-space layouts, which both readers keep as
+     blocks named *Paper_Space<n>: written as the reference writes them —
+     a BLOCK_RECORD, a BLOCK holding the layout's entities (flagged 67),
+     and the LAYOUT object pointing at the record */
+  const paperBlockNames = Object.keys(blocks).filter((nm) =>
+    blocks[nm] && /^\*paper_space.+$/i.test(nm));
   /* '*'-prefixed names are RESERVED anonymous blocks (owned by dimensions
      etc.) — real CAD rejects files where a foreign writer defines them as
      ordinary blocks. Rename on export; INSERT/DIMENSION refs follow. */
@@ -127,6 +134,7 @@ export const writeDxf = (drawing: Drawing): string => {
   const plotStyleHolderHandle = 'F';
   const blockRecHandle: Record<string, string> = {};
   for (const nm of blockNames) blockRecHandle[nm] = handle();
+  for (const nm of paperBlockNames) blockRecHandle[nm] = handle();
 
   /* IMAGE entities reference IMAGEDEF objects; collected while writing
      entities, emitted into the OBJECTS section at the end. */
@@ -560,7 +568,7 @@ export const writeDxf = (drawing: Drawing): string => {
     ...missingLt('bylayer') ? [{ name: 'ByLayer', pattern: [] as number[] }] : [],
     ...missingLt('continuous')
       ? [{ name: 'Continuous', description: 'Solid line', pattern: [] as number[] }] : [],
-    ...drawing.linetypes
+    ...drawing.linetypes.filter((lt) => !lt.xrefDependent)
   ];
   w(0, 'TABLE'); w(2, 'LTYPE'); w(5, handle()); w(100, 'AcDbSymbolTable');
   w(70, linetypes.length);
@@ -594,14 +602,16 @@ export const writeDxf = (drawing: Drawing): string => {
   }
   w(0, 'ENDTAB');
 
-  const styles = drawing.textStyles.length ? drawing.textStyles
-    : [{ name: 'Standard' }];
+  const ownStyles = drawing.textStyles.filter((s) => !s.xrefDependent)
+    .filter((s, i, all) => !(s.shapeFile
+      && all.some((o) => o !== s && !o.shapeFile && o.name.toLowerCase() === s.name.toLowerCase())));
+  const styles = ownStyles.length ? ownStyles : [{ name: 'Standard' }];
   w(0, 'TABLE'); w(2, 'STYLE'); w(5, handle()); w(100, 'AcDbSymbolTable');
   w(70, styles.length);
   for (const st of styles) {
     w(0, 'STYLE'); w(5, handle());
     w(100, 'AcDbSymbolTableRecord'); w(100, 'AcDbTextStyleTableRecord');
-    w(2, st.name); w(70, 0);
+    w(2, st.name); w(70, st.shapeFile ? 1 : 0);
     w(40, fmt(st.fixedHeight ?? 0));
     w(41, fmt(st.widthFactor ?? 1));
     w(50, fmt(st.oblique ?? 0)); w(71, 0); w(42, 2.5);
@@ -643,7 +653,29 @@ export const writeDxf = (drawing: Drawing): string => {
     w(0, 'ENDTAB');
   }
   {
-    const apps = drawing.appIds?.length ? drawing.appIds : ['ACAD'];
+    /* every application the drawing's xdata names must be registered —
+       DXFIN drops an xdata group whose APPID the table does not list —
+       so the table is the source's APPIDs plus whatever is in use */
+    const apps: string[] = [...(drawing.appIds ?? [])];
+    const seenApp = new Set(apps.map((a) => a.toUpperCase()));
+    const addApp = (name?: string): void => {
+      if (!name || seenApp.has(name.toUpperCase())) return;
+      seenApp.add(name.toUpperCase());
+      apps.push(name);
+    };
+    if (!apps.length) addApp('ACAD');
+    const walkApps = (list?: Entity[]): void => {
+      for (const e of list ?? []) {
+        for (const g of e.xdata ?? []) addApp(g.appName);
+        if (e.type === 'insert') {
+          for (const a of e.attributes ?? []) for (const g of a.xdata ?? []) addApp(g.appName);
+        }
+      }
+    };
+    walkApps(drawing.entities);
+    walkApps(drawing.paperSpace);
+    for (const b of Object.values(blocks)) walkApps(b?.entities);
+    for (const p of proxyObjs) for (const g of p.xdata ?? []) addApp(g.appName);
     w(0, 'TABLE'); w(2, 'APPID'); w(5, handle()); w(100, 'AcDbSymbolTable');
     w(70, apps.length);
     for (const a of apps) {
@@ -674,15 +706,15 @@ export const writeDxf = (drawing: Drawing): string => {
 
   /* BLOCK_RECORD entries improve interop with strict R2000 readers */
   w(0, 'TABLE'); w(2, 'BLOCK_RECORD'); w(5, handle()); w(100, 'AcDbSymbolTable');
-  w(70, 2 + blockNames.length);
+  w(70, 2 + paperBlockNames.length + blockNames.length);
   const brHandleOf = (nm: string): string => nm === '*Model_Space' ? msRecHandle
     : nm === '*Paper_Space' ? psRecHandle : blockRecHandle[nm];
   /* Layouts and their block records must point at each other — 330 down
      from the LAYOUT object, 340 back from the BLOCK_RECORD — or AUDIT
      deletes the dictionary entry. Handles are fixed here so the table
      can state the back-pointers; a layout whose block never lands in
-     the table (an extra paper space this writer does not emit) stays
-     out of the dictionary rather than being listed dangling. */
+     the table (one the drawing no longer holds) stays out of the
+     dictionary rather than being listed dangling. */
   const outLayouts: { l: NonNullable<Drawing['layouts']>[number]; h: string; brh: string }[] = [];
   for (const l of drawing.layouts ?? []) {
     const brh = l.blockName ? brHandleOf(l.blockName)
@@ -690,7 +722,7 @@ export const writeDxf = (drawing: Drawing): string => {
     if (brh) outLayouts.push({ l, h: handle(), brh });
   }
   const layoutOfBr = new Map(outLayouts.map((o) => [o.brh, o.h]));
-  for (const nm of ['*Model_Space', '*Paper_Space'].concat(blockNames)) {
+  for (const nm of ['*Model_Space', '*Paper_Space'].concat(paperBlockNames, blockNames)) {
     w(0, 'BLOCK_RECORD'); w(5, brHandleOf(nm));
     w(100, 'AcDbSymbolTableRecord'); w(100, 'AcDbBlockTableRecord');
     w(2, isSystemBlock(nm) ? nm : outBlockName(nm));
@@ -970,8 +1002,9 @@ export const writeDxf = (drawing: Drawing): string => {
     if (va) w(74, va);
   };
 
-  /* XDATA rides at the very end of its entity's record */
-  const writeXdata = (ent: Entity): void => {
+  /* XDATA rides at the very end of its record — an entity's, or a
+     dictionary-owned object's */
+  const writeXdata = (ent: { xdata?: Entity['xdata'] }): void => {
     for (const g of ent.xdata ?? []) {
       w(1001, g.appName ?? 'ACAD');
       for (const v of g.values) {
@@ -1068,19 +1101,74 @@ export const writeDxf = (drawing: Drawing): string => {
 
       case 'polyline': {
         if (ent.vertices.length < 2) return;
+        const is3d = ent.heavy === '3d' || ent.vertices.some((p) => p.z !== undefined);
+        if (ent.heavy || is3d) {
+          /* the heavy POLYLINE: a header, one VERTEX per vertex, a SEQEND
+             — the mesh flavours' sibling. 70: 1 closed, 2 curve-fit,
+             4 spline-fit, 8 3D, 128 plinegen; 75 the spline type. A
+             spline-fit polyline writes its frame (VERTEX 70 = 16) ahead
+             of the fitted curve (8); a curve-fit one flags the inserted
+             vertices (1); a 3D one's vertices all carry 32. */
+          const fit = ent.fit;
+          const flag = (ent.closed ? 1 : 0) | (fit === 'curve' ? 2 : fit ? 4 : 0)
+            | (is3d ? 8 : 0) | (ent.plineGen ? 128 : 0);
+          entStart('POLYLINE', ent, is3d ? 'AcDb3dPolyline' : 'AcDb2dPolyline');
+          w(66, 1);
+          w(10, 0); w(20, 0); w(30, is3d ? 0 : fmt(ent.elevation ?? 0));
+          w(70, flag);
+          if (fit === 'quadratic') w(75, 5);
+          else if (fit === 'cubic') w(75, 6);
+          if (!is3d) writeExtrusion(ent);
+          /* sub-records repeat the owner's space, layer, colour, linetype
+             and weight — the audit resets a vertex whose colour differs
+             from its owner's, one error per vertex */
+          const subEnt = (): void => {
+            w(100, 'AcDbEntity');
+            if (inPaperSpace) w(67, 1);
+            w(8, ent.layer || '0');
+            writeColor(ent.color);
+            if (ent.linetype) w(6, ent.linetype);
+            if (isNum(ent.lineweight)) w(370, lineweightCode(ent.lineweight));
+          };
+          const vertex = (p: (typeof ent.vertices)[number], vflag: number): void => {
+            w(0, 'VERTEX'); w(5, handle()); w(330, currentOwner);
+            subEnt();
+            w(100, 'AcDbVertex');
+            w(100, is3d ? 'AcDb3dPolylineVertex' : 'AcDb2dVertex');
+            w(10, fmt(p.x)); w(20, fmt(p.y));
+            w(30, fmt(is3d ? (p.z ?? 0) : (ent.elevation ?? 0)));
+            if (!is3d) {
+              if (isNum(p.startWidth) && p.startWidth !== 0) w(40, fmt(p.startWidth));
+              if (isNum(p.endWidth) && p.endWidth !== 0) w(41, fmt(p.endWidth));
+              if (isNum(p.bulge) && p.bulge !== 0) w(42, fmt(p.bulge));
+            }
+            w(70, vflag | (is3d ? 32 : 0) | (isNum(p.tangent) ? 2 : 0));
+            if (isNum(p.tangent)) w(50, fmt(p.tangent * DEG));
+            if (isNum(p.id) && p.id) w(91, p.id);
+          };
+          const frame = fit && fit !== 'curve' ? (ent.frame ?? []) : [];
+          for (const p of frame) vertex(p, 16);
+          for (const p of ent.vertices) {
+            vertex(p, fit === 'curve' ? (p.curveFit ? 1 : 0) : fit ? 8 : 0);
+          }
+          w(0, 'SEQEND'); w(5, handle()); w(330, currentOwner);
+          subEnt();
+          return;
+        }
         entStart('LWPOLYLINE', ent, 'AcDbPolyline');
         w(90, ent.vertices.length);
-        w(70, ent.closed ? 1 : 0);
+        w(70, (ent.closed ? 1 : 0) | (ent.plineGen ? 128 : 0));
         if (isNum(ent.constantWidth) && ent.constantWidth > 0) w(43, fmt(ent.constantWidth));
         if (isNum(ent.elevation) && ent.elevation !== 0) w(38, fmt(ent.elevation));
         writeExtrusion(ent);
         for (const p of ent.vertices) {
           w(10, fmt(p.x)); w(20, fmt(p.y));
-          /* 40/41/42 are positional: they belong to the vertex opened by
-             the preceding 10 */
+          /* 40/41/42/91 are positional: they belong to the vertex opened
+             by the preceding 10 */
           if (isNum(p.startWidth)) w(40, fmt(p.startWidth));
           if (isNum(p.endWidth)) w(41, fmt(p.endWidth));
           if (isNum(p.bulge) && p.bulge !== 0) w(42, fmt(p.bulge));
+          if (isNum(p.id) && p.id) w(91, p.id);
         }
         return;
       }
@@ -1725,6 +1813,23 @@ export const writeDxf = (drawing: Drawing): string => {
     w(0, 'ENDBLK'); w(5, handle()); w(330, owner);
     w(100, 'AcDbEntity'); w(8, '0'); w(100, 'AcDbBlockEnd');
   }
+  for (const nm of paperBlockNames) {
+    const def = blocks[nm];
+    const base = def.basePoint ?? { x: 0, y: 0, z: 0 };
+    const owner = blockRecHandle[nm];
+    w(0, 'BLOCK'); w(5, handle()); w(330, owner);
+    w(100, 'AcDbEntity'); w(67, 1); w(8, '0'); w(100, 'AcDbBlockBegin');
+    w(2, nm); w(70, 0);
+    w(10, fmt(base.x)); w(20, fmt(base.y)); w(30, fmt(base.z ?? 0));
+    w(3, nm); w(1, '');
+    currentOwner = owner;
+    inPaperSpace = true;
+    def.entities.forEach(writeEntity);
+    inPaperSpace = false;
+    currentOwner = msRecHandle;
+    w(0, 'ENDBLK'); w(5, handle()); w(330, owner);
+    w(100, 'AcDbEntity'); w(67, 1); w(8, '0'); w(100, 'AcDbBlockEnd');
+  }
   for (const nm of blockNames) {
     const def = blocks[nm];
     const base = def.basePoint ?? { x: 0, y: 0, z: 0 };
@@ -1820,6 +1925,7 @@ export const writeDxf = (drawing: Drawing): string => {
       w(91, proxyClassId.get(
         proxyClassKey(p.appClass, p.sourceType, 'ACAD_PROXY_OBJECT')) ?? 0);
       writeProxyBody(p);
+      writeXdata(p);
     });
 
     /* ---- sealed unknown objects: the retained record, verbatim, with

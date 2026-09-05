@@ -151,8 +151,8 @@ describe('the A→B→A theorem', () => {
     expect(uA?.refs).toEqual(REFS);
   });
 
-  it('survives a longer odyssey: 2018 → R13 → 2004 → 2018', () => {
-    let doc = readDwg(writeDwgR13(d).data);
+  it('survives a longer odyssey: 2018 → 2000 → 2004 → 2018', () => {
+    let doc = readDwg(writeDwg2000(d).data);
     doc = readDwg(writeDwg2004(doc).data);
     doc = readDwg(writeDwg2018(doc).data);
     const u = findUnknown(doc);
@@ -160,6 +160,14 @@ describe('the A→B→A theorem', () => {
     expect(u?.dataBits).toBe(PAYLOAD_BITS);
     expect(u?.encoding).toBe(2018);
     expect(u?.refs).toEqual(REFS);
+  });
+
+  it('stays home at R13/R14, reported: the reference refuses a foreign seal there', () => {
+    /* proven on the reference's own A-03: its one sealed table entity
+       wrapped for R14 was refused, the drawing without it opened clean */
+    const res = writeDwgR13(d);
+    expect(res.skipped).toContain('ACME_WIDGET');
+    expect(findUnknown(readDwg(res.data))).toBeUndefined();
   });
 });
 

@@ -138,6 +138,18 @@ export interface PolylineVertex extends Point2 {
   bulge?: number;
   startWidth?: number;
   endWidth?: number;
+  /** Elevation of a 3D polyline vertex (heavy POLYLINE, flag 8). A
+   *  vertex with a z makes the whole polyline a 3D one. */
+  z?: number;
+  /** Vertex identifier (DXF 91, R2010+): constraints and parametric
+   *  actions name a vertex by it. 0 and absent are the same thing. */
+  id?: number;
+  /** Heavy POLYLINE only: the vertex was inserted by curve fitting
+   *  (VERTEX 70 bit 1) — not one the user placed. */
+  curveFit?: boolean;
+  /** Heavy POLYLINE only: curve-fit tangent direction in radians
+   *  (VERTEX 70 bit 2 with DXF 50). */
+  tangent?: number;
 }
 
 export interface PolylineEntity extends EntityCommon {
@@ -147,6 +159,23 @@ export interface PolylineEntity extends EntityCommon {
   /** Constant width when set. */
   constantWidth?: number;
   elevation?: number;
+  /** Set when the entity is a heavy POLYLINE — a header with its own
+   *  VERTEX records and a SEQEND — rather than an inline LWPOLYLINE.
+   *  '3d' is the 3D polyline (70 bit 8: vertices carry `z`); '2d' the
+   *  planar one. Absent means LWPOLYLINE; a vertex with `z` is written
+   *  heavy 3D regardless. */
+  heavy?: '2d' | '3d';
+  /** Heavy POLYLINE 70 bits 2/4 with 75: 'curve' = curve-fit (bit 2),
+   *  'quadratic' / 'cubic' = spline-fit (bit 4, 75 = 5 / 6). `vertices`
+   *  is what draws: the curve-fit vertices (inserted ones flagged
+   *  `curveFit`) or the spline-fitted vertices (VERTEX 70 bit 8). */
+  fit?: 'curve' | 'quadratic' | 'cubic';
+  /** Spline-fit only: the frame control points the curve was fitted
+   *  through (VERTEX 70 bit 16), kept apart from the drawn curve. */
+  frame?: PolylineVertex[];
+  /** 70 bit 128 (LWPOLYLINE 256 in the DWG record): the linetype
+   *  pattern runs continuously around the vertices. */
+  plineGen?: boolean;
 }
 
 export interface SplineEntity extends EntityCommon {
@@ -679,6 +708,9 @@ export interface UnknownObject {
   ownerHandle?: string;
   /** DXF-side sealed retention: raw tags, verbatim. */
   tags?: [number, string][];
+  /** The record's own extended data (EED), decoded — the DXF tags carry
+   *  it verbatim as well; this is the form the DWG writer can emit. */
+  xdata?: XdataGroup[];
 }
 
 /** A point cloud placed in the drawing. The points themselves live in an
@@ -742,6 +774,11 @@ export interface Layer {
    *  preserve table numbering — raw entity records reference layers by
    *  handle, so this is what keeps retained records valid. */
   handle?: string;
+  /** The record belongs to an external reference (its name is spelled
+   *  `xref|layer`); it exists only while that file is attached, so a
+   *  writer leaves it out — the reference audits an ordinary record with
+   *  a bar in its name. */
+  xrefDependent?: boolean;
 }
 
 export interface Linetype {
@@ -751,6 +788,8 @@ export interface Linetype {
   pattern: number[];
   /** Source-file handle (hex), for handle-stable rewrites. */
   handle?: string;
+  /** Belongs to an external reference; see Layer.xrefDependent. */
+  xrefDependent?: boolean;
 }
 
 export interface TextStyle {
@@ -768,6 +807,12 @@ export interface TextStyle {
    *  say all of it through this one. Read on both codecs; a rewrite carries
    *  the file name, so writing it back is still owed. */
   typeface?: string;
+  /** A shape file (an .shx of shapes, not of a font) registered as a
+   *  style record: the reference writes one named like a text style, so
+   *  the flag is what tells the two "Standard" records apart. */
+  shapeFile?: boolean;
+  /** Belongs to an external reference; see Layer.xrefDependent. */
+  xrefDependent?: boolean;
   bold?: boolean;
   italic?: boolean;
   /** Source-file handle (hex), for handle-stable rewrites. */
@@ -814,6 +859,13 @@ export interface BlockDefinition {
   name: string;
   basePoint: Point3;
   entities: Entity[];
+  /** The block is an attached external reference: its geometry lives in
+   *  the file at `path` (as stored — absolute, relative or a bare name
+   *  resolved against the drawing's folder and the search path), so
+   *  `entities` is empty here. `overlay` is an overlaid attachment, which
+   *  does not carry its own references along. A writer keeps the record
+   *  as an xref, so the reference re-attaches the file on open. */
+  xref?: { path: string; overlay?: boolean };
   /** True for layout blocks (*Model_Space / paper space). */
   isLayout?: boolean;
   /** Source-file BLOCK_HEADER handle (hex), for handle-stable rewrites. */
@@ -971,6 +1023,11 @@ export interface ProxyObject {
   data?: string;
   dataBits?: number;
   refs?: { code: number; value: string }[];
+  /** The record's own extended data (EED), per registered application.
+   *  Some applications keep a proxy object's whole content here — the
+   *  database-link records of the reference's dbConnect sample carry
+   *  nothing but their DCO15 xdata — so it travels with the record. */
+  xdata?: XdataGroup[];
 }
 
 /** An extension-dictionary XRECORD: an ordered list of typed group values

@@ -9,7 +9,7 @@
 
 import type {
   BlockDefinition, Drawing, Entity, FileVersion, HeaderUcs, Layer, MeshEntity,
-  PolylineEntity, TextStyle, XdataGroup
+  PolylineEntity, PolylineVertex, TextStyle, XdataGroup
 } from '../core/model.js';
 import { emptyDrawing } from '../core/model.js';
 import {
@@ -261,6 +261,8 @@ export const readDwg = (
   const blockHeaderByHandle = new Map<number, RawObject>();
   let modelSpaceHandle: number | undefined;
   let paperSpaceHandle: number | undefined;
+  let ctrlModel = 0;
+  let ctrlPaper = 0;
 
   drawing.layers = [];
   drawing.linetypes = [];
@@ -285,6 +287,7 @@ export const readDwg = (
           lineweight: t.lineweight,
           handle: raw.handle.toString(16).toUpperCase()
         };
+        if (t.xrefDependent) layer.xrefDependent = true;
         drawing.layers.push(layer);
         if (t.ltypeHandle) {
           /* patched to a name after ltypes resolve */
@@ -298,7 +301,8 @@ export const readDwg = (
           name: t.name || 'Continuous',
           description: t.description,
           pattern: t.pattern ?? [],
-          handle: raw.handle.toString(16).toUpperCase()
+          handle: raw.handle.toString(16).toUpperCase(),
+          ...(t.xrefDependent ? { xrefDependent: true } : {})
         });
         break;
       case 'style':
@@ -311,18 +315,24 @@ export const readDwg = (
             oblique: t.oblique,
             handle: raw.handle.toString(16).toUpperCase()
           };
+          if (t.shapeFile) st.shapeFile = true;
+          if (t.xrefDependent) st.xrefDependent = true;
           if (t.xdata) styleEed.push({ st, xd: t.xdata });
           drawing.textStyles.push(st);
         }
         break;
       case 'blockHeader':
         blockHeaderByHandle.set(raw.handle, raw);
-        if (/^\*model_space$/i.test(t.name ?? '')) modelSpaceHandle = raw.handle;
-        if (/^\*paper_space$/i.test(t.name ?? '')) paperSpaceHandle = raw.handle;
+        /* a name is only a fallback: every layout's record can be spelled
+           `*Paper_Space` in the file (the reference's site plans), and the
+           last one in file order is not the current layout — the block
+           control's pointer is, and it wins below */
+        if (!ctrlModel && /^\*model_space$/i.test(t.name ?? '')) modelSpaceHandle = raw.handle;
+        if (!ctrlPaper && /^\*paper_space$/i.test(t.name ?? '')) paperSpaceHandle = raw.handle;
         break;
       case 'blockControl':
-        if (t.modelSpace) modelSpaceHandle = t.modelSpace;
-        if (t.paperSpace) paperSpaceHandle = t.paperSpace;
+        if (t.modelSpace) modelSpaceHandle = ctrlModel = t.modelSpace;
+        if (t.paperSpace) paperSpaceHandle = ctrlPaper = t.paperSpace;
         break;
       case 'appid':
         if (t.name) appidName.set(raw.handle, t.name);
@@ -444,22 +454,58 @@ export const readDwg = (
     }
     return out;
   };
+  /* the header's own common data, decoded before its type was known to
+     fold, lands on the entity the folding produced */
+  const applyFolded = (e: Entity, raw: RawObject): void => {
+    const f = raw.folded;
+    if (!f) return;
+    e.color = f.color;
+    if (f.ltypeScale !== 1) e.linetypeScale = f.ltypeScale;
+    if (f.lineweight !== undefined) e.lineweight = f.lineweight;
+    if (f.invisible) e.invisible = true;
+    if (f.xdata) e.xdata = f.xdata;
+  };
   for (const raw of order) {
     if (raw.polyline) {
-      const verts = ownedVerts(raw, raw.polyline.vertexHandles)
-        .filter((w) => w.vertex);
-      if (verts.length < 2) continue;
+      const pl = raw.polyline;
+      const verts = ownedVerts(raw, pl.vertexHandles).filter((w) => w.vertex);
+      /* A spline-fit polyline lists its frame — the vertices the user
+         placed, flag 16 — and the fitted curve, flag 8: the curve is what
+         the reference draws (the frame only under SPLFRAME), so the curve
+         is `vertices` and the frame is kept apart. A curve-fit polyline
+         draws every vertex, the inserted ones (flag 1) marked. */
+      const frame: PolylineVertex[] = [];
+      const drawn: PolylineVertex[] = [];
+      for (const w of verts) {
+        const vx = w.vertex!;
+        const pv: PolylineVertex = { x: vx.x, y: vx.y };
+        if (pl.is3d) pv.z = vx.z;
+        if (vx.bulge) pv.bulge = vx.bulge;
+        if (vx.startWidth) pv.startWidth = vx.startWidth;
+        if (vx.endWidth) pv.endWidth = vx.endWidth;
+        if (vx.id) pv.id = vx.id;
+        if (vx.tangent !== undefined) pv.tangent = vx.tangent;
+        const f = vx.flags ?? 0;
+        if (f & 1) pv.curveFit = true;
+        if (pl.splineFit && (f & 16)) frame.push(pv); else drawn.push(pv);
+      }
+      const vertices = drawn.length >= 2 ? drawn : [...frame, ...drawn];
+      if (vertices.length < 2) continue;
       const ent: PolylineEntity = {
         type: 'polyline',
         layer: '0', color: { kind: 'byLayer' },
         handle: raw.handle.toString(16).toUpperCase(),
-        vertices: verts.map((w) => ({
-          x: w.vertex!.x, y: w.vertex!.y,
-          bulge: w.vertex!.bulge,
-          startWidth: w.vertex!.startWidth, endWidth: w.vertex!.endWidth
-        })),
-        closed: raw.polyline.closed
+        vertices,
+        closed: pl.closed,
+        heavy: pl.is3d ? '3d' : '2d'
       };
+      if (drawn.length >= 2 && frame.length) ent.frame = frame;
+      if (pl.splineFit) ent.fit = pl.curveType === 6 ? 'cubic' : 'quadratic';
+      else if (pl.curveFit) ent.fit = 'curve';
+      if (pl.plineGen) ent.plineGen = true;
+      if (pl.elevation) ent.elevation = pl.elevation;
+      if (pl.extrusion) ent.extrusion = pl.extrusion;
+      applyFolded(ent, raw);
       raw.entity = ent;
     } else if (raw.mesh) {
       const owned = ownedVerts(raw, raw.mesh.vertexHandles);
@@ -485,6 +531,7 @@ export const readDwg = (
           .map((w) => w.pfaceFace!.filter((i) => i !== 0));
         if (faces.length) ent.faces = faces;
       }
+      applyFolded(ent, raw);
       raw.entity = ent;
     }
   }
@@ -499,11 +546,47 @@ export const readDwg = (
      BEFORE any name resolves keeps definitions and references agreeing,
      and numbering from 1 matches the names AutoCAD shows. */
   {
+    /* THE DYNAMIC BLOCK'S TRUE NAME. A dynamic block's definition can be
+       stored as an anonymous "*U" record whose real name sits in its EED
+       under the AcDbDynamicBlockTrueName APPID (beside the GUID and the
+       representation tag); the reference lists such a record under that
+       name, not anonymous — verified against its block table of a sheet
+       set's title block. The promotion only happens when no record spells
+       the name out in full: then the "*U" is a variant of it and stays
+       one. */
+    const trueNameOf = (xd: XdataGroup[] | undefined): string | undefined => {
+      for (const g of xd ?? []) {
+        const app = g.appName
+          ?? (g.appHandle ? appidName.get(parseInt(g.appHandle, 16)) : undefined);
+        if (app?.toLowerCase() !== 'acdbdynamicblocktruename') continue;
+        for (const val of g.values) {
+          if ('value' in val && val.code === 1000
+              && typeof val.value === 'string' && val.value) return val.value;
+        }
+      }
+      return undefined;
+    };
+    const isStem = (t: { name?: string; anonymous?: boolean }): boolean =>
+      t.anonymous === true && /^\*.$/.test(t.name ?? '');
+    const fixed = new Set<string>();
+    for (const bh of blockHeaderByHandle.values()) {
+      const t = bh.table;
+      if (t?.name && !isStem(t)) fixed.add(t.name);
+    }
     const taken = new Set<string>();
     for (const bh of blockHeaderByHandle.values()) {
       const t = bh.table;
       if (!t?.name) continue;
-      const anonStem = t.anonymous === true && /^\*.$/.test(t.name);
+      const anonStem = isStem(t);
+      if (anonStem && t.name === '*U') {
+        const trueName = trueNameOf(t.xdata);
+        if (trueName && !fixed.has(trueName) && !taken.has(trueName)) {
+          t.name = trueName;
+          t.anonymous = false;
+          taken.add(trueName);
+          continue;
+        }
+      }
       if (!anonStem && !taken.has(t.name)) { taken.add(t.name); continue; }
       let n = anonStem ? 1 : 2;
       while (taken.has(t.name + n)) n++;
@@ -576,9 +659,21 @@ export const readDwg = (
       if (shapes.length) e.graphics = shapes;
       e.graphicsData = toBase64(raw.proxyGraphics);
     }
+    if (e.type === 'mleader' && raw.mleaderBlock !== undefined) {
+      const bh = blockHeaderByHandle.get(raw.mleaderBlock);
+      if (bh?.table?.name) e.blockName = bh.table.name;
+    }
     if (e.type === 'dimension' && raw.dimBlock !== undefined) {
       const bh = blockHeaderByHandle.get(raw.dimBlock);
       if (bh?.table?.name) e.blockName = bh.table.name;
+    }
+    if (e.type === 'table' && raw.tableCellBlocks) {
+      /* a block-content cell names the block it shows */
+      for (const [index, handle] of raw.tableCellBlocks) {
+        const name = blockHeaderByHandle.get(handle)?.table?.name;
+        const cell = e.cells[index];
+        if (name && cell) cell.blockName = name;
+      }
     }
     if (e.type === 'dimension' && raw.dimStyleHandle !== undefined) {
       const nm = dimStyleName.get(raw.dimStyleHandle);
@@ -658,6 +753,7 @@ export const readDwg = (
       entities,
       handle: handle.toString(16).toUpperCase()
     };
+    if (t.xrefPath !== undefined) def.xref = { path: t.xrefPath, ...(t.xrefOverlay ? { overlay: true } : {}) };
     drawing.blocks[name] = def;
   }
 
@@ -783,7 +879,17 @@ export const readDwg = (
         values: raw.xrecord.values
       });
     }
+    /* an object's EED names its APPID by handle; the reader is where
+       the names are known */
+    const nameApps = (xd?: XdataGroup[]): void => {
+      for (const g of xd ?? []) {
+        if (!g.appHandle) continue;
+        const nm = appidName.get(parseInt(g.appHandle, 16));
+        if (nm) { g.appName = nm; delete g.appHandle; }
+      }
+    };
     if (raw.proxyObject) {
+      nameApps(raw.proxyObject.xdata);
       (drawing.proxyObjects ??= []).push({
         handle: raw.handle.toString(16).toUpperCase(),
         name: dictNameOf.get(raw.handle),
@@ -792,6 +898,7 @@ export const readDwg = (
       });
     }
     if (raw.unknownObject) {
+      nameApps(raw.unknownObject.xdata);
       (drawing.unknownObjects ??= []).push({
         handle: raw.handle.toString(16).toUpperCase(),
         name: dictNameOf.get(raw.handle),

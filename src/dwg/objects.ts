@@ -82,6 +82,8 @@ export interface TableRecord {
       | 'blockControl' | 'tableControl' | 'appid' | 'dimstyle'
       | 'ucs' | 'view' | 'vport';
   name?: string;
+  /** The record belongs to an attached external reference. */
+  xrefDependent?: boolean;
   /* layer */
   colorIndex?: number;
   rgb?: number;
@@ -95,6 +97,7 @@ export interface TableRecord {
   description?: string;
   pattern?: number[];
   /* style */
+  shapeFile?: boolean;
   font?: string;
   bigFont?: string;
   fixedHeight?: number;
@@ -107,6 +110,10 @@ export interface TableRecord {
   /* block header */
   basePoint?: Point3;
   anonymous?: boolean;
+  /** An external reference's record: the attached file and whether the
+   *  attachment is an overlay. */
+  xrefPath?: string;
+  xrefOverlay?: boolean;
   firstEntity?: number;
   lastEntity?: number;
   ownedHandles?: number[];
@@ -142,8 +149,21 @@ export interface RawObject {
   polyline?: {
     is3d: boolean; closed: boolean; vertexHandles: number[];
     first?: number; last?: number;
+    /** The header's 70 bits 2/4/128 and its 75 curve type. */
+    curveFit?: boolean; splineFit?: boolean; plineGen?: boolean;
+    curveType?: number;
+    /** 2D only: elevation and OCS normal of the header. */
+    elevation?: number; extrusion?: Point3;
   };
-  vertex?: PolylineVertex & { z: number };
+  /** VERTEX_2D/3D payload; `flags` is the record's own 70 byte. */
+  vertex?: PolylineVertex & { z: number; flags?: number };
+  /** The common entity data of a record that folds into another entity
+   *  (a heavy polyline's header, a mesh): decoded before the type-specific
+   *  part, applied by the assembler once the folded entity exists. */
+  folded?: {
+    color: Color; ltypeScale: number; lineweight?: number;
+    invisible: boolean; xdata?: XdataGroup[];
+  };
   blockName?: string;                     /* BLOCK entity */
   table?: TableRecord;
   /** DIMENSION_*: handle of the anonymous geometry block. */
@@ -212,6 +232,9 @@ export interface RawObject {
   tableBlock?: number;
   tableStyle?: number;
   tableContent?: TableGrid;
+  /** ACAD_TABLE: block record handle per block-content cell, by cell
+   *  index (the assembler resolves the names). */
+  tableCellBlocks?: Map<number, number>;
   /** GEODATA payload. */
   geoData?: GeoData;
   /** PDF/DGN/DWF UNDERLAY: definition handle to resolve into a path. */
@@ -686,11 +709,20 @@ class Ctx {
   /** Common table-record flags (name + xref bookkeeping + xref handle). */
   tableFlags(): string {
     const name = this.text();
-    if (this.v <= 2004) { this.r.b(); this.r.bs(); this.r.b(); }
-    else this.r.bs();                     /* is_xref_resolved only */
-    this.hr.h();                          /* xref block handle */
+    let dependent = false;
+    if (this.v <= 2004) {
+      this.r.b(); this.r.bs();            /* used, xrefindex + 1 */
+      dependent = this.r.b() === 1;       /* xref dependent */
+    } else {
+      this.r.bs();                        /* is_xref_resolved only */
+    }
+    const xref = this.hr.h();             /* xref block handle */
+    this.lastXrefDependent = dependent || xref.value > 0;
     return name;
   }
+  /** What the last tableFlags() read: whether the record is an external
+   *  reference's (a non-zero xref block, or the pre-2007 flag). */
+  lastXrefDependent = false;
 }
 
 /* ------------------------------------------------------------------ *
@@ -841,23 +873,13 @@ const readSealBody = (x: Ctx): {
   for (let i = 0; i < dataBits; i++) {
     if (r.b()) blob[i >> 3] |= 0x80 >> (i & 7);
   }
-  let strBits = 0;
-  let strBlob = new Uint8Array(0);
-  if (v >= 2007) {
-    if (x.sr && x.srBits > 0) {
-      const sr = new BitReader(x.r.data, x.srStart, x.srStart + x.srBits);
-      strBits = x.srBits;
-      strBlob = new Uint8Array((strBits + 7) >> 3);
-      for (let i = 0; i < strBits; i++) {
-        if (sr.b()) strBlob[i >> 3] |= 0x80 >> (i & 7);
-      }
-    }
-  } else {
-    strBits = r.rl();
-    strBlob = new Uint8Array((strBits + 7) >> 3);
-    for (let i = 0; i < strBits; i++) {
-      if (r.b()) strBlob[i >> 3] |= 0x80 >> (i & 7);
-    }
+  /* the seal's own strings follow its data bits in every release; the
+     R2007+ string stream of the record is the reference's "cn:<class>"
+     field and is left to it */
+  const strBits = r.rl();
+  const strBlob = new Uint8Array((strBits + 7) >> 3);
+  for (let i = 0; i < strBits; i++) {
+    if (r.b()) strBlob[i >> 3] |= 0x80 >> (i & 7);
   }
   return { dataBits, blob, strBits, strBlob };
 };
@@ -1063,7 +1085,13 @@ const decodeEntitySpecific = (
         const b = r.bd();
         if (vertices[i] && b) vertices[i].bulge = b;
       }
-      for (let i = 0; i < numIds; i++) r.bl();
+      /* R2010+ vertex identifiers (DXF 91): a constrained polyline names
+         its vertices by them, and the reference audits a constraint whose
+         vertex id is gone */
+      for (let i = 0; i < numIds; i++) {
+        const id = r.bl();
+        if (vertices[i] && id) vertices[i].id = id;
+      }
       for (let i = 0; i < numWidths; i++) {
         const sw = r.bd(), ew = r.bd();
         if (vertices[i]) {
@@ -1075,6 +1103,7 @@ const decodeEntitySpecific = (
         type: 'polyline', layer: '0', color: { kind: 'byLayer' },
         vertices, closed: (flag & 512) !== 0, constantWidth,
         elevation: elevation || undefined,
+        ...(flag & 256 ? { plineGen: true } : {}),
         ...(lwExt ? { extrusion: lwExt } : {})
       };
     }
@@ -1159,45 +1188,58 @@ const decodeEntitySpecific = (
     }
 
     case 'Vertex2d': {
-      r.rc();                             /* flags */
+      /* the 70 byte says what the vertex IS: 1 = inserted by curve
+         fitting, 2 = has a tangent, 8 = a spline-fitted vertex, 16 = a
+         spline frame point — the assembler sorts them into the polyline */
+      const flags = r.rc();
       const [px, py, pz] = r.bd3();
       let sw = r.bd(), ew = 0;
       if (sw < 0) { sw = -sw; ew = sw; } else ew = r.bd();
       const bulge = r.bd();
-      if (v >= 2010) r.bl();              /* vertex id */
-      r.bd();                             /* tangent dir */
+      const id = v >= 2010 ? r.bl() : 0;
+      const tangent = r.bd();
       raw.vertex = {
-        x: px, y: py, z: pz,
+        x: px, y: py, z: pz, flags,
         bulge: bulge || undefined,
-        startWidth: sw || undefined, endWidth: ew || undefined
+        startWidth: sw || undefined, endWidth: ew || undefined,
+        ...(id ? { id } : {}),
+        ...(flags & 2 ? { tangent } : {})
       };
       return null;                        /* folded into its polyline */
     }
     case 'Vertex3d':
     case 'VertexMesh':
     case 'VertexPFace': {
-      r.rc();
+      const flags = r.rc();
       const [px, py, pz] = r.bd3();
-      raw.vertex = { x: px, y: py, z: pz };
+      raw.vertex = { x: px, y: py, z: pz, flags };
       return null;
     }
 
     case 'Polyline2d': {
       const flag = r.bs();
-      r.bs();                             /* curve type */
+      const curveType = r.bs();           /* 75 */
       r.bd(); r.bd();                     /* default widths */
       if (v <= 14) r.bd(); else r.bt();   /* thickness */
-      r.bd();                             /* elevation */
-      if (v <= 14) r.bd3(); else r.be();  /* extrusion */
+      const elevation = r.bd();
+      const ext = v <= 14 ? r.bd3() : r.be();
       const numOwned = v >= 2004 ? r.bl() : 0;
       raw.polyline = collectPolylineHandles(x, raw, false, (flag & 1) === 1, numOwned);
+      polylineFlags(raw.polyline, flag, curveType);
+      if (elevation) raw.polyline.elevation = elevation;
+      const pext = extrusionOf(ext);
+      if (pext) raw.polyline.extrusion = pext;
       return null;                        /* built after vertices resolve */
     }
     case 'Polyline3d': {
-      const f1 = r.rc();
-      r.rc();
+      /* two bytes: the curve type first (spline-fit: 5 = quadratic,
+         6 = cubic — not the 70 bit the 2D header uses), then the 70
+         flags, where bit 0 is closed */
+      const curveType = r.rc();
+      const flag = r.rc();
       const numOwned = v >= 2004 ? r.bl() : 0;
-      raw.polyline = collectPolylineHandles(x, raw, true, (f1 & 1) === 1, numOwned);
+      raw.polyline = collectPolylineHandles(x, raw, true, (flag & 1) === 1, numOwned);
+      polylineFlags(raw.polyline, flag | (curveType ? 4 : 0), curveType);
       return null;
     }
 
@@ -1858,6 +1900,16 @@ const collectPolylineHandles = (
   return pl;
 };
 
+/** The header's 70 bits beyond closed, and its 75 curve type. */
+const polylineFlags = (
+  pl: NonNullable<RawObject['polyline']>, flag: number, curveType: number
+): void => {
+  if (flag & 2) pl.curveFit = true;
+  if (flag & 4) pl.splineFit = true;
+  if (flag & 128) pl.plineGen = true;
+  if (curveType) pl.curveType = curveType;
+};
+
 /** MESH/PFACE vertex ownership: chain form (R13-R2000) or owned vector. */
 const collectMeshHandles = (x: Ctx, raw: RawObject, numOwned: number): void => {
   if (x.v <= 2000) {
@@ -2327,7 +2379,29 @@ const readTableString = (x: Ctx): string => {
   return decodeCadText(out);
 };
 
-const readTableValue = (x: Ctx): string | undefined => {
+/** A "general" (type 512) value's blob, when it is what the reference's
+ *  pre-2010 cells put there: the cell text itself as NUL-terminated UTF-16.
+ *  Anything that does not read as text stays opaque. */
+const utf16Blob = (bytes: Uint8Array): string | undefined => {
+  if (bytes.length < 2 || bytes.length & 1) return undefined;
+  let out = '';
+  for (let i = 0; i + 1 < bytes.length; i += 2) {
+    const code = bytes[i] | (bytes[i + 1] << 8);
+    if (!code) {
+      /* only NUL padding may follow the terminator */
+      for (let k = i; k < bytes.length; k++) if (bytes[k]) return undefined;
+      break;
+    }
+    if (code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) return undefined;
+    out += String.fromCharCode(code);
+  }
+  return decodeCadText(out);
+};
+
+/** A table VALUE. `cellForm` is the pre-2010 cell's spelling, which always
+ *  carries both string-stream entries (format string, rendered text) —
+ *  verified on the reference's own AC1021 tables, original and re-saved. */
+const readTableValue = (x: Ctx, cellForm = false): string | undefined => {
   const { r, v } = x;
   let text: string | undefined;
   let formatFlags = 0;
@@ -2349,11 +2423,14 @@ const readTableValue = (x: Ctx): string | undefined => {
       case 32: r.bl(); r.rd(); r.rd(); r.rd(); break;      /* 3d point */
       case 64: x.hr.h(); break;           /* object id */
       case 128: case 256: break;          /* buffer / resbuf: nothing */
-      case 512: {                         /* general: an opaque blob */
+      case 512: {                         /* general: a blob — the cell text
+                                             as UTF-16 in the reference's
+                                             pre-2010 cells, whose rendered
+                                             string-stream entry is empty */
         if (v < 2007) break;
         const size = r.bl();
         if (size < 0 || size > 0x1000000) throw new RangeError('table blob');
-        r.bytes(size);
+        text = utf16Blob(r.bytes(size));
         break;
       }
       default: throw new RangeError('table value type ' + dataType);
@@ -2363,7 +2440,7 @@ const readTableValue = (x: Ctx): string | undefined => {
     const unitType = r.bl();
     x.text();                             /* format string */
     /* the rendered form — what a viewer shows for numbers and dates */
-    if (unitType !== 12) {
+    if (cellForm || unitType !== 12) {
       const shown = x.text();
       if (!text && shown) text = shown;
     }
@@ -2663,12 +2740,41 @@ const decodeTable = (x: Ctx, raw: RawObject): Entity => {
   const cells: TableCell[] = [];
   const total = numColumns * numRows;
   if (total > 200000) throw new RangeError('table cells');
-  const readCells = (extras: boolean, strict: boolean): void => {
-  cells.length = 0;
-  for (let i = 0; i < total; i++) {
+  const cellBlocks = new Map<number, number>();
+  /* The pre-2010 cell, verified bit-exact against the reference's own
+     tables — a 32x12 schedule, a 28x14 one with a block cell, a 7x8 legend
+     and two 17x2 / 16x2 block-and-text grids, each saved by it to 2000,
+     2004 and 2007 (the 2007 ones by two different releases of it): every
+     record walks to its last data bit with every handle and every string
+     consumed.
+
+       BS type (1 text, 2 block), RC flags, B merged, B autofit,
+       BL merged width, BL merged height, BD rotation
+       text:  H text style; before 2007 the text itself (TV)
+       block: H block record, BD scale, B has attributes,
+              [BS count, per attribute: H attdef, BS index, TV value]
+       B has overrides, [BL flags, RC virtual edge, then per flag bit:
+              0x01 BS alignment, 0x02 B fill none, 0x04/0x08 CMC background
+              and content colour (the R2004 spelling in every release),
+              0x10 H text style, 0x20 BD text height, and the four grid
+              edges' CMC colour / BS lineweight / BS visibility]
+       R2007: BL extended cell flags (0), then the cell VALUE — BL format
+              flags, BL data type, the data (a "general" 512 blob is the
+              text as UTF-16; a 4 string is byte-counted UTF-16), BL unit
+              type, and the format string and rendered text in the string
+              stream.
+
+     Two earlier misreadings are what had sealed these tables: the block
+     cell's attribute flag was taken for its override flag (so a block cell
+     with overrides skipped straight into them as attributes), and the
+     R2007 value was placed ahead of the overrides. `legacy` is the spelling
+     nasjidwg's own 2007 writer used before the value was understood (the
+     text as a single string-stream entry, then the override flag); files
+     written that way still open. */
+  const readCell = (index: number, legacy: boolean): TableCell => {
     const cell: TableCell = {};
     const type = r.bs();
-    if (strict && type !== 1 && type !== 2) throw new RangeError('table cell type');
+    if (type !== 1 && type !== 2) throw new RangeError('table cell type');
     cell.contentType = type;
     r.rc();                               /* flags */
     r.b();                                /* is merged */
@@ -2677,54 +2783,26 @@ const decodeTable = (x: Ctx, raw: RawObject): Entity => {
     const spanRows = r.bl();
     if (spanCols > 1) cell.spanColumns = spanCols;
     if (spanRows > 1) cell.spanRows = spanRows;
-    /* the override flags and virtual-edge byte are DXF-only here */
     r.bd();                               /* rotation */
-    /* R2007 alone inserts a BD here — 1.0 in every cell of every
-       AutoCAD-2027-minted 2007 table (2x4 and 3x4 grids; solved by brute
-       forcing the cell layout until all twelve cells decoded with the
-       title-row merge pattern and the stream landed exactly on the four
-       tail bits). R2010+ moved the grid to TABLECONTENT, so only 2007
-       carries it. */
-    if (extras) r.bd();
-    let additional = false;
     if (type === 1) {
       x.hr.h();                           /* text style */
-      /* R2007 stores the cell's content as a full table VALUE, not a bare
-         string: the record's string stream holds two entries per cell (an
-         empty format string, then the rendered text), which a single
-         string read cannot account for. */
-      if (extras) {
-        /* R2007 keeps the cell's content as a full table VALUE, and puts
-           the additional-data flag ahead of it rather than behind. Pinned
-           on an AutoCAD-minted AC1021 table: each cell is 109 bits, the
-           44-bit prologue above leaves 65, and
-           B(0) BL(4) BL(4) BS(4) 'a'  BL(0) consumes exactly that — the
-           format flags say the value is stored inline, the data type says
-           string, and the two string-stream entries the record carries per
-           cell are the value's format string and its rendered text. */
-        additional = r.b() === 1;
-        cell.text = readTableValue(x);
-      } else {
-        cell.text = x.text() || undefined;
-        additional = r.b() === 1;
-      }
-    } else if (type === 2) {
-      x.hr.h();                           /* block handle */
+      if (v < 2007 || legacy) cell.text = x.text() || undefined;
+    } else {
+      cellBlocks.set(index, x.handle(raw.handle));   /* block record */
       r.bd();                             /* block scale */
-      additional = r.b() === 1;
-      if (additional) {
-        const numAttrs = r.bl();
+      if (r.b()) {                        /* attribute values follow */
+        const numAttrs = r.bs();
         if (numAttrs > 10000) throw new RangeError('table attrs');
         for (let k = 0; k < numAttrs; k++) { x.hr.h(); r.bs(); x.text(); }
       }
     }
-    if ((type === 1 || type === 2) && additional) {
+    if (r.b()) {                          /* per-cell overrides */
       const flags = r.bl();
       r.rc();                             /* virtual edge */
-      if (flags & 0x01) cell.alignment = r.rs();
+      if (flags & 0x01) cell.alignment = r.bs();
       if (flags & 0x02) r.b();            /* bg fill none */
-      if (flags & 0x04) x.cmc();          /* bg colour */
-      if (flags & 0x08) { x.cmc(); x.hr.h(); }   /* content colour + style */
+      if (flags & 0x04) x.cmc(true);      /* bg colour */
+      if (flags & 0x08) x.cmc(true);      /* content colour */
       if (flags & 0x10) x.hr.h();         /* text style */
       if (flags & 0x20) cell.textHeight = r.bd();
       /* the grid colour/weight/visibility groups, in the spec's order */
@@ -2738,38 +2816,71 @@ const decodeTable = (x: Ctx, raw: RawObject): Entity => {
         if (!(flags & bit)) continue;
         if (kind === 'cmc') x.cmc(true); else r.bs();
       }
-      /* the trailing unknown only appears from R2007 on */
-      if (v >= 2007) r.bl();
     }
-    /* R2007 closes every cell with three BLs — 3, 0, 0 in real files
-       (same brute-force evidence as the BD above). */
-    cells.push(cell);
-  }
+    if (v >= 2007 && !legacy) {
+      r.bl();                             /* extended cell flags */
+      const text = readTableValue(x, true);
+      if (text) cell.text = text;
+    }
+    return cell;
+  };
+  /* What closes the record: four override groups, each a presence bit and
+     — when set — a flag long with one field per bit. The table group's
+     0x01 (title suppressed) carries a B and 0x02 (header suppressed) is
+     the flag bit alone; both pinned against the reference (flags 3 and 2
+     leave 15 and 14 bits). The rest follow the specification's order and
+     nothing the model carries, so a short read here never costs the grid. */
+  const readTail = (): void => {
+    if (r.b()) {                          /* table overrides */
+      const flags = r.bl();
+      if (flags & 0x000001) r.b();        /* title suppressed */
+      if (flags & 0x000004) r.bs();       /* flow direction */
+      if (flags & 0x000008) r.bd();       /* horizontal cell margin */
+      if (flags & 0x000010) r.bd();       /* vertical cell margin */
+      for (const bit of [0x20, 0x40, 0x80]) if (flags & bit) x.cmc(true);
+      for (const bit of [0x100, 0x200, 0x400]) if (flags & bit) r.b();
+      for (const bit of [0x800, 0x1000, 0x2000]) if (flags & bit) x.cmc(true);
+      for (const bit of [0x4000, 0x8000, 0x10000]) if (flags & bit) r.bs();
+      for (const bit of [0x20000, 0x40000, 0x80000]) if (flags & bit) x.hr.h();
+      for (const bit of [0x100000, 0x200000, 0x400000]) if (flags & bit) r.bd();
+    }
+    if (r.b()) {                          /* border colour overrides */
+      const flags = r.bl();
+      for (let bit = 1; bit <= 0x8000; bit <<= 1) if (flags & bit) x.cmc(true);
+    }
+    if (r.b()) {                          /* border lineweight overrides */
+      const flags = r.bl();
+      for (let bit = 1; bit <= 0x8000; bit <<= 1) if (flags & bit) r.bs();
+    }
+    if (r.b()) {                          /* border visibility overrides */
+      const flags = r.bl();
+      for (let bit = 1; bit <= 0x8000; bit <<= 1) if (flags & bit) r.bs();
+    }
+  };
+  const readCells = (legacy: boolean): void => {
+    cells.length = 0;
+    cellBlocks.clear();
+    for (let i = 0; i < total; i++) cells.push(readCell(i, legacy));
+    if (r.pos > x.dataEnd) throw new RangeError('table cells overrun');
+    /* files nasjidwg wrote before learning of the tail end at the cells */
+    if (r.pos === x.dataEnd) return;
+    const tpos = r.pos, thpos = x.hr.pos;
+    try { readTail(); } catch { r.pos = tpos; x.hr.pos = thpos; }
   };
   if (v === 2007) {
-    /* nasjidwg 2007 files written before this campaign lack the per-cell
-       extras, so try the real grammar first — strictly, every cell type
-       must be text or block and the stream must land on the four tail
-       bits — and rewind to the legacy spelling when it does not. */
     const dpos = r.pos, hpos = x.hr.pos, spos = x.sr?.pos;
     try {
-      readCells(true, true);
-      const slack = x.dataEnd - r.pos;
-      if (slack < 4 || slack > 11) throw new RangeError('table tail');
+      readCells(false);
     } catch {
       r.pos = dpos;
       x.hr.pos = hpos;
       if (x.sr && spos !== undefined) x.sr.pos = spos;
-      readCells(false, false);
+      readCells(true);
     }
   } else {
-    readCells(false, false);
+    readCells(false);
   }
-  /* Four override-presence flags close the record (table, border colour,
-     border lineweight, border visibility) — AutoCAD writes them always;
-     files we wrote before learning that lack them, so only read what is
-     actually there. Plain tables carry four zero bits. */
-  if (x.dataEnd - r.pos >= 4) { r.b(); r.b(); r.b(); r.b(); }
+  if (cellBlocks.size) raw.tableCellBlocks = cellBlocks;
   return {
     type: 'table', layer: '0', color: { kind: 'byLayer' },
     position: pt3(ix, iy, iz),
@@ -2842,7 +2953,10 @@ const decodeObjectSpecific = (x: Ctx, typeName: string, raw: RawObject): void =>
           ? { dxfName: cls.dxfName, cppName: cls.cppName, appName: cls.appName }
           : undefined,
         proxyVersion, proxyMaint, fromDxf,
-        ...captureProxyTail(x)
+        ...captureProxyTail(x),
+        /* the record's own EED rides along: for some applications it is
+           the whole object (the reference's dbConnect link records) */
+        ...(x.xdata ? { xdata: x.xdata } : {})
       };
       return;
     }
@@ -3109,6 +3223,7 @@ const decodeObjectSpecific = (x: Ctx, typeName: string, raw: RawObject): void =>
     case 'LAYER': {
       const name = x.tableFlags();
       const t: TableRecord = { kind: 'layer', name };
+      if (x.lastXrefDependent) t.xrefDependent = true;
       raw.table = t;
       if (v <= 14) {
         t.frozen = r.b() === 1; t.off = r.b() === 1;
@@ -3135,7 +3250,9 @@ const decodeObjectSpecific = (x: Ctx, typeName: string, raw: RawObject): void =>
 
     case 'STYLE': {
       const name = x.tableFlags();
-      r.b(); r.b();                       /* is_shape, is_vertical */
+      const stXref = x.lastXrefDependent;
+      const isShape = r.b() === 1;
+      r.b();                              /* is_vertical */
       const fixedHeight = r.bd();
       const widthFactor = r.bd();
       const oblique = r.bd();
@@ -3152,6 +3269,8 @@ const decodeObjectSpecific = (x: Ctx, typeName: string, raw: RawObject): void =>
         fixedHeight: fixedHeight || undefined,
         widthFactor: widthFactor !== 1 ? widthFactor : undefined,
         oblique: oblique || undefined,
+        shapeFile: isShape || undefined,
+        xrefDependent: stXref || undefined,
         xdata: x.xdata
       };
       return;
@@ -3159,6 +3278,7 @@ const decodeObjectSpecific = (x: Ctx, typeName: string, raw: RawObject): void =>
 
     case 'LTYPE': {
       const name = x.tableFlags();
+      const ltXref = x.lastXrefDependent;
       const description = x.text();
       r.bd();                             /* total pattern length */
       r.rc();                             /* alignment */
@@ -3176,13 +3296,17 @@ const decodeObjectSpecific = (x: Ctx, typeName: string, raw: RawObject): void =>
       }
       if (v <= 2004) r.bytes(256);        /* strings area */
       else if (hasText) r.bytes(512);
-      raw.table = { kind: 'ltype', name, description, pattern };
+      raw.table = { kind: 'ltype', name, description, pattern, xrefDependent: ltXref || undefined };
       return;
     }
 
     case 'BlockRecord': {
       const name = x.tableFlags();
-      const t: TableRecord = { kind: 'blockHeader', name };
+      /* the record's EED stays with it: a dynamic block's definition is
+         stored as an anonymous "*U" whose true name lives in xdata, and
+         the reader — the first place that knows the APPID names — is
+         where the promotion happens */
+      const t: TableRecord = { kind: 'blockHeader', name, xdata: x.xdata };
       raw.table = t;
       t.anonymous = r.b() === 1;
       r.b();                              /* has attdefs */
@@ -3193,7 +3317,8 @@ const decodeObjectSpecific = (x: Ctx, typeName: string, raw: RawObject): void =>
       if (v >= 2004 && !isXref && !isOverlaid) numOwned = r.bl();
       const [bx, by, bz] = r.bd3();
       t.basePoint = pt3(bx, by, bz);
-      x.text();                           /* xref path */
+      const xrefPath = x.text();
+      if (isXref || isOverlaid) { t.xrefPath = xrefPath; t.xrefOverlay = isOverlaid; }
       let numInserts = 0;
       if (v >= 2000) {
         /* stored as a run of nonzero bytes closed by a zero byte */
@@ -3707,6 +3832,15 @@ export const decodeObjectBody = (
       if (common.invisible) entity.invisible = true;
       if (x.xdata) entity.xdata = x.xdata;
       raw.entity = entity;
+    } else if (raw.polyline || raw.mesh) {
+      /* the header of a heavy polyline or mesh becomes an entity only
+         once its vertices are folded in; its own colour, scale, weight
+         and EED wait here for that */
+      raw.folded = {
+        color: common.color, ltypeScale: common.ltypeScale,
+        lineweight: common.lineweight, invisible: common.invisible,
+        xdata: x.xdata
+      };
     }
     return raw;
   }
@@ -3746,7 +3880,10 @@ export const decodeObjectBody = (
         : undefined,
       typeCode: FIXED_TYPES[type] ? type : undefined,
       encoding: encodingGroup(ctx.v),
-      ...captureSealed(x)
+      ...captureSealed(x),
+      /* the seal starts past the common prologue, so the EED read there
+         is carried beside it — a record may be nothing but its EED */
+      ...(x.xdata ? { xdata: x.xdata } : {})
     };
   }
   return raw;

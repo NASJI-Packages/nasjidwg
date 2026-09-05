@@ -187,8 +187,8 @@ downloaded, and `npm test` reproduces every fixture it asserts on.
 |---|---|---|
 | LINE, POINT, CIRCLE, ARC, ELLIPSE | ✅ | oracle-verified geometry |
 | TEXT, ATTRIB/ATTDEF (as text), MTEXT | ✅ | R13/14 explicit form + R2000+ dataflags form. ATTRIB/ATTDEF carry their marker (`attribute`) and their 70-flags — bit 1 sets `invisible`, bit 2 `constant` — verified against a field drawing whose 150-unit invisible ATTDEFs used to paint as plain visible text. Justification (`halign` / `valign` / `alignmentPoint`) survives a rewrite, and `preserveHandles` keeps the attrib's own handle rather than minting a fresh one. Each of the four resolves the STYLE record it points at, so `style` names the font, width factor and slant the file asked for: the pointer used to be read and dropped, and a 72 MB drawing whose 59 styles mix TTF and SHX handed back all 1,652 of its text objects with no style at all |
-| LWPOLYLINE (bulges, widths, ids) | ✅ | |
-| POLYLINE_2D/3D + vertex folding | ✅ | chain (≤R2000) and owned (R2004+) forms |
+| LWPOLYLINE (bulges, widths, ids) | ✅ | the R2010+ vertex identifiers (DXF 91) are read into `PolylineVertex.id` and written back (flag 0x400), plinegen (`plineGen`) too; the reference's DXF of a rewrite shows the same 91 values |
+| POLYLINE_2D/3D + vertex folding | ✅ | chain (≤R2000) and owned (R2004+) forms. A heavy polyline stays one: `heavy: '2d' \| '3d'`, a 3D polyline's vertices keep their `z`, a spline-fit one keeps its frame (VERTEX 70 = 16) apart from the fitted curve it draws (`fit`, `frame`), a curve-fit one marks the inserted vertices (`curveFit`, `tangent`); the header's own colour/weight/EED land on the entity. Written back as POLYLINE + VERTEX + SEQEND in DWG and DXF — the reference's census of the sheet-set samples (33 + 22 + 1 heavy polylines) matches and the rewrites audit clean |
 | POLYLINE_MESH / POLYLINE_PFACE + faces | ✅ | mesh entity; 1–2 index faces kept |
 | INSERT / MINSERT + attribs | ✅ | |
 | SPLINE (both scenarios) | ✅ | fit-point + control-point forms |

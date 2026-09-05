@@ -70,10 +70,8 @@ const LISP = `
       (setq i (1+ i)))))
   (princ "\\nNASJ-ENTS ")
   (foreach p tbl (princ (strcat (car p) "=" (itoa (cdr p)) " ")))
-  (princ "\\nNASJ-LAYERS ")
-  (setq e (tblnext "LAYER" T)) (while e (princ (strcat (cdr (assoc 2 e)) ";")) (setq e (tblnext "LAYER")))
-  (princ "\\nNASJ-BLOCKS ")
-  (setq e (tblnext "BLOCK" T)) (while e (princ (strcat (cdr (assoc 2 e)) ";")) (setq e (tblnext "BLOCK")))
+  (setq e (tblnext "LAYER" T)) (while e (princ (strcat "\\nNASJ-LAYER " (cdr (assoc 2 e)))) (setq e (tblnext "LAYER")))
+  (setq e (tblnext "BLOCK" T)) (while e (princ (strcat "\\nNASJ-BLOCK " (cdr (assoc 2 e)))) (setq e (tblnext "BLOCK")))
   (princ "\\nNASJ-END")
   (princ))
 (nasj-count)
@@ -101,8 +99,9 @@ const parseProbe = (text) => {
   const ents = {};
   const m = text.match(/NASJ-ENTS ([^\n]*)/);
   if (m) for (const kv of m[1].trim().split(/\s+/)) { const [k, v] = kv.split('='); if (k) ents[k] = Number(v); }
-  const layers = (text.match(/NASJ-LAYERS ([^\n]*)/)?.[1] ?? '').split(';').map((s) => s.trim()).filter(Boolean);
-  const blocks = (text.match(/NASJ-BLOCKS ([^\n]*)/)?.[1] ?? '').split(';').map((s) => s.trim()).filter(Boolean);
+  /* one name per line: the console cuts a line at 4096 characters */
+  const layers = [...text.matchAll(/NASJ-LAYER ([^\r\n]*)/g)].map((x) => x[1].trim()).filter(Boolean);
+  const blocks = [...text.matchAll(/NASJ-BLOCK ([^\r\n]*)/g)].map((x) => x[1].trim()).filter(Boolean);
   const audit = text.match(/Total errors found\s+(\d+)\s+fixed\s+(\d+)/);
   const opened = !!m || !!audit;
   let why = '';
@@ -129,13 +128,29 @@ const ourCounts = (drawing) => {
   const extraPaper = Object.entries(drawing.blocks ?? {})
     .filter(([nm]) => /^\*paper_space/i.test(nm)).flatMap(([, b]) => b.entities);
   const all = [...drawing.entities, ...(drawing.paperSpace ?? []), ...extraPaper];
+  /* the further columns of a multi-column MTEXT are entities of their
+     own in the file, named by handle in the first column's
+     ACAD_MTEXT_COLUMNS xdata; the reference folds them into one */
+  const columnChildren = new Set();
   for (const e of all) {
+    if (e.type !== 'mtext') continue;
+    for (const g of e.xdata ?? []) {
+      if (!g.values.some((v) => typeof v.value === 'string' && /ACAD_MTEXT_COLUMN/i.test(v.value))) continue;
+      for (const v of g.values) if (v.code === 1005 && typeof v.value === 'string') columnChildren.add(v.value.toUpperCase());
+    }
+  }
+  for (const e of all) {
+    if (e.type === 'mtext' && e.handle && columnChildren.has(e.handle.toUpperCase())) continue;
     let name = DXF_NAME[e.type] ?? e.type.toUpperCase();
-    if (e.type === 'polyline' && e.is3d) name = 'POLYLINE';
+    /* a heavy polyline (VERTEX records) is the reference's POLYLINE; the
+       inline one its LWPOLYLINE */
+    if (e.type === 'polyline' && (e.heavy || e.vertices.some((v) => v.z !== undefined))) name = 'POLYLINE';
     if (e.type === 'ray' && e.infinite) name = 'XLINE';
     if (e.type === 'acis') name = e.solidKind ? e.solidKind.toUpperCase() : '3DSOLID';
     if (e.type === 'proxy') name = 'ACAD_PROXY_ENTITY';
-    if (e.type === 'unknown') name = (e.dxfName ?? 'UNKNOWN').toUpperCase();
+    if (e.type === 'image' && e.wipeout) name = 'WIPEOUT';
+    if (e.type === 'text' && e.attribute === 'attdef') name = 'ATTDEF';
+    if (e.type === 'unknown') name = (e.sourceType ?? e.appClass?.dxfName ?? 'UNKNOWN').toUpperCase();
     ents[name] = (ents[name] ?? 0) + 1;
   }
   return ents;
@@ -189,7 +204,17 @@ for (const src of corpus) {
   const prefix = (b) => (b.match(/^\*([A-Z])/i) ?? [, ''])[1].toUpperCase();
   const anonRef = {}, anonOurs = {};
   for (const b of ref.blocks) if (/^\*[A-Z]\d/i.test(b) && !/^\*(Model|Paper)_Space/i.test(b)) anonRef[prefix(b)] = (anonRef[prefix(b)] ?? 0) + 1;
-  for (const b of ourBlocks) if (/^\*[A-Z]\d/i.test(b) && !/^\*(Model|Paper)_Space/i.test(b)) anonOurs[prefix(b)] = (anonOurs[prefix(b)] ?? 0) + 1;
+  /* the reference discards an anonymous block nothing references while
+     loading (and renumbers the rest); count ours the same way: *U/*B/*A/*X…
+     when some INSERT names it, *D when some DIMENSION does, *T as is */
+  const inserted = new Set(), dimBlocks = new Set();
+  const containers = [drawing.entities, drawing.paperSpace ?? [], ...Object.values(drawing.blocks ?? {}).map((b) => b.entities)];
+  for (const list of containers) for (const e of list) {
+    if (e.type === 'insert' && e.blockName) inserted.add(e.blockName.toLowerCase());
+    if (e.type === 'dimension' && e.blockName) dimBlocks.add(e.blockName.toLowerCase());
+  }
+  const referenced = (b) => /^\*T/i.test(b) || (/^\*D/i.test(b) ? dimBlocks.has(b.toLowerCase()) : inserted.has(b.toLowerCase()));
+  for (const b of ourBlocks) if (/^\*[A-Z]\d/i.test(b) && !/^\*(Model|Paper)_Space/i.test(b) && referenced(b)) anonOurs[prefix(b)] = (anonOurs[prefix(b)] ?? 0) + 1;
   const anonDiff = [...new Set([...Object.keys(anonRef), ...Object.keys(anonOurs)])].filter((k) => (anonRef[k] ?? 0) !== (anonOurs[k] ?? 0)).map((k) => `*${k} ${anonRef[k] ?? 0}->${anonOurs[k] ?? 0}`);
   const xrefBlocks = ref.blocks.filter((b) => b.includes('|')).length;
   row.read = { diff: d, missingLayers, missingBlocks, anonDiff, xrefBlocks, warnings: (drawing.warnings ?? []).length };

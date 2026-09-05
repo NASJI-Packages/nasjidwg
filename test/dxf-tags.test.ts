@@ -131,7 +131,9 @@ describe('sealed DXF tags: ASCII round trip', () => {
 
   it('does not double the xdata: the 1001 run appears once', () => {
     const text = writeDxf(first);
-    expect(text.split('ACME_APP').length - 1).toBe(1);
+    expect(text.split('\n1001\nACME_APP\n').length - 1).toBe(1);
+    /* and the application it names is registered, as DXFIN requires */
+    expect(text).toContain('\nAcDbRegAppTableRecord\n2\nACME_APP\n');
   });
 
   it('a third generation is stable except the fresh handle', () => {

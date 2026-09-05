@@ -21,8 +21,8 @@ import { buildAcDs } from './meta.js';
 import { sabToSat } from '../acis/sab.js';
 import { nearestAci } from '../core/color.js';
 import type {
-  DimStyle, Drawing, Entity, Layer, Linetype, Point2, Point3, TextEntity,
-  TextStyle, XdataValue
+  DimStyle, Drawing, Entity, Layer, Linetype, Point2, Point3, PolylineVertex,
+  TextEntity, TextStyle, XdataGroup, XdataValue
 } from '../core/model.js';
 import { shapeArabic, mirrorBrackets, hasComplexScript } from '../text/arabic.js';
 import { encodeCadSymbols } from '../text/escapes.js';
@@ -688,7 +688,11 @@ const encodeEedValues = (values: XdataValue[], v: number): Uint8Array => {
         const bytes: number[] = [];
         for (let i = 0; i < s.length; i++) bytes.push(s.charCodeAt(i) & 0xff);
         w.rc(bytes.length);
-        w.rs(30);                         /* ANSI_1252, matching the file */
+        /* ANSI_1252, matching the file — stored high byte first: the
+           reference writes 00 1E, and audits a string group inside 1002
+           braces whose word is the other way round ("XData format
+           Problem", 612 attributes of a campaign round) */
+        w.rc(0); w.rc(30);
         w.raw(bytes);
       }
     } else if (raw === 2) {
@@ -1008,20 +1012,37 @@ const writeDwgImpl = (
   const layoutDict = H(), layoutModelH = H(), layoutPaperH = H();
   const vportActive = H();
 
-  const layers: Layer[] = drawing.layers.length ? drawing.layers : [{
+  /* An external reference's own layers, linetypes and text styles
+     (`xref|name`) exist only while that file is attached; written as
+     ordinary records they are audited one by one ("Non XREF-dependent
+     record contains vertical bar" — 8206 of a campaign round's 9000
+     findings). They stay home, counted once. */
+  const xrefRecords = drawing.layers.filter((l) => l.xrefDependent).length
+    + drawing.linetypes.filter((l) => l.xrefDependent).length
+    + drawing.textStyles.filter((s) => s.xrefDependent).length;
+  if (xrefRecords) skipped.push(`${xrefRecords} xref-dependent table records`);
+  const ownLayers = drawing.layers.filter((l) => !l.xrefDependent);
+  const layers: Layer[] = ownLayers.length ? ownLayers : [{
     name: '0', color: { kind: 'aci', index: 7 } as const,
     on: true, frozen: false, locked: false
   }];
   const layerH = new Map<string, number>();
   for (const ly of layers) layerH.set(ly.name, tableH(ly.handle));
 
-  const styles: TextStyle[] = drawing.textStyles.length
-    ? drawing.textStyles : [{ name: 'Standard' }];
+  /* A shape-file record that shares its name with a text style (the
+     reference's own "Standard" beside the shape "Standard") cannot be
+     told apart by name here — the tables are keyed by name — and two
+     records under one name are audited ("Id Repeated in table"). The
+     shape record goes; a shape file of its own name stays, flag and all. */
+  const ownStyles = drawing.textStyles.filter((s) => !s.xrefDependent)
+    .filter((s, i, all) => !(s.shapeFile
+      && all.some((o) => o !== s && !o.shapeFile && o.name.toLowerCase() === s.name.toLowerCase())));
+  const styles: TextStyle[] = ownStyles.length ? ownStyles : [{ name: 'Standard' }];
   const styleH = new Map<string, number>();
   for (const st of styles) styleH.set(st.name, tableH(st.handle));
 
   const userLtypes: Linetype[] = drawing.linetypes
-    .filter((lt) => !/^(bylayer|byblock)$/i.test(lt.name));
+    .filter((lt) => !/^(bylayer|byblock)$/i.test(lt.name) && !lt.xrefDependent);
   if (!userLtypes.some((lt) => /^continuous$/i.test(lt.name))) {
     userLtypes.unshift({ name: 'Continuous', description: 'Solid line', pattern: [] });
   }
@@ -1057,8 +1078,24 @@ const writeDwgImpl = (
 
   /* block headers: model, paper, then user blocks */
   const msBH = H(), psBH = H();
+  /* Every layout beyond the current paper space arrives as a block named
+     *Paper_Space<n> (both readers keep them that way, linked from
+     drawing.layouts by blockName). From R2000 on they go out as what
+     they are — a block header of their own, its entities owned by it,
+     and a LAYOUT object behind a tab — riding the user-block plumbing
+     below; R13/R14 know a single paper space, so there they are
+     reported. */
+  const isExtraPaper = (nm: string): boolean => /^\*paper_space.+$/i.test(nm);
+  const extraPaperBlocks = V >= 2000
+    ? Object.keys(drawing.blocks).filter(isExtraPaper) : [];
+  if (V < 2000) {
+    for (const nm of Object.keys(drawing.blocks).filter(isExtraPaper)) {
+      skipped.push(`layout ${nm} (needs R2000 or later)`);
+    }
+  }
   const userBlocks = Object.keys(drawing.blocks)
-    .filter((nm) => !/^\*(model_space|paper_space)/i.test(nm) && !drawing.blocks[nm].isLayout);
+    .filter((nm) => (V >= 2000 && isExtraPaper(nm))
+      || (!/^\*(model_space|paper_space)/i.test(nm) && !drawing.blocks[nm].isLayout));
   const blockH = new Map<string, number>();
   for (const nm of userBlocks) blockH.set(nm, tableH(drawing.blocks[nm].handle));
 
@@ -1080,6 +1117,15 @@ const writeDwgImpl = (
   const acdsSolids: { handle: number; sab: Uint8Array }[] = [];
   const filterEnts = (list: Entity[]): Entity[] =>
     list.filter((e) => {
+      /* the mirror of staysHome for sealed entities: bits of another
+         generation cannot be re-encoded, and an R13/R14 file has no
+         envelope the reference accepts them in (A-03's sealed table,
+         the one R14 refusal left after the viewport fix) */
+      if (e.type === 'unknown' && V < 2000
+        && e.data !== undefined && e.encoding !== encodingGroup(V)) {
+        skipped.push(e.sourceType ?? 'sealed entity');
+        return false;
+      }
       if (e.type === 'acis') {
         if (e.kind === 'surface') {
           skipped.push('acis(surface)');  /* needs its own class record */
@@ -1210,6 +1256,10 @@ const writeDwgImpl = (
       extraAppids.push({ name, handle: h });
     };
     for (const n of drawing.appIds ?? []) addApp(n);
+    const anyMLeader = [drawing.entities, drawing.paperSpace ?? [],
+      ...Object.values(drawing.blocks).map((b) => b.entities)]
+      .some((list) => list.some((e) => e.type === 'mleader'));
+    if (anyMLeader) addApp('ACAD_MLEADERVER');
     const walkXd = (list: Entity[]): void => {
       for (const e of list) {
         for (const g of e.xdata ?? []) {
@@ -1227,6 +1277,13 @@ const writeDwgImpl = (
     walkXd(modelEnts);
     walkXd(paperEnts);
     for (const nm of userBlocks) walkXd(blockEnts.get(nm)!);
+    /* dictionary-owned records carry EED too — a proxy object's whole
+       content may be nothing else (the reference's dbConnect links) */
+    for (const p of [...(drawing.proxyObjects ?? []), ...(drawing.unknownObjects ?? [])]) {
+      for (const g of p.xdata ?? []) {
+        addApp(g.appName || (g.appHandle ? 'APP_' + g.appHandle.toUpperCase() : undefined));
+      }
+    }
   }
   const msBlockEnt = H(), msEndblk = H();
   const psBlockEnt = H(), psEndblk = H();
@@ -1360,16 +1417,49 @@ const writeDwgImpl = (
        them, each alone accepted at R2018) */
     if (V === 2007 && foreign && /OBJECTCONTEXTDATA/.test(kind)) return p.sourceType ?? kind;
     /* The AcDbAssoc* framework — constraint/array actions with their
-       dependency graph — names specific entity handles inside bits a
-       renumbering rewrite cannot update. AutoCAD resolves that graph
-       while opening and refuses the whole drawing over one stale
-       network (ErrorStatus 53, externally proven: the field corpus
-       opened the moment its two ACDBASSOCNETWORKs stayed home).
-       Under preserveHandles every number the graph names stays real,
-       so the family travels; a default write reports the honest skip. */
-    if (!preserve && kind.startsWith('ACDBASSOC')) return p.sourceType ?? kind;
+       dependency graph. Its ownership chain (a block record's extension
+       dictionary → ACAD_ASSOCNETWORK → network → actions) is not
+       re-created here: every seal is re-homed under the NOD, and the
+       reference refuses the drawing over one variable or constraint
+       group that names a network it cannot find (six of the reference's
+       own samples, every one refused with the family, opened without it,
+       whether or not the numbering was preserved). It stays home until
+       the chain travels with it. */
+    if (kind.startsWith('ACDBASSOC') || kind.startsWith('ASSOC')) return p.sourceType ?? kind;
     return null;
   };
+  /** Every sealed object that stays home, by handle, with the reason —
+   *  by kind first, then anything whose owner stays home, to a fixed
+   *  point: a node of a graph that does not travel would be re-parented
+   *  under the NOD with a node id into nothing ("Incorrect object node
+   *  id", 30 of a campaign round's AUDIT findings). */
+  /** Whether a sealed object has a record to write: its payload bits, a
+   *  fixed type number, or — a class object read from a DWG whose whole
+   *  body was empty and whose content is its EED — a class to write
+   *  that empty body under (the form the reference's own files give
+   *  its dbConnect link records). A DXF-sealed record has none of
+   *  these: its tags are not bits, and an empty body is not its own. */
+  const hasRecord = (p: Sealed): boolean =>
+    !!p.data || p.typeCode !== undefined
+    || (p.encoding !== undefined && !!p.xdata?.length
+        && !!(p.appClass?.dxfName ?? p.sourceType));
+  const sealedAll = (drawing.unknownObjects ?? []).filter(hasRecord);
+  const homeWhy = new Map<string, string>();
+  for (const p of sealedAll) {
+    const why = staysHome(p);
+    if (why !== null && p.handle) homeWhy.set(p.handle.toUpperCase(), why);
+  }
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const p of sealedAll) {
+      const h = p.handle?.toUpperCase();
+      const o = p.ownerHandle?.toUpperCase();
+      if (h && o && !homeWhy.has(h) && homeWhy.has(o)) {
+        homeWhy.set(h, `${p.sourceType ?? 'sealed object'} (its owner stays home)`);
+        changed = true;
+      }
+    }
+  }
   const keptRefs = new Set<string>(['0']);
   {
     const addRef = (h?: string): void => { if (h) keptRefs.add(h.toUpperCase()); };
@@ -1385,8 +1475,8 @@ const writeDwgImpl = (
     for (const b of Object.values(drawing.blocks)) {
       addRef(b.handle); scanRefs(b.entities);
     }
-    for (const u of drawing.unknownObjects ?? []) {
-      if ((u.data || u.typeCode !== undefined) && staysHome(u) === null) addRef(u.handle);
+    for (const u of sealedAll) {
+      if (!(u.handle && homeWhy.has(u.handle.toUpperCase()))) addRef(u.handle);
     }
     for (const x of drawing.xrecords ?? []) addRef(x.handle);
     for (const p of drawing.proxyObjects ?? []) addRef(p.handle);
@@ -1395,10 +1485,17 @@ const writeDwgImpl = (
     for (const st of drawing.textStyles) addRef(st.handle);
   }
   const unknownObjs = (drawing.unknownObjects ?? [])
-    .filter((p) => p.data || p.typeCode !== undefined)
     .filter((p) => {
-      const why = staysHome(p);
-      if (why !== null) { skipped.push(why); return false; }
+      /* nothing retained to write — a record that arrived through DXF
+         as tags alone, or an empty one with no class to write it under.
+         Out of the file, and said so. */
+      if (hasRecord(p)) return true;
+      skipped.push(`${p.sourceType ?? 'sealed object'} (no retained record bits)`);
+      return false;
+    })
+    .filter((p) => {
+      const why = p.handle ? homeWhy.get(p.handle.toUpperCase()) : staysHome(p);
+      if (why !== undefined && why !== null) { skipped.push(why); return false; }
       /* a sealed record's HARD references (owner/pointer codes 3 and 5)
          must land on something in this file: the reference resolves them
          while opening and refuses the whole drawing over one dangler */
@@ -1484,17 +1581,20 @@ const writeDwgImpl = (
    *  zero. The reader's unwrap (objects.ts) mirrors it. */
   const sealBody = (
     w: BitWriter,
-    s: { data?: string; dataBits?: number; strData?: string; strBits?: number }
+    s: { data?: string; dataBits?: number; strData?: string; strBits?: number;
+      appClass?: { cppName?: string } },
+    cppName?: string
   ): void => {
     if (V >= 2004) w.rs(0);
     w.rl(s.dataBits ?? 0);
     if (s.data && s.dataBits) w.putBits(fromBase64(s.data), s.dataBits);
-    if (V >= 2007) {
-      if (s.strData && s.strBits) w.strTarget?.putBits(fromBase64(s.strData), s.strBits);
-    } else {
-      w.rl(s.strBits ?? 0);
-      if (s.strData && s.strBits) w.putBits(fromBase64(s.strData), s.strBits);
-    }
+    w.rl(s.strBits ?? 0);
+    if (s.strData && s.strBits) w.putBits(fromBase64(s.strData), s.strBits);
+    /* R2007+: the proxy record's string stream is a field of its own —
+       one text, "cn:" and the class name — that the reference parses
+       (a seal with no string stream at all was refused; the reference's
+       re-save of ours replaces whatever was there with exactly this) */
+    if (V >= 2007) w.t('cn:' + (cppName ?? s.appClass?.cppName ?? 'AcDbObject'));
   };
 
   /** Object type + (pre-R2010) the inline bitsize field. R2010+ moves the
@@ -1578,13 +1678,14 @@ const writeDwgImpl = (
     type: number, handle: number,
     data: (w: BitWriter) => void,
     handles: (w: BitWriter) => void,
-    xdictH = 0
+    xdictH = 0,
+    xdata?: XdataGroup[]
   ): void => {
     const w = new BitWriter();
     let sizePos = objectPrologue(w, type);
     const sw = withStrings(w);
     w.h(0, handle);
-    w.bs(0);                              /* EED end */
+    writeEedGroups(w, xdata);             /* EED, then its end */
     if (V <= 14) { sizePos = w.pos; w.rl(0); }  /* handle-stream position */
     w.bl(0);                              /* reactor count */
     if (V >= 2004) w.b(xdictH ? 0 : 1);   /* xdict missing */
@@ -1676,7 +1777,14 @@ const writeDwgImpl = (
       /* R13/R14 name the layer and linetype first, then the sibling
        * chain. R2000 swapped the two groups round. */
       w.h(5, layerHandle);
-      if (ltFlags === 3) w.h(5, ltypeH.get(e.linetype!) ?? ltContinuous);
+      /* every linetype but ByLayer is a handle here — ByBlock and an
+         explicit Continuous included (the reference read the sibling
+         chain as the linetype when the entry was missing, and refused
+         eleven of its own samples over it) */
+      if (ltFlags !== 0) {
+        w.h(5, ltFlags === 1 ? ltByblock : ltFlags === 2 ? ltContinuous
+          : (ltypeH.get(e.linetype!) ?? ltContinuous));
+      }
       w.h(4, ctx.prev ?? 0);
       w.h(4, ctx.next ?? 0);
     } else {
@@ -1776,8 +1884,10 @@ const writeDwgImpl = (
     return { code: val.code, value: out !== undefined ? out.toString(16).toUpperCase() : '0' };
   };
 
-  const writeEed = (w: BitWriter, e: Entity): void => {
-    for (const g of e.xdata ?? []) {
+  /** EED groups as a record's prologue carries them, terminated —
+   *  entities and dictionary-owned objects alike. */
+  const writeEedGroups = (w: BitWriter, xdata?: XdataGroup[]): void => {
+    for (const g of xdata ?? []) {
       const name = (g.appName
         || (g.appHandle ? 'APP_' + g.appHandle.toUpperCase() : 'ACAD')).toUpperCase();
       const app = appidH.get(name) ?? appidAcad;
@@ -1791,6 +1901,7 @@ const writeDwgImpl = (
     }
     w.bs(0);
   };
+  const writeEed = (w: BitWriter, e: Entity): void => writeEedGroups(w, e.xdata);
 
   /* ---- entity-specific encoders (mirror of the decoders) ---- */
   let attdefSeq = 0;                      /* invented ATTDEF tags */
@@ -1895,15 +2006,98 @@ const writeDwgImpl = (
         });
         return;
       case 'polyline': {
+        const is3d = e.heavy === '3d' || e.vertices.some((v) => v.z !== undefined);
+        if (e.heavy || is3d) {
+          /* THE HEAVY POLYLINE: a header, a VERTEX record per vertex and a
+             SEQEND, chained like the mesh family. A spline-fit polyline
+             carries its frame (VERTEX 70 = 16) ahead of the fitted curve
+             (8); a curve-fit one flags the vertices fitting inserted (1);
+             a 3D polyline's vertices all carry 32. */
+          const frame = e.fit && e.fit !== 'curve' ? (e.frame ?? []) : [];
+          const vertFlag = (v: PolylineVertex): number =>
+            e.fit === 'curve' ? (v.curveFit ? 1 : 0) : e.fit ? 8 : 0;
+          const all = [
+            ...frame.map((v) => ({ v, f: 16 })),
+            ...e.vertices.map((v) => ({ v, f: vertFlag(v) }))
+          ];
+          const vertHs = all.map(() => H());
+          const seqendH = H();
+          const curveType = e.fit === 'quadratic' ? 5 : e.fit === 'cubic' ? 6 : 0;
+          const flag70 = (e.closed ? 1 : 0)
+            | (e.fit === 'curve' ? 2 : e.fit ? 4 : 0)
+            | (e.plineGen ? 128 : 0);
+          makeEntity(is3d ? 16 : 15, handle, e, ctx, (w) => {
+            if (is3d) {
+              /* two bytes: curve type, then the flags (bit 0 closed) */
+              w.rc(curveType);
+              w.rc(flag70);
+            } else {
+              w.bs(flag70);
+              w.bs(curveType);
+              w.bd(0); w.bd(0);           /* default widths */
+              wbt(w, 0);                  /* thickness */
+              w.bd(e.elevation ?? 0);
+              wbe(w, ...ext3(e));
+            }
+            if (V >= 2004) w.bl(all.length);
+          }, (w) => {
+            if (V < 2004) {
+              w.h(4, vertHs[0] ?? 0);     /* first vertex */
+              w.h(4, vertHs[vertHs.length - 1] ?? 0);
+            } else {
+              for (const vh of vertHs) w.h(4, vh);
+            }
+            w.h(3, seqendH);
+          });
+          /* the sub-records repeat the owner's layer, colour, linetype
+             and weight — the audit resets a vertex whose colour differs
+             from its owner's, one error per vertex */
+          const sub = (p: Point3): Entity => ({
+            type: 'point', layer: e.layer, color: e.color,
+            linetype: e.linetype, lineweight: e.lineweight,
+            linetypeScale: e.linetypeScale, position: p
+          });
+          all.forEach(({ v, f }, i) => {
+            const fake = sub({ x: v.x, y: v.y, z: v.z ?? 0 });
+            makeEntity(is3d ? 11 : 10, vertHs[i], fake, {
+              entmode: 0, owner: handle,
+              prev: vertHs[i - 1] ?? 0, next: vertHs[i + 1] ?? 0
+            }, (w) => {
+              if (is3d) {
+                w.rc(32 | f);
+                w.bd3(v.x, v.y, v.z ?? 0);
+                return;
+              }
+              w.rc(f | (v.tangent !== undefined ? 2 : 0));
+              w.bd3(v.x, v.y, e.elevation ?? 0);
+              /* one negative width stands for an equal pair — but 0.0 has
+                 no sign to carry, so a zero pair is spelled out */
+              const sw = v.startWidth ?? 0, ew = v.endWidth ?? 0;
+              if (sw === ew && sw !== 0) w.bd(-sw);
+              else { w.bd(sw); w.bd(ew); }
+              w.bd(v.bulge ?? 0);
+              if (V >= 2010) w.bl(v.id ?? 0);
+              w.bd(v.tangent ?? 0);
+            });
+          });
+          makeEntity(6, seqendH, sub({ x: 0, y: 0, z: 0 }),
+            { entmode: 0, owner: handle }, () => { /* SEQEND: no data */ });
+          return;
+        }
         makeEntity(77, handle, e, ctx, (w) => {
           const hasBulges = e.vertices.some((v) => v.bulge);
           const hasWidths = e.vertices.some((v) => v.startWidth || v.endWidth);
+          /* R2010+ vertex identifiers (DXF 91): flag 0x400 and one BL per
+             vertex, between the bulges and the widths */
+          const hasIds = V >= 2010 && e.vertices.some((v) => v.id);
           let flag = 0;
           if (e.constantWidth) flag |= 4;
           if (e.elevation) flag |= 8;
           if (hasBulges) flag |= 16;
           if (hasWidths) flag |= 32;
+          if (e.plineGen) flag |= 256;
           if (e.closed) flag |= 512;
+          if (hasIds) flag |= 1024;
           if (e.extrusion) flag |= 1;
           w.bs(flag);
           if (e.constantWidth) w.bd(e.constantWidth);
@@ -1911,6 +2105,7 @@ const writeDwgImpl = (
           if (e.extrusion) w.bd3(...ext3(e));
           w.bl(e.vertices.length);
           if (hasBulges) w.bl(e.vertices.length);
+          if (hasIds) w.bl(e.vertices.length);
           if (hasWidths) w.bl(e.vertices.length);
           let lx = 0, ly = 0;
           e.vertices.forEach((v, i) => {
@@ -1921,6 +2116,7 @@ const writeDwgImpl = (
             lx = v.x; ly = v.y;
           });
           if (hasBulges) for (const v of e.vertices) w.bd(v.bulge ?? 0);
+          if (hasIds) for (const v of e.vertices) w.bl(v.id ?? 0);
           if (hasWidths) {
             for (const v of e.vertices) { w.bd(v.startWidth ?? 0); w.bd(v.endWidth ?? 0); }
           }
@@ -2397,7 +2593,40 @@ const writeDwgImpl = (
         return;
       }
 
-      case 'viewport':
+      case 'viewport': {
+        if (V <= 14) {
+          /* R13/R14 keep the view in an ACAD "MVIEW" xdata group (kind 16:
+             target, direction, twist, height, centre, lens, clips, view
+             mode, circle zoom, fast zoom, ucs icon, snap/grid/style/isopair,
+             snap angle and base, snap and grid spacing, hidden-plot, frozen
+             layers) — the body is centre, width and height, and the handle
+             stream one null VX entity header. Proven against the
+             reference's own R14 save: a viewport without the group is
+             refused, with it the drawing opens at AUDIT 0. */
+          const t = e.viewTarget ?? { x: 0, y: 0, z: 0 };
+          const dv = e.viewDirection ?? { x: 0, y: 0, z: 1 };
+          const vc = e.viewCenter ?? { x: e.center.x, y: e.center.y };
+          const P = (p: { x: number; y: number; z?: number }): XdataValue =>
+            ({ code: 1010, point: { x: p.x, y: p.y, z: p.z ?? 0 } });
+          const R = (v: number): XdataValue => ({ code: 1040, value: v });
+          const I = (v: number): XdataValue => ({ code: 1070, value: v });
+          const B = (v: string): XdataValue => ({ code: 1002, value: v });
+          const values: XdataValue[] = [
+            { code: 1000, value: 'MVIEW' }, B('{'), I(16), P(t), P(dv),
+            R(e.twistAngle ?? 0), R(e.viewHeight ?? e.height), R(vc.x), R(vc.y),
+            R(e.lensLength ?? 50), R(0), R(0), I(0), I(1000), I(1), I(3),
+            I(0), I(0), I(0), I(0), R(0), R(0), R(0), R(0.5), R(0.5), R(0.5), R(0.5),
+            I(0), B('{'), B('}'), B('}')
+          ];
+          const isMview = (g: XdataGroup): boolean =>
+            g.values.some((v) => v.code === 1000 && 'value' in v && v.value === 'MVIEW');
+          const vp = { ...e, xdata: [...(e.xdata ?? []).filter((g) => !isMview(g)), { appName: 'ACAD', values }] };
+          makeEntity(34, handle, vp, ctx, (w) => {
+            w.bd3(e.center.x, e.center.y, e.center.z ?? 0);
+            w.bd(e.width); w.bd(e.height);
+          }, (w) => { w.h(5, 0); });      /* VX entity header */
+          return;
+        }
         makeEntity(34, handle, e, ctx, (w) => {
           w.bd3(e.center.x, e.center.y, e.center.z ?? 0);
           w.bd(e.width); w.bd(e.height);
@@ -2437,6 +2666,7 @@ const writeDwgImpl = (
           if (V >= 2007) { w.h(4, 0); w.h(5, 0); w.h(4, 0); w.h(3, 0); }
         });
         return;
+      }
 
       case 'light':
         makeEntity(CLS_LIGHT, handle, e, ctx, (w) => {
@@ -2474,7 +2704,15 @@ const writeDwgImpl = (
           ? blockH.get(e.blockName) : undefined;
         const hasText = e.text !== undefined && !!e.textPosition;
         const hasBlock = !hasText && blockH2 !== undefined && !!e.blockPosition;
-        makeEntity(CLS_MLEADER, handle, e, ctx, (w) => {
+        /* pre-2010 readers take the class version from an
+           ACAD_MLEADERVER xdata group (1070 = 2) on the entity and on
+           its style; the reference stamps it in every release, and
+           refuses a record without it (proven: a stripped entity refused,
+           the same one stamped opened) */
+        const MLVER = 'ACAD_MLEADERVER';
+        const stamped = e.xdata?.some((g) => g.appName === MLVER) ? e
+          : { ...e, xdata: [...(e.xdata ?? []), { appName: MLVER, values: [{ code: 1070, value: 2 }] }] };
+        makeEntity(CLS_MLEADER, handle, stamped, ctx, (w) => {
           if (V >= 2018) w.bs(2);         /* class version */
           w.bl(e.leaders.length);
           for (const ld of e.leaders) {
@@ -2602,7 +2840,12 @@ const writeDwgImpl = (
             w.bl(0);                      /* arrowhead count */
             w.bl(0);                      /* block label count */
             w.b(0);                       /* text direction negative */
-            w.bs(0); w.bs(0);             /* IPE align, justification */
+            /* IPE align, text attachment point, and the two bits the
+               reference closes every pre-2018 record with — bit-walked
+               from its own 2000/2004/2007 saves (161 bits after this
+               point, identical in every record); a record twelve bits
+               short was refused at 2000, 2004 and 2007 */
+            w.bs(0); w.bs(1); w.b(0); w.b(1);
           }
         }, (w) => {
           if (V >= 2018) {
@@ -2643,7 +2886,10 @@ const writeDwgImpl = (
               w.bl(0);                    /* format flags */
               w.bl(4);                    /* data type: string */
               const s = outText(text);
-              w.bs((s.length + 1) * 2);
+              /* a BL, not a BS: identical bits under 256 bytes, which is
+                 every schedule cell until a wall-type paragraph — the
+                 reference refused a table over one 300-byte cell */
+              w.bl((s.length + 1) * 2);
               for (let i = 0; i < s.length; i++) {
                 const c = s.charCodeAt(i);
                 w.rc(c & 0xff); w.rc((c >> 8) & 0xff);
@@ -2759,23 +3005,25 @@ const writeDwgImpl = (
             w.bl(cell.spanColumns ?? 1);
             w.bl(cell.spanRows ?? 1);
             w.bd(0);                      /* rotation */
-            /* R2007 alone inserts a BD (1.0) after the rotation, and its
-               cell content is a full table VALUE rather than a bare
-               string: the additional-data flag comes first, then the
-               format flags, the data type, the text inline as
+            /* An R2007 cell's content is a full table VALUE rather than a
+               bare string: after the override flag come the extended cell
+               flags, the format flags, the data type, the text inline as
                byte-counted UTF-16, the unit type, and finally the two
                string-stream entries (the value's format string and its
-               rendered form). Pinned against AutoCAD-minted AC1021
-               tables: each 1-character cell is 109 bits, and the walk
-               lands on the four override bits exactly, on a 2x2 grid of
-               single letters and a 3x2 grid of 1-to-8 character cells. */
+               rendered form) — the reader's grammar, verified bit-exact
+               against the reference's own 2000/2004/2007 tables. Pinned
+               here against AutoCAD-minted AC1021 tables: each 1-character
+               cell is 109 bits, and the walk lands on the four override
+               bits exactly, on a 2x2 grid of single letters and a 3x2 grid
+               of 1-to-8 character cells. */
             if (V === 2007) {
-              w.bd(1);
               w.b(0);                     /* no per-cell overrides */
+              w.bl(0);                    /* extended cell flags */
               w.bl(4);                    /* format flags: value inline */
               w.bl(4);                    /* data type: string */
               const s = cell.text ?? '';
-              w.bs((s.length + 1) * 2);   /* bytes, NUL included */
+              w.bl((s.length + 1) * 2);   /* bytes, NUL included — a BL:
+                                             same bits as a BS under 256 */
               for (let k = 0; k < s.length; k++) {
                 const cu = s.charCodeAt(k);
                 w.rc(cu & 0xff); w.rc((cu >> 8) & 0xff);
@@ -3129,7 +3377,7 @@ const writeDwgImpl = (
             w.bl((SEAL_MAGIC | (e.encoding ?? 0)) >>> 0);
             if (V >= 2018) w.bl(0);
             if (V >= 2000) w.b(0);
-            sealBody(w, e);
+            sealBody(w, e, e.appClass?.cppName ?? 'AcDbEntity');
           }, refs, graphics);
         }
         return;
@@ -3274,7 +3522,8 @@ const writeDwgImpl = (
   const makeStyle = (st: TextStyle): void => {
     makeObject(53, styleH.get(st.name)!, (w) => {
       tableFlags(w, st.name);
-      w.b(0); w.b(0);                     /* shape, vertical */
+      w.b(st.shapeFile ? 1 : 0);          /* shape file (an .shx of shapes) */
+      w.b(0);                             /* vertical */
       w.bd(st.fixedHeight ?? 0);
       w.bd(st.widthFactor ?? 1);
       w.bd(st.oblique ?? 0);
@@ -3539,7 +3788,7 @@ const writeDwgImpl = (
       w.h(5, 0);                        /* arrowhead: default */
       w.h(5, styleH.get('Standard') ?? [...styleH.values()][0]);
       w.h(5, 0);                        /* block content */
-    });
+    }, 0, [{ appName: 'ACAD_MLEADERVER', values: [{ code: 1070, value: 2 }] }]);
   };
 
   /** The stored name of an anonymous block. The file keeps the bare
@@ -3549,7 +3798,11 @@ const writeDwgImpl = (
    *  `Name Invalid anonymous name "*X"` (396 times in the field
    *  corpus). References are by handle, so the stem loses nothing. */
   const storedBlockName = (name: string): string =>
-    /^\*[A-Za-z]\d+$/.test(name) ? name.slice(0, 2) : name;
+    /^\*[A-Za-z]\d+$/.test(name) ? name.slice(0, 2)
+    /* every paper-space layout's header is spelled *Paper_Space in the
+       file — the reference's own sheet sets carry four of them under
+       that one name, and the reader numbers them back on load */
+    : /^\*paper_space.+$/i.test(name) ? '*PAPER_SPACE' : name;
   const makeBlockHeader = (
     h: number, name: string, blockEnt: number, endblkEnt: number,
     ownedEnts: number[], base = { x: 0, y: 0, z: 0 }, layoutHandle = 0,
@@ -3562,6 +3815,13 @@ const writeDwgImpl = (
       w.b(name.startsWith('*')
         && !/^\*(model_space|paper_space)/i.test(name) ? 1 : 0);
       w.b(hasAttdefs ? 1 : 0);            /* has attdefs */
+      /* an external reference's block goes out as an ordinary empty
+         block: its record written with the attachment flags, path and
+         insert list — bit-identical in its data to the reference's own
+         save — was refused or hung the reference in every variant tried
+         (flags, loaded on/off, owned count, insert handles); the cause is
+         not isolated yet, and a plain block opens. BlockDefinition.xref
+         keeps the path and overlay flag for the consumer meanwhile. */
       w.b(0);                             /* xref */
       w.b(0);                             /* overlaid */
       if (V >= 2000) w.b(0);              /* loaded (R2000+) */
@@ -3823,13 +4083,35 @@ const writeDwgImpl = (
   /* ---- layouts (R2000+): the objects behind the drawing tabs.
      AutoCAD's open path walks Model and at least one paper layout via
      the ACAD_LAYOUT dictionary; without them the drawing is refused. ---- */
+  /** LAYOUT object handle per extra paper-space block, for its header. */
+  const layoutOfBlock = new Map<string, number>();
   if (V >= 2000) {
     const metas = drawing.layouts ?? [];
     const modelMeta = metas.find((l) => /^model$/i.test(l.name));
-    const paperMeta = metas.find((l) => !/^model$/i.test(l.name));
+    /* the current paper space's layout: the one naming no extra block
+       (drawing.paperSpace is its content) */
+    const paperMeta = metas.find((l) => !/^model$/i.test(l.name)
+        && !(l.blockName && isExtraPaper(l.blockName)))
+      ?? metas.find((l) => !/^model$/i.test(l.name));
     const paperName = paperMeta?.name ?? 'Layout1';
+    /* the other layouts, one per *Paper_Space<n> block: named by the
+       LAYOUT record that points at the block, else Layout<n>; every
+       tab name is unique in the dictionary */
+    const usedNames = new Set(['model', paperName.toLowerCase()]);
+    const extras = extraPaperBlocks.map((nm, i) => {
+      const meta = metas.find((l) => l !== paperMeta
+        && l.blockName?.toLowerCase() === nm.toLowerCase());
+      const stem = meta?.name ?? 'Layout';
+      let name = meta?.name ?? stem + (i + 2);
+      for (let k = 2; usedNames.has(name.toLowerCase()); k++) name = stem + k;
+      usedNames.add(name.toLowerCase());
+      const h = H();
+      layoutOfBlock.set(nm, h);
+      return { nm, h, name, meta, tabOrder: meta?.tabOrder ?? i + 2 };
+    });
     makeDictionary(layoutDict, nod, [
-      ['Model', layoutModelH], [paperName, layoutPaperH]
+      ['Model', layoutModelH], [paperName, layoutPaperH],
+      ...extras.map((x): [string, number] => [x.name, x.h])
     ]);
     const makeLayout = (
       handle: number, name: string, tabOrder: number, blockHdr: number,
@@ -3878,6 +4160,7 @@ const writeDwgImpl = (
     };
     makeLayout(layoutModelH, 'Model', modelMeta?.tabOrder ?? 0, msBH, modelMeta);
     makeLayout(layoutPaperH, paperName, paperMeta?.tabOrder ?? 1, psBH, paperMeta);
+    for (const x of extras) makeLayout(x.h, x.name, x.tabOrder, blockH.get(x.nm)!, x.meta);
   }
 
   /* ---- the active model viewport: every AutoCAD drawing has one ---- */
@@ -3966,19 +4249,33 @@ const writeDwgImpl = (
   proxyObjs.forEach((p, i) => {
     const key = p.appClass?.dxfName ?? p.sourceType ?? 'ACAD_PROXY_OBJECT';
     const cls = proxyClsH.get(key);
+    const refs = (w: BitWriter): void => {
+      w.h(4, nod);                        /* owner: the root dictionary */
+      if (V < 2004) w.h(3, 0);
+      for (const ref of p.refs ?? []) {
+        w.h(ref.code, mapRef(ref.value));
+      }
+    };
+    /* A proxy with no payload at all — an application that keeps its
+       whole object in EED, as the reference's dbConnect link records do
+       — goes out as a plain object of its class: an empty body under
+       the class's own type number, the EED in the prologue. That is
+       the form the reference's own DWG gives such records and the one
+       its loader takes back; wrapped in a proxy record, the same object
+       makes it refuse the drawing outright (ErrorStatus 53, measured on
+       its dbConnect sample, EED or no EED). */
+    if (!p.data && cls) {
+      makeObject(cls.num, proxyObjH[i], () => { /* the object is its EED */ },
+        refs, 0, p.xdata);
+      return;
+    }
     makeObject(0x1f3, proxyObjH[i], (w) => {
       w.bl(cls?.num ?? 0x1f3);
       w.bl(p.proxyVersion ?? 0);
       if (V >= 2018) w.bl(p.proxyMaint ?? 0);
       if (V >= 2000) w.b(p.fromDxf ? 1 : 0);
       if (p.data && p.dataBits) w.putBits(fromBase64(p.data), p.dataBits);
-    }, (w) => {
-      w.h(4, nod);                        /* owner: the root dictionary */
-      if (V < 2004) w.h(3, 0);
-      for (const ref of p.refs ?? []) {
-        w.h(ref.code, mapRef(ref.value));
-      }
-    });
+    }, refs, 0, p.xdata);
   });
 
   /* ---- sealed unknown objects: universal passthrough, object side.
@@ -4001,15 +4298,15 @@ const writeDwgImpl = (
           if (p.strData && p.strBits) {
             w.strTarget?.putBits(fromBase64(p.strData), p.strBits);
           }
-        }, refs);
+        }, refs, 0, p.xdata);
     } else {
       makeObject(0x1f3, unknownObjH[i], (w) => {
         w.bl(p.typeCode === undefined ? (proxyClsH.get(key)?.num ?? 0) : 0);
         w.bl((SEAL_MAGIC | (p.encoding ?? 0)) >>> 0);
         if (V >= 2018) w.bl(0);
         if (V >= 2000) w.b(0);
-        sealBody(w, p);
-      }, refs);
+        sealBody(w, p, p.appClass?.cppName ?? 'AcDbObject');
+      }, refs, 0, p.xdata);
     }
   });
 
@@ -4032,7 +4329,7 @@ const writeDwgImpl = (
     makeBlockHeader(bh, nm,
       blockBeginH.get(nm)!, blockEndH.get(nm)!,
       blockEntH.get(nm)!,
-      drawing.blocks[nm].basePoint, 0, sortentsFor.get(bh)?.dict,
+      drawing.blocks[nm].basePoint, layoutOfBlock.get(nm) ?? 0, sortentsFor.get(bh)?.dict,
       blockEnts.get(nm)!.some(
         (e) => e.type === 'text' && e.attribute === 'attdef'));
   }
