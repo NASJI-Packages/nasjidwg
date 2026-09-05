@@ -56,7 +56,12 @@ const VERSIONS = ['R12', 'R13', 'R14', 'R2000', 'R2004', 'R2007', 'R2018'];
  * the missing 53-byte ObjFreeSpace section, and the four trailing shorts
  * that close the header-variable section. See test/external.test.ts. */
 const PASS_BASELINE = ['R12', 'R13', 'R14', 'R2000', 'R2004', 'R2007', 'R2018',
-  'DXF'];
+  'DXF', 'door:R2000', 'door:R2004', 'door:R2007', 'door:R2018'];
+/* the corpus carries no dynamic block, and the writer's visibility
+   chain was refused by the reference for a year without this gate
+   noticing — so a door with two visibility states is a fixture of its
+   own, in every release that writes the chain */
+const DOOR_VERSIONS = ['R2000', 'R2004', 'R2007', 'R2018'];
 
 /* ------------------------------------------------------------------ */
 
@@ -77,11 +82,30 @@ writeFileSync(probe, `
 import { it } from 'vitest';
 import { writeFileSync } from 'node:fs';
 import { DWG_VERSIONS, dwgOf, dxfOf } from './corpus.js';
+import { emptyDrawing, writeDwg2000, writeDwg2004, writeDwg2007, writeDwg2018 } from '../src/index.js';
+const door = () => {
+  const d = emptyDrawing();
+  d.blocks = { DOOR: {
+    name: 'DOOR', basePoint: { x: 0, y: 0, z: 0 },
+    entities: [
+      { type: 'line', handle: 'A1', layer: '0', color: { kind: 'byLayer' }, start: { x: 0, y: 0, z: 0 }, end: { x: 1, y: 0, z: 0 } },
+      { type: 'circle', handle: 'A2', layer: '0', color: { kind: 'byLayer' }, center: { x: 0.5, y: 0.5, z: 0 }, radius: 0.5 }
+    ],
+    visibilityName: 'Door State', visibilityPrompt: 'Pick a state',
+    visibilityStates: [{ name: 'Open', visible: ['A1'] }, { name: 'Closed', visible: ['A1', 'A2'] }]
+  } };
+  d.entities = [{ type: 'insert', layer: '0', color: { kind: 'byLayer' }, blockName: 'DOOR', position: { x: 5, y: 5, z: 0 }, scale: { x: 1, y: 1, z: 1 }, rotation: 0 }];
+  return d;
+};
+const DOOR_WRITERS = { R2000: writeDwg2000, R2004: writeDwg2004, R2007: writeDwg2007, R2018: writeDwg2018 };
 it('emit', () => {
   for (const v of DWG_VERSIONS) {
     writeFileSync(${JSON.stringify(work)} + '/corpus_' + v + '.dwg', dwgOf(v));
   }
   writeFileSync(${JSON.stringify(work)} + '/corpus_DXF.dxf', dxfOf());
+  for (const [v, w] of Object.entries(DOOR_WRITERS)) {
+    writeFileSync(${JSON.stringify(work)} + '/door_' + v + '.dwg', w(door()).data);
+  }
 });
 `);
 try {
@@ -138,7 +162,8 @@ const verdictOf = (text) => {
 const results = [];
 /* the ASCII DXF writer is gated exactly like the DWG containers */
 const targets = VERSIONS.map((v) => [v, `corpus_${v}.dwg`])
-  .concat([['DXF', 'corpus_DXF.dxf']]);
+  .concat([['DXF', 'corpus_DXF.dxf']])
+  .concat(DOOR_VERSIONS.map((v) => [`door:${v}`, `door_${v}.dwg`]));
 for (const [v, file] of targets) {
   const dwg = join(work, file);
   let verdict = verdictOf(runAcad(dwg));
@@ -148,7 +173,7 @@ for (const [v, file] of targets) {
     verdict = verdictOf(runAcad(dwg));
   }
   results.push([v, verdict]);
-  console.log(`${v.padEnd(6)} ${verdict.label}`);
+  console.log(`${v.padEnd(10)} ${verdict.label}`);
 }
 
 rmSync(work, { recursive: true, force: true });
