@@ -1566,6 +1566,37 @@ const writeDwgImpl = (
       }
     }
   }
+  /** The sealed graph records a block's fresh visibility graph
+   *  supersedes (the dynamic-block emission, below): the purge preventer
+   *  names its block, the evaluation graph shares the preventer's owner
+   *  (the block's extension dictionary), and the graph hard-owns its
+   *  nodes. They stay home like the rest of the family, but their
+   *  staying is not a loss — the graph is rebuilt from the decoded
+   *  states — so it is not reported as one. */
+  const supersededGraph = new Set<string>();
+  if (V >= 2000) {
+    const kindOf = (p: Sealed): string =>
+      (p.appClass?.dxfName ?? p.sourceType ?? '').toUpperCase();
+    const dynHandles = new Set(Object.values(drawing.blocks)
+      .filter((b) => b.visibilityStates?.length && b.handle && !b.isLayout)
+      .map((b) => b.handle!.toUpperCase()));
+    const xdicts = new Set<string>();
+    for (const p of sealedAll) {
+      if (kindOf(p) !== 'ACDB_DYNAMICBLOCKPURGEPREVENTER_VERSION') continue;
+      if (!(p.refs ?? []).some((r) => r.code === 5
+        && dynHandles.has(r.value.toUpperCase()))) continue;
+      if (p.handle) supersededGraph.add(p.handle.toUpperCase());
+      if (p.ownerHandle) xdicts.add(p.ownerHandle.toUpperCase());
+    }
+    for (const p of sealedAll) {
+      if (kindOf(p) !== 'ACAD_EVALUATION_GRAPH' || !p.ownerHandle
+        || !xdicts.has(p.ownerHandle.toUpperCase())) continue;
+      if (p.handle) supersededGraph.add(p.handle.toUpperCase());
+      for (const r of p.refs ?? []) {
+        if (r.code === 3) supersededGraph.add(r.value.toUpperCase());
+      }
+    }
+  }
   const keptRefs = new Set<string>(['0']);
   {
     const addRef = (h?: string): void => { if (h) keptRefs.add(h.toUpperCase()); };
@@ -1601,7 +1632,10 @@ const writeDwgImpl = (
     })
     .filter((p) => {
       const why = p.handle ? homeWhy.get(p.handle.toUpperCase()) : staysHome(p);
-      if (why !== undefined && why !== null) { skipped.push(why); return false; }
+      if (why !== undefined && why !== null) {
+        if (!(p.handle && supersededGraph.has(p.handle.toUpperCase()))) skipped.push(why);
+        return false;
+      }
       /* a sealed record's HARD references (owner/pointer codes 3 and 5)
          must land on something in this file: the reference resolves them
          while opening and refuses the whole drawing over one dangler */
@@ -1617,32 +1651,24 @@ const writeDwgImpl = (
     }
   }
   const unknownObjH = unknownObjs.map((p) => keepH(p.handle));
-  /* dynamic blocks: the visibility parameter — the one member of the
-     family that changes what a viewer draws — is written back as its own
-     class object. R13/R14 cannot name classes, so there it is reported. */
-  /* A drawing that still carries the reference's own dynamic-block
-     graph as sealed objects (the evaluation graph, the representation
-     data, the grips — none of which travel, above) came from a file the
-     reference wrote; beside that graph's remnants the visibility object
-     this writer builds is refused in every release, so those blocks go
-     out static and the loss is reported. A drawing without that graph —
-     one this library wrote, or one the caller authored — keeps the
-     feature and round-trips it. */
-  const genuineDynGraph = (drawing.unknownObjects ?? []).some((p) => {
-    const k = (p.appClass?.dxfName ?? p.sourceType ?? '').toUpperCase();
-    return k === 'ACAD_EVALUATION_GRAPH' || k === 'ACDB_BLOCKREPRESENTATION_DATA';
-  });
-  const dynBlocks = userBlocks.filter((nm) => {
-    const def = drawing.blocks[nm];
-    if (!def?.visibilityStates?.length) return false;
-    if (genuineDynGraph && def.isDynamic) {
-      downgraded.push(`dynamic block ${nm} written static`);
-      return false;
-    }
-    return true;
-  });
+  /* dynamic blocks: a block that defines visibility states leaves as a
+     dynamic block — the visibility parameter (the one member of the
+     family that changes what a viewer draws) inside the evaluation graph
+     the reference builds around it, spelled the way the reference spells
+     it (see the emission below). R13/R14 cannot name classes, so there
+     it is reported. A drawing that still carries the reference's own
+     graph as sealed objects (the evaluation graph, the grips, the purge
+     preventer — none of which travel, above) gets a fresh graph built
+     from the decoded states; the sealed remnants stay home, reported by
+     kind. */
+  const dynBlocks = userBlocks.filter(
+    (nm) => !!drawing.blocks[nm]?.visibilityStates?.length);
   const usesDynBlocks = dynBlocks.length > 0 && V >= 2000;
   const CLS_BLOCKVIS = usesDynBlocks ? clsNext++ : 0;
+  const CLS_EVALGRAPH = usesDynBlocks ? clsNext++ : 0;
+  const CLS_BLOCKVISGRIP = usesDynBlocks ? clsNext++ : 0;
+  const CLS_BLOCKGRIPEXPR = usesDynBlocks ? clsNext++ : 0;
+  const CLS_DYNPURGE = usesDynBlocks ? clsNext++ : 0;
   /* Draw order. A default write needs nothing: fresh handles ascend in
      array order, and array order IS the draw order. Under preserveHandles
      a space whose array order differs from its ascending handle order
@@ -1671,6 +1697,24 @@ const writeDwgImpl = (
   const CLS_SORTENTS = sortSpaces.length ? clsNext++ : 0;
   const sortentsFor = new Map<number, { dict: number; table: number }>();
   for (const s of sortSpaces) sortentsFor.set(s.block, { dict: H(), table: H() });
+  /* the dynamic-block graph's records, per block header (R2000+): the
+     extension dictionary (shared with the draw-order entry when the
+     block has one), the evaluation graph, the visibility parameter, its
+     grip with the grip's two location components, the purge preventer */
+  interface DynRec {
+    dict: number; graph: number; param: number;
+    grip: number; gripX: number; gripY: number; purge: number;
+  }
+  const dynFor = new Map<number, DynRec>();
+  if (usesDynBlocks) {
+    for (const nm of dynBlocks) {
+      const bh = blockH.get(nm)!;
+      dynFor.set(bh, {
+        dict: sortentsFor.get(bh)?.dict ?? H(), graph: H(), param: H(),
+        grip: H(), gripX: H(), gripY: H(), purge: H()
+      });
+    }
+  }
   const underlayDefH = new Map<string, number>();
   function modelEntsAll(): Entity[] { return drawing.entities; }
   function paperEntsAll(): Entity[] { return drawing.paperSpace ?? []; }
@@ -4476,7 +4520,8 @@ const writeDwgImpl = (
     makeBlockHeader(bh, nm,
       blockBeginH.get(nm)!, blockEndH.get(nm)!,
       blockEntH.get(nm)!,
-      drawing.blocks[nm].basePoint, layoutOfBlock.get(nm) ?? 0, sortentsFor.get(bh)?.dict,
+      drawing.blocks[nm].basePoint, layoutOfBlock.get(nm) ?? 0,
+      sortentsFor.get(bh)?.dict ?? dynFor.get(bh)?.dict,
       blockEnts.get(nm)!.some(
         (e) => e.type === 'text' && e.attribute === 'attdef'),
       isXrefBlock(nm) ? drawing.blocks[nm].xref : undefined,
@@ -4498,19 +4543,38 @@ const writeDwgImpl = (
     emitSpace(blockEnts.get(nm)!, blockEntH.get(nm)!, 0, blockH.get(nm)!);
   }
 
-  /* ---- dynamic blocks: one BLOCKVISIBILITYPARAMETER per block that
-     defines visibility states. The record mirrors the reader field for
-     field (AcDbEvalExpr prologue, element block, member list, states).
-     Member and per-state references name the block's entities: the model
-     carries them as the source file's handles, so they are remapped here
-     through each entity's retained `handle`. The reader binds the record
-     to its block through the members' owner, which is the block header
-     written above. ---- */
+  /* ---- dynamic blocks: the visibility graph, spelled the way the
+     reference spells it — measured on its own re-save of a
+     visibility-only block, identical in every release from R2000 to
+     R2018. A lone BLOCKVISIBILITYPARAMETER owned by the block header,
+     without this graph, is refused outright (ErrorStatus 53) in every
+     release, genuine and synthetic blocks alike. The chain: the block
+     header's extension dictionary names the ACAD_EVALUATION_GRAPH under
+     ACAD_ENHANCEDBLOCK; the graph hard-owns four nodes — the parameter,
+     its grip and the grip's two location components — wired by three
+     edges (grip -> parameter, parameter -> each component); a purge
+     preventer beside the graph keeps an unreferenced dynamic block from
+     being purged. The parameter mirrors the reader field for field
+     (AcDbEvalExpr prologue, element block, member list, states). Member
+     and per-state references name the block's entities: the model
+     carries them as the source file's handles, so they are remapped
+     here through each entity's retained `handle`. The reader binds the
+     record to its block through the members' owner. ---- */
   for (const nm of dynBlocks) {
     const def = drawing.blocks[nm];
     if (V <= 14) {
       skipped.push(`dynamic-block visibility of ${nm} (needs R2000 or later)`);
       continue;
+    }
+    const bh = blockH.get(nm)!;
+    const rec = dynFor.get(bh)!;
+    /* the block's other parameters and its actions have no writer yet:
+       the graph built here carries the visibility alone, and says so */
+    const nParams = def.parameters?.length ?? 0;
+    const nActions = def.actions?.length ?? 0;
+    if (nParams || nActions) {
+      downgraded.push(`dynamic block ${nm}: visibility states kept, `
+        + `${nParams} parameter(s) and ${nActions} action(s) written static`);
     }
     const ents = blockEnts.get(nm)!;
     const hs = blockEntH.get(nm)!;
@@ -4524,18 +4588,70 @@ const writeDwgImpl = (
     const states = def.visibilityStates!.map((st) => ({
       name: st.name, visible: mapState(st.visible)
     }));
-    makeObject(CLS_BLOCKVIS, H(), (w) => {
-      w.bl(0); w.bl(0); w.bl(0);          /* eval expr: parent, version pair */
-      w.bs(-9999);                        /* no inline value */
-      w.bl(1);                            /* node id */
+    const bx = def.basePoint?.x ?? 0, by = def.basePoint?.y ?? 0,
+      bz = def.basePoint?.z ?? 0;
+    /* node ids inside the graph (the reference numbers its own from 9) */
+    const N_PARAM = 9, N_GRIP = 10, N_GRIPX = 11, N_GRIPY = 12;
+    /* the evaluation-expression prologue every node opens with: no
+       parent, the version pair the reference stamps, no inline value,
+       the node id */
+    const evalExpr = (w: BitWriter, node: number): void => {
+      w.bl(-1); w.bl(33); w.bl(427); w.bs(-9999); w.bl(node);
+    };
+    const noXdict = (w: BitWriter): void => { if (V < 2004) w.h(3, 0); };
+    /* the block's extension dictionary, its entries hard-owned */
+    const entries: [string, number][] = [['ACAD_ENHANCEDBLOCK', rec.graph]];
+    const so = sortentsFor.get(bh);
+    if (so) entries.push(['ACAD_SORTENTS', so.table]);
+    entries.push(['AcDbDynamicBlockRoundTripPurgePreventer', rec.purge]);
+    makeObject(42, rec.dict, (w) => {
+      w.bl(entries.length);
+      if (V >= 2000) w.bs(1);             /* cloning: keep existing */
+      if (V >= 14) w.rc(1);               /* hard-owner flag */
+      for (const [name] of entries) w.t(nameText(r14Str(name)));
+    }, (w) => {
+      w.h(4, bh);
+      noXdict(w);
+      for (const [, h2] of entries) w.h(3, h2);
+    });
+    /* the graph: per node its index, flags, expression node id and
+       first/last incoming and outgoing edge; per edge its index, two
+       constants, source and target node and five sibling links */
+    makeObject(CLS_EVALGRAPH, rec.graph, (w) => {
+      w.bl(12); w.bl(12);                 /* version pair */
+      const nodes: [number, number[]][] = [
+        [N_PARAM, [0, 0, 1, 2]], [N_GRIP, [-1, -1, 0, 0]],
+        [N_GRIPX, [1, 1, -1, -1]], [N_GRIPY, [2, 2, -1, -1]]
+      ];
+      w.bl(nodes.length);
+      nodes.forEach(([id, e], i) => {
+        w.bl(i); w.bl(32); w.bl(id);
+        for (const v of e) w.bl(v);
+      });
+      const edges: [number, number, number[]][] = [
+        [1, 0, [-1, -1, -1, -1, -1]], [0, 2, [-1, -1, -1, 2, -1]],
+        [0, 3, [-1, -1, 1, -1, -1]]
+      ];
+      w.bl(edges.length);
+      edges.forEach(([from, to, o], i) => {
+        w.bl(i); w.bl(0); w.bl(1); w.bl(from); w.bl(to);
+        for (const v of o) w.bl(v);
+      });
+    }, (w) => {
+      w.h(4, rec.dict);
+      noXdict(w);
+      for (const h2 of [rec.param, rec.grip, rec.gripX, rec.gripY]) w.h(3, h2);
+    });
+    /* the visibility parameter */
+    makeObject(CLS_BLOCKVIS, rec.param, (w) => {
+      evalExpr(w, N_PARAM);
       w.t(outText('Visibility'));         /* element name */
-      w.bl(0); w.bl(0);                   /* element version pair */
+      w.bl(33); w.bl(427);                /* element version pair */
       w.bl(0);                            /* extended-data marker */
       w.b(1); w.b(0);                     /* show properties, chain actions */
-      w.bd3(def.basePoint?.x ?? 0, def.basePoint?.y ?? 0,
-        def.basePoint?.z ?? 0);           /* definition point */
+      w.bd3(bx, by, bz);                  /* definition point */
       w.bl(0); w.bl(0);                   /* two empty property-info blocks */
-      w.bl(0);                            /* property-info count */
+      w.bl(N_GRIP);                       /* the grip's node */
       w.b(1);                             /* is initialized */
       w.t(outText(def.visibilityName ?? 'Visibility'));
       w.t(outText(def.visibilityPrompt ?? ''));
@@ -4545,15 +4661,49 @@ const writeDwgImpl = (
       for (const st of states) {
         w.t(outText(st.name));
         w.bl(st.visible.length);
-        w.bl(0);                          /* state parameters */
+        w.bl(2);                          /* state parameters: self, grip */
       }
     }, (w) => {
-      w.h(4, blockH.get(nm)!);            /* owner: the block header */
-      if (V < 2004) w.h(3, 0);
-      for (const h2 of hs) w.h(5, h2);    /* members */
+      w.h(4, rec.graph);                  /* owner: the graph */
+      noXdict(w);
+      for (const h2 of hs) w.h(4, h2);    /* members */
       for (const st of states) {
-        for (const h2 of st.visible) w.h(5, h2);
+        for (const h2 of st.visible) w.h(4, h2);
+        w.h(4, rec.param); w.h(4, rec.grip);
       }
+    });
+    /* the grip at the definition point and its two location components */
+    makeObject(CLS_BLOCKVISGRIP, rec.grip, (w) => {
+      evalExpr(w, N_GRIP);
+      w.t(outText('Grip'));               /* element name */
+      w.bl(33); w.bl(427);                /* element version pair */
+      w.bl(0);                            /* extended-data marker */
+      w.bl(N_GRIPX); w.bl(N_GRIPY);       /* the location components */
+      w.bd3(bx, by, bz);
+      w.b(0); w.bl(-1);                   /* insert cycling: off, weight */
+    }, (w) => {
+      w.h(4, rec.graph);
+      noXdict(w);
+    });
+    const components = [
+      [rec.gripX, N_GRIPX, 'UpdatedX'], [rec.gripY, N_GRIPY, 'UpdatedY']
+    ] as const;
+    for (const [h2, node, expr] of components) {
+      makeObject(CLS_BLOCKGRIPEXPR, h2, (w) => {
+        evalExpr(w, node);
+        w.bl(N_PARAM);                    /* the parameter it locates */
+        w.t(outText(expr));
+      }, (w) => {
+        w.h(4, rec.graph);
+        noXdict(w);
+      });
+    }
+    makeObject(CLS_DYNPURGE, rec.purge, (w) => {
+      w.bs(1);
+    }, (w) => {
+      w.h(4, rec.dict);
+      noXdict(w);
+      w.h(5, bh);                         /* the block kept from purging */
     });
   }
 
@@ -4567,7 +4717,9 @@ const writeDwgImpl = (
      which is where AutoCAD looks for it. ---- */
   for (const { block, hs } of sortSpaces) {
     const { dict, table } = sortentsFor.get(block)!;
-    makeDictionary(dict, block, [['ACAD_SORTENTS', table]]);
+    /* a dynamic block's extension dictionary carries this entry beside
+       its graph and is written with the graph, above */
+    if (!dynFor.has(block)) makeDictionary(dict, block, [['ACAD_SORTENTS', table]]);
     const sorted = [...hs].sort((a, b) => a - b);
     makeObject(CLS_SORTENTS, table, (w) => {
       w.bl(hs.length);
@@ -5029,6 +5181,14 @@ const writeDwgImpl = (
     if (usesDynBlocks) {
       cls(CLS_BLOCKVIS, 'BLOCKVISIBILITYPARAMETER',
         'AcDbBlockVisibilityParameter', false, 'ObjectDBX Classes');
+      cls(CLS_EVALGRAPH, 'ACAD_EVALUATION_GRAPH', 'AcDbEvalGraph', false,
+        'ObjectDBX Classes');
+      cls(CLS_BLOCKVISGRIP, 'BLOCKVISIBILITYGRIP', 'AcDbBlockVisibilityGrip',
+        false, 'ObjectDBX Classes');
+      cls(CLS_BLOCKGRIPEXPR, 'BLOCKGRIPLOCATIONCOMPONENT', 'AcDbBlockGripExpr',
+        false, 'ObjectDBX Classes');
+      cls(CLS_DYNPURGE, 'ACDB_DYNAMICBLOCKPURGEPREVENTER_VERSION',
+        'AcDbDynamicBlockPurgePreventer', false, 'ObjectDBX Classes');
     }
     if (sortSpaces.length) {
       cls(CLS_SORTENTS, 'SORTENTSTABLE', 'AcDbSortentsTable', false,

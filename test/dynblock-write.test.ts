@@ -12,6 +12,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { readDwg } from '../src/dwg/reader.js';
+import type { UnknownObject } from '../src/core/model.js';
 import {
   writeDwg2000, writeDwg2004, writeDwg2007, writeDwg2018, writeDwgR13
 } from '../src/dwg/writer.js';
@@ -101,5 +102,127 @@ describe('R13 is honest about visibility states', () => {
     const { skipped } = writeDwgR13(doorDrawing());
     expect(skipped)
       .toContain('dynamic-block visibility of DOOR (needs R2000 or later)');
+  });
+});
+
+/* The parameter alone was never enough: a BLOCKVISIBILITYPARAMETER owned
+   by the block header, with no graph around it, is refused outright by
+   the reference (ErrorStatus 53) in every release — for a drawing
+   authored through the model just as for one of the reference's own.
+   What it accepts, measured on its re-save of a visibility-only block, is
+   the chain below; the reader seals every record of it but the
+   parameter, so the chain can be asserted on read-back. */
+const kindOf = (u: UnknownObject): string =>
+  (u.appClass?.dxfName ?? u.sourceType).toUpperCase();
+
+describe.each(VERSIONS)('the graph around the parameter %s', (version) => {
+  const back = readDwg(WRITERS[version](doorDrawing()).data);
+  const sealed = back.unknownObjects ?? [];
+  const byKind = (k: string): UnknownObject[] =>
+    sealed.filter((u) => kindOf(u) === k);
+
+  it('is the reference\'s chain: graph, grip, two components, preventer', () => {
+    expect(byKind('ACAD_EVALUATION_GRAPH')).toHaveLength(1);
+    expect(byKind('BLOCKVISIBILITYGRIP')).toHaveLength(1);
+    expect(byKind('BLOCKGRIPLOCATIONCOMPONENT')).toHaveLength(2);
+    expect(byKind('ACDB_DYNAMICBLOCKPURGEPREVENTER_VERSION')).toHaveLength(1);
+  });
+
+  it('wires the chain the way the reference does', () => {
+    const graph = byKind('ACAD_EVALUATION_GRAPH')[0];
+    const grip = byKind('BLOCKVISIBILITYGRIP')[0];
+    const comps = byKind('BLOCKGRIPLOCATIONCOMPONENT');
+    const purge = byKind('ACDB_DYNAMICBLOCKPURGEPREVENTER_VERSION')[0];
+    /* the grip and its components are nodes of the graph, hard-owned */
+    for (const node of [grip, ...comps]) {
+      expect(node.ownerHandle).toBe(graph.handle);
+      expect(graph.refs).toContainEqual({ code: 3, value: node.handle });
+    }
+    /* four nodes: those three and the parameter */
+    expect(graph.refs?.filter((r) => r.code === 3)).toHaveLength(4);
+    /* graph and preventer hang off the block's extension dictionary,
+       and the preventer names the block */
+    expect(purge.ownerHandle).toBe(graph.ownerHandle);
+    expect(purge.refs)
+      .toContainEqual({ code: 5, value: back.blocks.DOOR.handle });
+  });
+
+  it('is rebuilt on the next write, not doubled, and not reported lost', () => {
+    const again = WRITERS[version](back);
+    expect(again.downgraded).toEqual([]);
+    expect(again.skipped).toEqual([]);
+    const third = readDwg(again.data);
+    expect((third.unknownObjects ?? [])
+      .filter((u) => kindOf(u) === 'ACAD_EVALUATION_GRAPH')).toHaveLength(1);
+    expect(third.blocks.DOOR.visibilityStates?.map((s) => s.name))
+      .toEqual(['Open', 'Closed']);
+  });
+});
+
+/* A drawing in the shape the reference's own files take: the block's
+   entities tagged AcDbBlockRepETag, an anonymous "*U" representation
+   block beside the definition with an insert pointing at it, the
+   evaluation graph and its nodes sealed among the unknown objects (here
+   the ones this writer's own file came back with), a sealed
+   representation record naming the block, and the block's other
+   parameters and actions decoded beside its states. */
+const genuineShape = (version: keyof typeof WRITERS): Drawing => {
+  const d = readDwg(WRITERS[version](doorDrawing()).data);
+  const door = d.blocks.DOOR;
+  door.entities = door.entities.map((e, i): Entity => ({
+    ...e,
+    xdata: [{ appName: 'AcDbBlockRepETag', values: [
+      { code: 1070, value: 1 }, { code: 1071, value: i },
+      { code: 1005, value: e.handle ?? '0' }
+    ] }]
+  }));
+  door.parameters = [{ kind: 'point', name: 'Position' } as never];
+  door.actions = ['move'];
+  d.blocks['*U1'] = {
+    name: '*U1', basePoint: { x: 0, y: 0, z: 0 },
+    entities: door.entities.map((e): Entity => ({ ...e, handle: undefined }))
+  };
+  d.entities.push({
+    type: 'insert', layer: '0', color: { kind: 'byLayer' },
+    blockName: '*U1', position: { x: 9, y: 9, z: 0 },
+    scale: { x: 1, y: 1, z: 1 }, rotation: 0
+  } as Entity);
+  (d.unknownObjects ??= []).push({
+    handle: 'F01', ownerHandle: 'F00',
+    sourceType: 'ACDB_BLOCKREPRESENTATION_DATA',
+    appClass: {
+      dxfName: 'ACDB_BLOCKREPRESENTATION_DATA',
+      cppName: 'AcDbBlockRepresentationData', appName: 'ObjectDBX Classes'
+    },
+    encoding: Number(version.slice(1)), data: 'gA==', dataBits: 2,
+    refs: [{ code: 5, value: door.handle! }]
+  });
+  return d;
+};
+
+describe.each(VERSIONS)('a genuine dynamic block %s', (version) => {
+  const src = genuineShape(version);
+  const res = WRITERS[version](src);
+  const back = readDwg(res.data);
+
+  it('keeps its visibility states through the rewrite', () => {
+    expect(back.blocks.DOOR.isDynamic).toBe(true);
+    expect(back.blocks.DOOR.visibilityStates?.map((s) => [s.name, s.visible.length]))
+      .toEqual([['Open', 1], ['Closed', 2]]);
+    expect((back.unknownObjects ?? [])
+      .filter((u) => kindOf(u) === 'ACAD_EVALUATION_GRAPH')).toHaveLength(1);
+  });
+
+  it('leaves the representation block a plain anonymous block', () => {
+    expect(back.blocks['*U1']?.isDynamic).toBeFalsy();
+    expect(back.blocks['*U1']?.entities).toHaveLength(2);
+    expect(back.entities.filter((e) => e.type === 'insert')).toHaveLength(2);
+  });
+
+  it('reports the representation record and the static rest, not the graph', () => {
+    expect(res.skipped).toEqual(['ACDB_BLOCKREPRESENTATION_DATA']);
+    expect(res.downgraded).toEqual([
+      'dynamic block DOOR: visibility states kept, 1 parameter(s) and 1 action(s) written static'
+    ]);
   });
 });
