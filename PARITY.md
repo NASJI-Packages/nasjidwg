@@ -215,7 +215,7 @@ the entity is retained with its source type name — verified per version.
 | Object | Status |
 |---|---|
 | LAYER / LTYPE / STYLE (full) | ✅ |
-| BLOCK_HEADER / BLOCK_CONTROL | ✅ | anonymous blocks (*D, *U, …) are stored under one bare stem name each — numbered off their unique handles at read time so every definition survives and each dimension keeps its own |
+| BLOCK_HEADER / BLOCK_CONTROL | ✅ | anonymous blocks (*D, *U, …) are stored under one bare stem name each — numbered off their unique handles at read time so every definition survives and each dimension keeps its own. External references read into `BlockDefinition.xref` (path, overlay) and are **written back as real attachments** from R2000 on — xref/overlay bits, path, insert list, no owned entities, and the `xref\|name` layers, linetypes and text styles the attachment lends the drawing travel with it, flagged dependent with its block handle (the form the reference's own 2000/2004/2018 saves take); the reference reopens the rewritten A-01 sheet with both attachments resolved (BLOCK 70=36 / 70=44, path intact) at AUDIT 0 in 2018, 2007, 2004 and 2000, and with the referenced files absent it opens unresolved as it does its own. R13/R14 keep an attachment as a plain block and report its dependent records in `skipped` |
 | IMAGEDEF (file path, resolved onto images) | ✅ |
 | DICTIONARY / LAYOUT / GROUP / MLINESTYLE | ✅ layouts (name, tab order, block, limits, extents), groups (members), mline styles (elements) |
 | APPID / DIMSTYLE / VPORT / VIEW / UCS | ✅ names + geometry; APPID resolves xdata owners, DIMSTYLE resolves dimension.style |

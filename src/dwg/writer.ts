@@ -1013,15 +1013,34 @@ const writeDwgImpl = (
   const vportActive = H();
 
   /* An external reference's own layers, linetypes and text styles
-     (`xref|name`) exist only while that file is attached; written as
-     ordinary records they are audited one by one ("Non XREF-dependent
-     record contains vertical bar" — 8206 of a campaign round's 9000
-     findings). They stay home, counted once. */
-  const xrefRecords = drawing.layers.filter((l) => l.xrefDependent).length
-    + drawing.linetypes.filter((l) => l.xrefDependent).length
-    + drawing.textStyles.filter((s) => s.xrefDependent).length;
+     (`xref|name`) exist only while that file is attached. They travel
+     only beside a block record written as that attachment — flagged
+     xref-dependent, the block's handle in their head, the form the
+     reference's own saves take. Written as ordinary records they are
+     audited one by one ("Non XREF-dependent record contains vertical
+     bar" — 8206 of a campaign round's 9000 findings), so the rest stay
+     home, counted once. R13/R14 keep an attachment as a plain block. */
+  const xrefBlockNames = new Set<string>(V >= 2000
+    ? Object.keys(drawing.blocks)
+      .filter((nm) => drawing.blocks[nm].xref && !drawing.blocks[nm].isLayout
+        && !/^\*(model_space|paper_space)/i.test(nm))
+      .map((nm) => nm.toLowerCase())
+    : []);
+  /** The attachment an `xref|name` record belongs to, when that block is
+   *  written as one: its lower-cased name; else undefined. */
+  const xrefOf = (name: string): string | undefined => {
+    const bar = name.indexOf('|');
+    if (bar <= 0) return undefined;
+    const owner = name.slice(0, bar).toLowerCase();
+    return xrefBlockNames.has(owner) ? owner : undefined;
+  };
+  const travels = (r: { name: string; xrefDependent?: boolean }): boolean =>
+    !r.xrefDependent || xrefOf(r.name) !== undefined;
+  const xrefRecords = drawing.layers.filter((l) => !travels(l)).length
+    + drawing.linetypes.filter((l) => !travels(l)).length
+    + drawing.textStyles.filter((s) => !travels(s)).length;
   if (xrefRecords) skipped.push(`${xrefRecords} xref-dependent table records`);
-  const ownLayers = drawing.layers.filter((l) => !l.xrefDependent);
+  const ownLayers = drawing.layers.filter(travels);
   const layers: Layer[] = ownLayers.length ? ownLayers : [{
     name: '0', color: { kind: 'aci', index: 7 } as const,
     on: true, frozen: false, locked: false
@@ -1034,7 +1053,7 @@ const writeDwgImpl = (
      told apart by name here — the tables are keyed by name — and two
      records under one name are audited ("Id Repeated in table"). The
      shape record goes; a shape file of its own name stays, flag and all. */
-  const ownStyles = drawing.textStyles.filter((s) => !s.xrefDependent)
+  const ownStyles = drawing.textStyles.filter(travels)
     .filter((s, i, all) => !(s.shapeFile
       && all.some((o) => o !== s && !o.shapeFile && o.name.toLowerCase() === s.name.toLowerCase())));
   const styles: TextStyle[] = ownStyles.length ? ownStyles : [{ name: 'Standard' }];
@@ -1042,7 +1061,7 @@ const writeDwgImpl = (
   for (const st of styles) styleH.set(st.name, tableH(st.handle));
 
   const userLtypes: Linetype[] = drawing.linetypes
-    .filter((lt) => !/^(bylayer|byblock)$/i.test(lt.name) && !lt.xrefDependent);
+    .filter((lt) => !/^(bylayer|byblock)$/i.test(lt.name) && travels(lt));
   if (!userLtypes.some((lt) => /^continuous$/i.test(lt.name))) {
     userLtypes.unshift({ name: 'Continuous', description: 'Solid line', pattern: [] });
   }
@@ -1098,6 +1117,17 @@ const writeDwgImpl = (
       || (!/^\*(model_space|paper_space)/i.test(nm) && !drawing.blocks[nm].isLayout));
   const blockH = new Map<string, number>();
   for (const nm of userBlocks) blockH.set(nm, tableH(drawing.blocks[nm].handle));
+  /** Block record handle of each attachment written as one, by its
+   *  lower-cased name — what an xref-dependent record's head points at. */
+  const xrefBlockH = new Map<string, number>();
+  for (const nm of userBlocks) {
+    if (xrefBlockNames.has(nm.toLowerCase())) xrefBlockH.set(nm.toLowerCase(), blockH.get(nm)!);
+  }
+  const xrefH = (name: string): number => {
+    const owner = xrefOf(name);
+    return owner === undefined ? 0 : (xrefBlockH.get(owner) ?? 0);
+  };
+  const isXrefBlock = (nm: string): boolean => xrefBlockH.has(nm.toLowerCase());
 
   /* entity lists per owner space */
   const SUPPORTED = new Set([
@@ -1192,6 +1222,14 @@ const writeDwgImpl = (
   const paperEnts = paperFirst(filterEnts(drawing.paperSpace ?? []));
   const blockEnts = new Map<string, Entity[]>();
   for (const nm of userBlocks) {
+    /* an attachment's geometry lives in the referenced file: its record
+       owns nothing, whatever a consumer left in `entities` */
+    if (isXrefBlock(nm)) {
+      const n = drawing.blocks[nm].entities.length;
+      if (n) skipped.push(`${n} entities inside xref block ${nm}`);
+      blockEnts.set(nm, []);
+      continue;
+    }
     blockEnts.set(nm, isExtraPaper(nm) ? paperFirst(filterEnts(drawing.blocks[nm].entities)) : filterEnts(drawing.blocks[nm].entities));
   }
 
@@ -1207,6 +1245,20 @@ const writeDwgImpl = (
   const psEntH = allocEnts(paperEnts);
   const blockEntH = new Map<string, number[]>();
   for (const nm of userBlocks) blockEntH.set(nm, allocEnts(blockEnts.get(nm)!));
+  /** The INSERTs of a block, by output handle, ascending: an attachment's
+   *  record lists them (one 0x01 in its count run and one soft pointer
+   *  each, as the reference's own saves spell it). */
+  const insertsOf = (nm: string): number[] => {
+    const out: number[] = [];
+    const scan = (list: Entity[]): void => {
+      for (const e of list) {
+        if (e.type === 'insert' && e.blockName === nm) out.push(entH.get(e)!);
+      }
+    };
+    scan(modelEnts); scan(paperEnts);
+    for (const list of blockEnts.values()) scan(list);
+    return out.sort((a, b) => a - b);
+  };
   /* INSERT attributes are owned sub-entities: preserveHandles has to
      reach them the same way it reaches the insert, or every rewrite
      mints a fresh number (issue #2). */
@@ -3470,22 +3522,30 @@ const writeDwgImpl = (
    *  the same AutoCAD audits clean. */
   const nameText = (s: string): string => V >= 2007 ? s : outText(s);
 
-  const tableFlags = (w: BitWriter, name: string): void => {
+  /** @param xrefH the attachment an xref-dependent record belongs to —
+   *  its block record's handle; 0 for the drawing's own records
+   *  @param attachment the record is itself an external reference's block */
+  const tableFlags = (w: BitWriter, name: string, xrefH = 0, attachment = false): void => {
     w.t(nameText(r14Name(name)));
     if (V <= 2004) {
       /* the "used" 64-flag: AutoCAD writes 1 on every record it mints
          (bit-walked in refR14.dwg and ref2000.dwg) */
       w.b(1);
-      w.bs(0);                            /* xrefindex + 1 */
-      w.b(0);                             /* xref dependent */
+      /* "xref resolved" (DXF 70 bit 32): the reference's own 2000 and
+         2004 re-saves of A-01 carry 1 on both attachments' block records
+         and on every record that belongs to one, 0 on the drawing's own */
+      w.bs(xrefH || attachment ? 1 : 0);
+      w.b(xrefH ? 1 : 0);                 /* xref dependent */
     } else {
-      w.bs(0);                            /* is_xref_resolved */
+      /* R2007+ folds the two into one short: 256 marks a dependent
+         record; an attachment's own block record carries 0 */
+      w.bs(xrefH ? 256 : 0);
     }
   };
 
   const makeLayer = (ly: Layer): void => {
     makeObject(51, layerH.get(ly.name)!, (w) => {
-      tableFlags(w, ly.name);
+      tableFlags(w, ly.name, xrefH(ly.name));
       if (V <= 14) {
         /* R13/R14 spell the layer's state out as four separate bits
          * rather than packing it into one short. */
@@ -3526,7 +3586,7 @@ const writeDwgImpl = (
     }, (w) => {
       w.h(4, layerControl);               /* owner */
       if (V < 2004) w.h(3, 0);            /* xdict */
-      w.h(5, 0);                          /* xref block (from tableFlags) */
+      w.h(5, xrefH(ly.name));             /* xref block (from tableFlags) */
       if (V >= 2000) w.h(5, 0);           /* plotstyle — R2000 and later */
       if (V >= 2007) w.h(5, 0);           /* material */
       const lt = ly.linetype && ltypeH.get(ly.linetype);
@@ -3537,7 +3597,7 @@ const writeDwgImpl = (
 
   const makeStyle = (st: TextStyle): void => {
     makeObject(53, styleH.get(st.name)!, (w) => {
-      tableFlags(w, st.name);
+      tableFlags(w, st.name, xrefH(st.name));
       w.b(st.shapeFile ? 1 : 0);          /* shape file (an .shx of shapes) */
       w.b(0);                             /* vertical */
       w.bd(st.fixedHeight ?? 0);
@@ -3550,7 +3610,7 @@ const writeDwgImpl = (
     }, (w) => {
       w.h(4, styleControl);
       if (V < 2004) w.h(3, 0);
-      w.h(5, 0);                          /* xref */
+      w.h(5, xrefH(st.name));             /* xref */
     });
   };
 
@@ -3561,7 +3621,7 @@ const writeDwgImpl = (
        make of it. */
     const pattern = (lt?.pattern ?? []).length >= 2 ? lt!.pattern : [];
     makeObject(57, h, (w) => {
-      tableFlags(w, name);
+      tableFlags(w, name, xrefH(name));
       w.t(outText(r14Str(lt?.description ?? '')));
       w.bd(pattern.reduce((s, d) => s + Math.abs(d), 0));
       w.rc(65);                           /* alignment 'A' */
@@ -3581,7 +3641,7 @@ const writeDwgImpl = (
     }, (w) => {
       w.h(4, ltypeControl);
       if (V < 2004) w.h(3, 0);
-      w.h(5, 0);                          /* xref */
+      w.h(5, xrefH(name));                /* xref */
       for (const d of pattern) { void d; w.h(5, 0); }  /* per-dash style */
     });
   };
@@ -3822,31 +3882,40 @@ const writeDwgImpl = (
   const makeBlockHeader = (
     h: number, name: string, blockEnt: number, endblkEnt: number,
     ownedEnts: number[], base = { x: 0, y: 0, z: 0 }, layoutHandle = 0,
-    xdictH = 0, hasAttdefs = false
+    xdictH = 0, hasAttdefs = false,
+    xref?: { path: string; overlay?: boolean }, inserts: number[] = []
   ): void => {
+    /* An external reference's record, as the reference's own 2000, 2004
+       and 2018 re-saves of A-01 spell it (bit-walked): the xref and
+       overlay bits, loaded 0, NO owned-object count, the stored path,
+       one 0x01 per INSERT in the count run, and in the handle stream
+       no entity handles at all — the BLOCK and ENDBLK entities, then
+       one soft pointer per INSERT before the layout. The count is what
+       kept every earlier attempt out: an R2004+ record that carries it
+       (even a 0) is refused outright (ErrorStatus 53 — the BL's two
+       bits shift the base point and everything after it). Loaded must
+       be 0 as well: written 1, the reference takes the attachment as
+       already loaded and never resolves it (BLOCK 70=4 instead of 36,
+       measured). R13/R14 keep the attachment as a plain block
+       (xrefBlockNames is empty there). */
+    const attached = !!xref && V >= 2000;
     makeObject(49, h, (w) => {
-      tableFlags(w, storedBlockName(name));
+      tableFlags(w, storedBlockName(name), 0, attached);
       /* the two space blocks start with '*' but are NOT anonymous —
          AutoCAD's audit flags them when marked so */
       w.b(name.startsWith('*')
         && !/^\*(model_space|paper_space)/i.test(name) ? 1 : 0);
       w.b(hasAttdefs ? 1 : 0);            /* has attdefs */
-      /* an external reference's block goes out as an ordinary empty
-         block: its record written with the attachment flags, path and
-         insert list — bit-identical in its data to the reference's own
-         save — was refused or hung the reference in every variant tried
-         (flags, loaded on/off, owned count, insert handles); the cause is
-         not isolated yet, and a plain block opens. BlockDefinition.xref
-         keeps the path and overlay flag for the consumer meanwhile. */
-      w.b(0);                             /* xref */
-      w.b(0);                             /* overlaid */
+      w.b(attached ? 1 : 0);              /* xref */
+      w.b(attached && xref!.overlay ? 1 : 0);   /* overlaid */
       if (V >= 2000) w.b(0);              /* loaded (R2000+) */
-      if (V >= 2004) w.bl(ownedEnts.length);
+      if (V >= 2004 && !attached) w.bl(ownedEnts.length);
       w.bd3(base.x, base.y, base.z ?? 0);
-      w.t('');                            /* xref path */
+      w.t(attached ? nameText(xref!.path) : '');   /* xref path */
       if (V >= 2000) {
         /* R2000 additions — a real R14 BLOCK_HEADER ends at the xref
            path (decode-gap 0 against AutoCAD-minted R14) */
+        if (attached) for (const ih of inserts) { void ih; w.rc(1); }
         w.rc(0);                          /* insert-count run terminator */
         w.t('');                          /* description */
         w.bl(0);                          /* preview size */
@@ -3861,14 +3930,19 @@ const writeDwgImpl = (
       if (V < 2004 || xdictH) w.h(3, xdictH);   /* xdict */
       w.h(5, 0);                          /* xref */
       w.h(3, blockEnt);                   /* block begin entity */
-      if (V < 2004) {
+      if (attached) {
+        /* an attachment owns no entities: no chain, no owned list */
+      } else if (V < 2004) {
         w.h(4, ownedEnts[0] ?? 0);        /* first entity in chain */
         w.h(4, ownedEnts[ownedEnts.length - 1] ?? 0);
       } else {
         for (const eh of ownedEnts) w.h(4, eh);
       }
       w.h(3, endblkEnt);                  /* endblk */
-      if (V >= 2000) w.h(5, layoutHandle);   /* layout (R2000+) */
+      if (V >= 2000) {
+        if (attached) for (const ih of inserts) w.h(4, ih);
+        w.h(5, layoutHandle);             /* layout (R2000+) */
+      }
     }, xdictH);
   };
 
@@ -4347,7 +4421,9 @@ const writeDwgImpl = (
       blockEntH.get(nm)!,
       drawing.blocks[nm].basePoint, layoutOfBlock.get(nm) ?? 0, sortentsFor.get(bh)?.dict,
       blockEnts.get(nm)!.some(
-        (e) => e.type === 'text' && e.attribute === 'attdef'));
+        (e) => e.type === 'text' && e.attribute === 'attdef'),
+      isXrefBlock(nm) ? drawing.blocks[nm].xref : undefined,
+      isXrefBlock(nm) ? insertsOf(nm) : []);
   }
 
   makeBlockEnt(msBlockEnt, msBH, '*MODEL_SPACE');

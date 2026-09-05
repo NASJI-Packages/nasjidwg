@@ -782,9 +782,12 @@ export interface Layer {
    *  handle, so this is what keeps retained records valid. */
   handle?: string;
   /** The record belongs to an external reference (its name is spelled
-   *  `xref|layer`); it exists only while that file is attached, so a
-   *  writer leaves it out — the reference audits an ordinary record with
-   *  a bar in its name. */
+   *  `xref|layer`); it exists only while that file is attached. The DWG
+   *  writers carry it only beside the block named before the bar when
+   *  that block is written as an attachment (`BlockDefinition.xref`,
+   *  R2000+), flagged dependent so the reference treats it as the
+   *  attachment's own; with no such block it stays home — the reference
+   *  audits an ordinary record with a bar in its name. */
   xrefDependent?: boolean;
 }
 

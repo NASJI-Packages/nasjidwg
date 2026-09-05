@@ -4,7 +4,7 @@
 import { describe, expect, it } from 'vitest';
 import { readDwg } from '../src/dwg/reader.js';
 import { ByteSink } from '../src/dwg/bitwriter.js';
-import { writeDwg2000, writeDwg2004, writeDwg2007, writeDwg2018 } from '../src/dwg/writer.js';
+import { writeDwg2000, writeDwg2004, writeDwg2007, writeDwg2018, writeDwgR14 } from '../src/dwg/writer.js';
 import { emptyDrawing } from '../src/core/model.js';
 import type { Drawing, Entity } from '../src/core/model.js';
 
@@ -295,5 +295,78 @@ describe('assembly byte sink', () => {
     sink.push(0xcd);                  /* the push that used to throw */
     expect(sink.at(sink.length - 1)).toBe(0xcd);
     expect(sink.at(sink.length - 2)).toBe(0xab);
+  });
+});
+
+describe('external references', () => {
+  /* Two attachments — one overlaid — with the records the referenced
+     file lends the drawing (`xref|name`), plus a stray dependent layer
+     whose attachment is not in the drawing at all. Modelled on the
+     reference's A-01 sheet (Wall Base / Grid Plan), whose rewrite it
+     opens with both attachments resolved and AUDIT clean. */
+  const build = (): Drawing => {
+    const d = emptyDrawing();
+    d.blocks['Wall Base'] = {
+      name: 'Wall Base', basePoint: { x: 0, y: 0, z: 0 }, entities: [],
+      xref: { path: '.\\Res\\Wall Base.dwg' }
+    };
+    d.blocks['Grid Plan'] = {
+      name: 'Grid Plan', basePoint: { x: 0, y: 0, z: 0 }, entities: [],
+      xref: { path: 'X:\\shared\\Grid Plan.dwg', overlay: true }
+    };
+    d.linetypes.push({
+      name: 'Wall Base|DASHED', description: 'dashed', pattern: [0.5, -0.25],
+      xrefDependent: true
+    });
+    d.layers.push(
+      { name: 'Wall Base|A-WALL', color: { kind: 'aci', index: 3 }, on: true,
+        frozen: false, locked: false, linetype: 'Wall Base|DASHED', xrefDependent: true },
+      { name: 'Grid Plan|GRID', color: { kind: 'aci', index: 131 }, on: true,
+        frozen: false, locked: false, xrefDependent: true },
+      /* no "Gone" attachment: this one has nothing to belong to */
+      { name: 'Gone|A-DOOR', color: { kind: 'aci', index: 1 }, on: true,
+        frozen: false, locked: false, xrefDependent: true }
+    );
+    d.textStyles.push({ name: 'Wall Base|Notes', font: 'arial.ttf', xrefDependent: true });
+    const insert = (blockName: string, x: number): Entity => ({
+      type: 'insert', layer: '0', color: { kind: 'byLayer' }, blockName,
+      position: { x, y: 0, z: 0 }
+    });
+    d.entities.push(insert('Wall Base', 0), insert('Grid Plan', 10), insert('Wall Base', 20));
+    return d;
+  };
+
+  const writers = [
+    ['2018', writeDwg2018], ['2007', writeDwg2007],
+    ['2004', writeDwg2004], ['2000', writeDwg2000]
+  ] as const;
+  for (const [label, write] of writers) {
+    it(`${label}: an attachment keeps its path, overlay flag and dependent records`, () => {
+      const res = write(build());
+      /* only the record with no attachment to belong to stays home */
+      expect(res.skipped).toContain('1 xref-dependent table records');
+      const back = readDwg(res.data);
+      expect(back.blocks['Wall Base'].xref).toEqual({ path: '.\\Res\\Wall Base.dwg' });
+      expect(back.blocks['Grid Plan'].xref).toEqual({ path: 'X:\\shared\\Grid Plan.dwg', overlay: true });
+      expect(back.blocks['Wall Base'].entities).toEqual([]);
+      const wall = back.layers.find((l) => l.name === 'Wall Base|A-WALL');
+      expect(wall?.xrefDependent).toBe(true);
+      expect(wall?.linetype).toBe('Wall Base|DASHED');
+      expect(back.layers.find((l) => l.name === 'Grid Plan|GRID')?.xrefDependent).toBe(true);
+      expect(back.layers.some((l) => l.name === 'Gone|A-DOOR')).toBe(false);
+      expect(back.linetypes.find((lt) => lt.name === 'Wall Base|DASHED')?.xrefDependent).toBe(true);
+      expect(back.textStyles.find((s) => s.name === 'Wall Base|Notes')?.xrefDependent).toBe(true);
+      const inserts = back.entities.filter((e) => e.type === 'insert');
+      expect(inserts.map((e) => e.type === 'insert' && e.blockName))
+        .toEqual(['Wall Base', 'Grid Plan', 'Wall Base']);
+    });
+  }
+
+  it('R14 keeps an attachment as a plain block and its records at home', () => {
+    const res = writeDwgR14(build());
+    expect(res.skipped).toContain('5 xref-dependent table records');
+    const back = readDwg(res.data);
+    expect(back.blocks['Wall Base'].xref).toBeUndefined();
+    expect(back.layers.some((l) => /\|/.test(l.name))).toBe(false);
   });
 });
