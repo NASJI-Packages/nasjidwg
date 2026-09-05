@@ -574,9 +574,18 @@ export const readDwg = (
       if (t?.name && !isStem(t)) fixed.add(t.name);
     }
     const taken = new Set<string>();
+    /* the current paper space keeps the bare *Paper_Space name whatever
+       its place in the file: the further layouts are the numbered ones,
+       and a writer tells them apart by exactly that (seventeen two-layout
+       samples lost a layout's viewports when the other record came first) */
+    const currentPaper = paperSpaceHandle !== undefined ? blockHeaderByHandle.get(paperSpaceHandle) : undefined;
+    if (currentPaper?.table?.name && /^\*paper_space$/i.test(currentPaper.table.name)) {
+      taken.add(currentPaper.table.name);
+    }
     for (const bh of blockHeaderByHandle.values()) {
       const t = bh.table;
       if (!t?.name) continue;
+      if (bh === currentPaper && taken.has(t.name)) continue;
       const anonStem = isStem(t);
       if (anonStem && t.name === '*U') {
         const trueName = trueNameOf(t.xdata);

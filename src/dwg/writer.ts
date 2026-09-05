@@ -1201,6 +1201,18 @@ const writeDwgImpl = (
         skipped.push(e.sourceType);
         return false;
       }
+      /* An INSERT of a block this drawing does not define has no record
+         to write. It has to leave the list HERE, before the handles are
+         handed out: dropped later, at encoding time, its handle stayed in
+         the space's sibling chain (R13-R2000 prev/next, the block
+         header's first/last entity) and in the R2004+ owned-entity list,
+         and the reference refuses a chain that names a missing object
+         (ErrorStatus 53, proven on a block reduced to one line and one
+         such insert). */
+      if (e.type === 'insert' && !blockH.has(e.blockName)) {
+        skipped.push('insert:' + e.blockName);
+        return false;
+      }
       if (SUPPORTED.has(e.type)) return true;
       skipped.push(e.type);
       return false;
@@ -1389,6 +1401,25 @@ const writeDwgImpl = (
   const CLS_MLEADERSTYLE = usesMLeaders ? clsNext++ : 0;
   const mleaderDictH = usesMLeaders ? H() : 0;
   const mleaderStyleH = usesMLeaders ? H() : 0;
+  /* Column MTEXT before R2007: the further columns are MTEXT entities of
+     their own, named by handle in the first column's ACAD_MTEXT_COLUMNS
+     xdata. The reference re-attaches them on load only for the parents
+     an ACDB_RECOMPOSE_DATA record under the named objects dictionary
+     lists (90 = 1, then one 330 per parent) — with the record the columns
+     load as one MTEXT, without it as two, xdata identical (externally
+     proven on the reference's own R2000 DXF of its Text-and-Tables
+     sample: removing that one record alone is what splits them). R14
+     knows XRECORD as an application class; R2000 gave it fixed type 79.
+     R2007+ carry the columns in the MTEXT record itself. */
+  const isColumnParent = (e: Entity): boolean => e.type === 'mtext'
+    && !!e.xdata?.some((g) => g.values.some((v) => 'value' in v
+      && v.code === 1000 && v.value === 'ACAD_MTEXT_COLUMNS_BEGIN'));
+  const columnParents = V >= 14 && V < 2007
+    ? [modelEnts, paperEnts, ...userBlocks.map((nm) => blockEnts.get(nm)!)]
+      .flat().filter(isColumnParent)
+    : [];
+  const CLS_XRECORD = V <= 14 && columnParents.length ? clsNext++ : 0;
+  const recomposeH = columnParents.length ? H() : 0;
   /* PDF/DGN/DWF underlays: a class pair and a shared definition per kind */
   const underlayKinds = [...new Set(allEnts
     .filter((e): e is Entity & { type: 'underlay' } => e.type === 'underlay')
@@ -4145,6 +4176,8 @@ const writeDwgImpl = (
     ['ACAD_MLINESTYLE', mlineDict],
     ...(usesMLeaders
       ? [['ACAD_MLEADERSTYLE', mleaderDictH] as [string, number]] : []),
+    ...(recomposeH
+      ? [['ACDB_RECOMPOSE_DATA', recomposeH] as [string, number]] : []),
     ...(geoData ? [['ACAD_GEOGRAPHICDATA', geoDataH] as [string, number]] : []),
     /* proxy objects keep their dictionary names; an unnamed one (its
        owner was not the NOD in the source) still needs a key here */
@@ -4163,6 +4196,23 @@ const writeDwgImpl = (
     return out;
   }, []));
   makeDictionary(groupDict, nod, []);
+  if (recomposeH) {
+    /* the XRECORD's data is a byte-counted run of (RS group, value):
+       RL for 90, an absolute 64-bit handle for 330 — walked bit-exact
+       off the reference's own R14 and R2000 saves */
+    const parents = columnParents
+      .map((e) => entH.get(e))
+      .filter((h): h is number => h !== undefined);
+    makeObject(V <= 14 ? CLS_XRECORD : 79, recomposeH, (w) => {
+      w.bl(6 + 10 * parents.length);
+      w.rs(90); w.rl(1);
+      for (const h of parents) { w.rs(330); w.rll(h); }
+      if (V >= 2000) w.bs(1);             /* cloning flag (R2000+) */
+    }, (w) => {
+      w.h(4, nod);
+      if (V < 2004) w.h(3, 0);            /* xdict */
+    });
+  }
   /* the dictionary names the STANDARD style in every release */
   makeDictionary(mlineDict, nod, [['STANDARD', mlineStandardH]]);
   if (usesMLeaders) {
