@@ -250,8 +250,10 @@ describe('a tree dictionary of another generation', () => {
         encoding: gen, dictPath: ['AcadDim'], ...xrecordBits(values, gen)
       },
       {
-        /* a class object of that generation: wrapped, so never listed by
-           the reference's own dictionary — re-homed flat under the root */
+        /* a class object of that generation — one of the reference's own
+           classes, so it leaves as a proxy under the filer that wrote
+           its bits (which the reference unwraps on open) and stays
+           listed by the dictionary like a native record */
         handle: 'E2', ownerHandle: 'E0', name: 'S1', sourceType: 'SCALE',
         appClass: { dxfName: 'SCALE', cppName: 'AcDbScale', appName: 'ObjectDBX Classes' },
         encoding: gen, dictPath: ['AcadDim'], data: 'gA==', dataBits: 2
@@ -273,18 +275,24 @@ describe('a tree dictionary of another generation', () => {
     const dict = back.unknownObjects?.find((u) => u.handle === 'E0');
     expect(dict?.name).toBe('AcadDim');
     expect(dict?.dictPath).toEqual([]);
-    expect(dict?.entries).toEqual([{ name: 'X1', handle: 'E1', code: 2 }]);
+    expect(dict?.entries).toEqual([
+      { name: 'X1', handle: 'E1', code: 2 }, { name: 'S1', handle: 'E2', code: 2 }
+    ]);
     const rec = back.unknownObjects?.find((u) => u.handle === 'E1');
     expect(rec && kindOf(rec)).toBe('XRECORD');
     expect(rec?.ownerHandle).toBe('E0');
     expect(rec?.dictPath).toEqual(['AcadDim']);
     expect(back.xrecords?.find((x) => x.handle === 'E1')?.values)
       .toEqual([{ code: 1, value: 'AB' }, { code: 70, value: 5 }, { code: 330, value: 'A0' }]);
-    /* the scale is in the file, under the root, in its own generation */
+    /* the scale is in the file, listed where it was, in its own
+       generation: a filer-tagged proxy re-sealed by the reader */
     const scale = back.unknownObjects?.find((u) => u.handle === 'E2');
     expect(scale && kindOf(scale)).toBe('SCALE');
-    expect(scale?.dictPath).toEqual([]);
+    expect(scale?.dictPath).toEqual(['AcadDim']);
+    expect(scale?.ownerHandle).toBe('E0');
     expect(scale?.encoding).toBe(gen);
+    expect(scale?.data).toBe('gA==');
+    expect(scale?.dataBits).toBe(2);
   });
 
   it('a decode that stopped short keeps its bits, and a wrapped XRECORD stays home rather than ride a tree dictionary', () => {
@@ -295,10 +303,11 @@ describe('a tree dictionary of another generation', () => {
     expect(res.skipped).toEqual(["XRECORD (of another generation, listed by one of the reference's own dictionaries)"]);
     const back = readDwg(res.data);
     expect(back.unknownObjects?.some((u) => u.handle === 'E1')).toBe(false);
-    /* the dictionary had nothing native left to list: dropped quietly;
-       the scale is re-homed under the root as before */
-    expect(back.unknownObjects?.some((u) => u.handle === 'E0')).toBe(false);
-    expect(back.unknownObjects?.find((u) => u.handle === 'E2')?.dictPath).toEqual([]);
+    /* the dictionary still lists the scale — a filer-tagged proxy of one
+       of the reference's own classes counts as native — so it stays */
+    expect(back.unknownObjects?.find((u) => u.handle === 'E0')?.entries)
+      .toEqual([{ name: 'S1', handle: 'E2', code: 2 }]);
+    expect(back.unknownObjects?.find((u) => u.handle === 'E2')?.dictPath).toEqual(['AcadDim']);
   });
 
   it("the reference's standard visual styles are dropped as a set; another name is reported", () => {
@@ -318,12 +327,16 @@ describe('a tree dictionary of another generation', () => {
       vs('F1', 'Conceptual'), vs('F2', 'MyStyle')
     ];
     const res = writeDwg2018(d, { preserveHandles: true });
-    expect(res.skipped.sort()).toEqual([
-      "1 VISUALSTYLE records (the reference's standard set, in another generation's spelling; recreated on open)",
-      "VISUALSTYLE (of another generation, listed by one of the reference's own dictionaries)"
+    expect(res.skipped).toEqual([
+      "1 VISUALSTYLE records (the reference's standard set, in another generation's spelling; recreated on open)"
     ]);
+    /* the other name travels: a filer-tagged proxy of the reference's own
+       class, listed by its dictionary, re-sealed in its generation */
     const back = readDwg(res.data);
-    expect(back.unknownObjects?.some((u) => kindOf(u) === 'VISUALSTYLE') ?? false).toBe(false);
+    const styles = (back.unknownObjects ?? []).filter((u) => kindOf(u) === 'VISUALSTYLE');
+    expect(styles.map((u) => u.handle)).toEqual(['F2']);
+    expect(styles[0].dictPath).toEqual(['ACAD_VISUALSTYLE']);
+    expect(styles[0].encoding).toBe(2007);
   });
 });
 

@@ -114,8 +114,9 @@ describe.each(VERSIONS)('proxy passthrough %s', (version) => {
     expect(proxy).toBeTruthy();
     expect(proxy?.sourceType).toBe('MPOLYGON');
     if (version !== 'R13' && version !== 'R14') {
-      /* R13/R14 have no CLASSES section to carry the names back out */
-      expect(proxy?.appClass).toEqual({
+      /* R13/R14 have no CLASSES section to carry the names back out;
+         R2004+ records carry the class's version pair beside the names */
+      expect(proxy?.appClass).toMatchObject({
         dxfName: 'MPOLYGON', cppName: 'AcDbMPolygon', appName: 'AcMPolygonObj15'
       });
     }

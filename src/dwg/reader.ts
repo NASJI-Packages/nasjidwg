@@ -1032,6 +1032,13 @@ export const readDwg = (
       const key = CONTROL_KEYS[raw.typeName];
       if (key && !structure[key]) structure[key] = hexOf(raw.handle);
     }
+    /* the two space block headers: `Layout.blockHandle` names them where
+       the file carries LAYOUT objects, but an R13/R14 file of this
+       library's own has none, and the block headers' extension
+       dictionaries (the reference's ACAD_LAYOUTSELFREF records) need
+       their owner's number on the next generation too */
+    if (modelSpaceHandle !== undefined) structure.MODEL_SPACE = hexOf(modelSpaceHandle);
+    if (paperSpaceHandle !== undefined) structure.PAPER_SPACE = hexOf(paperSpaceHandle);
     if (Object.keys(structure).length) drawing.structureHandles = structure;
   }
   /** Whether a tree dictionary lists a record among its entries (as
@@ -1071,6 +1078,8 @@ export const readDwg = (
         handle: raw.handle.toString(16).toUpperCase(),
         name: dictNameOf.get(raw.handle),
         ownerHandle: raw.owner?.toString(16).toUpperCase(),
+        ...(raw.xdict ? { xdict: hexOf(raw.xdict) } : {}),
+        ...(raw.reactors?.length ? { reactors: raw.reactors.map(hexOf) } : {}),
         ...raw.proxyObject
       });
     }

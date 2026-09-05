@@ -985,7 +985,7 @@ const writeDwgImpl = (
     /* and the rest of what keeps its number: layouts, views, viewports,
        dimension styles, groups, the table and multileader styles, the
        structural objects (controls, the root and its sub-dictionaries) */
-    for (const l of drawing.layouts ?? []) scanH(l.handle);
+    for (const l of drawing.layouts ?? []) { scanH(l.handle); scanH(l.blockHandle); }
     for (const vw of drawing.views ?? []) scanH(vw.handle);
     for (const vp of drawing.vports ?? []) scanH(vp.handle);
     for (const ds of drawing.dimStyles ?? []) scanH(ds.handle);
@@ -1218,8 +1218,8 @@ const writeDwgImpl = (
   const mlineStyleFor = (name?: unknown): number =>
     (typeof name === 'string' && mlineStyleH.get(name.toLowerCase())) || mlineStandardH;
 
-  /* block headers: model, paper, then user blocks */
-  const msBH = H(), psBH = H();
+  /* block headers: model, paper (allocated below, once the layouts behind
+     them are known), then user blocks */
   /* Every layout beyond the current paper space arrives as a block named
      *Paper_Space<n> (both readers keep them that way, linked from
      drawing.layouts by blockName). From R2000 on they go out as what
@@ -1257,12 +1257,26 @@ const writeDwgImpl = (
       && l.blockName?.toLowerCase() === nm.toLowerCase());
     return { nm, meta, h: keepH(meta?.handle) };
   });
-  const mapSpace = (meta: { blockHandle?: string } | undefined, h: number): void => {
-    const old = meta?.blockHandle ? parseInt(meta.blockHandle, 16) : NaN;
-    if (Number.isFinite(old) && old > 0 && !oldToNew.has(old)) oldToNew.set(old, h);
+  /* The two space block headers keep their source numbers under
+     preserveHandles like every other owner: the layout's `blockHandle`
+     names them where the source carried LAYOUT objects, and the reader's
+     `structureHandles` (MODEL_SPACE / PAPER_SPACE) where it did not — an
+     R13/R14 file of this library's own has no LAYOUT records, and with
+     fresh numbers minted here on every generation, a block header's
+     extension dictionary (the reference's ACAD_LAYOUTSELFREF chain)
+     found no owner on the second one. Without preserveHandles keepH
+     mints fresh numbers and still maps the source's to them, so a
+     sealed record owned by a space block follows either way. */
+  const msBH = keepH(modelMeta?.blockHandle ?? sh('MODEL_SPACE'));
+  const psBH = keepH(paperMeta?.blockHandle ?? sh('PAPER_SPACE'));
+  const mapSpace = (meta: { blockHandle?: string } | undefined, key: string, h: number): void => {
+    for (const src of [meta?.blockHandle, sh(key)]) {
+      const old = src ? parseInt(src, 16) : NaN;
+      if (Number.isFinite(old) && old > 0 && !oldToNew.has(old)) oldToNew.set(old, h);
+    }
   };
-  mapSpace(modelMeta, msBH);
-  mapSpace(paperMeta, psBH);
+  mapSpace(modelMeta, 'MODEL_SPACE', msBH);
+  mapSpace(paperMeta, 'PAPER_SPACE', psBH);
   const userBlocks = Object.keys(drawing.blocks)
     .filter((nm) => (V >= 2000 && isExtraPaper(nm))
       || (!/^\*(model_space|paper_space)/i.test(nm) && !drawing.blocks[nm].isLayout));
@@ -1295,6 +1309,11 @@ const writeDwgImpl = (
      re-saves), and ours reopen there at AUDIT 0 with the census intact —
      so those two travel. */
   const CLASS_ONLY = new Set(['light', 'underlay']);
+  /** A record that arrived through DXF as tags alone (no bits), of a
+   *  class the DXF named: written as a proxy in DXF format (R2000+),
+   *  the reference's own spelling for such a record. */
+  const tagSealed = (p: { data?: string; tags?: [number, string][]; appClass?: { dxfName: string } }): boolean =>
+    V >= 2000 && !p.data && !!p.tags?.length && !!p.appClass?.dxfName;
 
   const downgraded: string[] = [];
   /** R2018: the solids whose SAB payloads ride the AcDs data section,
@@ -1348,7 +1367,7 @@ const writeDwgImpl = (
       /* Sealed unknowns pass through; a bare unknown (no retained bits,
          e.g. one that arrived through DXF) still has nothing to write. */
       if (e.type === 'unknown') {
-        if (e.data || e.graphicsData) return true;
+        if (e.data || e.graphicsData || tagSealed(e)) return true;
         skipped.push(e.sourceType);
         return false;
       }
@@ -1552,12 +1571,19 @@ const writeDwgImpl = (
    *  first number it sees. */
   const proxyClsH = new Map<string, {
     num: number; cpp: string; app: string; ent: boolean;
+    /** the class record's version pair, when the source carried one */
+    ver?: number; maint?: number;
   }>();
-  const clsFor = (dxf: string, cpp: string, app: string, ent: boolean): number => {
+  const clsFor = (
+    dxf: string, cpp: string, app: string, ent: boolean, ver?: number, maint?: number
+  ): number => {
     const have = proxyClsH.get(dxf);
-    if (have) return have.num;
+    if (have) {
+      if (have.ver === undefined && ver !== undefined) { have.ver = ver; have.maint = maint; }
+      return have.num;
+    }
     const num = clsNext++;
-    proxyClsH.set(dxf, { num, cpp, app, ent });
+    proxyClsH.set(dxf, { num, cpp, app, ent, ver, maint });
     return num;
   };
   /* proxy passthrough: each distinct application class behind a proxy gets
@@ -1566,11 +1592,13 @@ const writeDwgImpl = (
      no CLASSES section but predate the class-id indirection too: their
      zombie records carry the id verbatim, so passthrough still works. */
   const addProxyCls = (
-    appClass: { dxfName: string; cppName: string; appName: string } | undefined,
+    appClass: { dxfName: string; cppName: string; appName: string;
+      dwgVersion?: number; maintVersion?: number } | undefined,
     sourceType: string | undefined, fallback: string, ent: boolean
   ): void => {
     const key = appClass?.dxfName ?? sourceType ?? fallback;
-    clsFor(key, appClass?.cppName ?? key, appClass?.appName ?? 'ObjectDBX Classes', ent);
+    clsFor(key, appClass?.cppName ?? key, appClass?.appName ?? 'ObjectDBX Classes', ent,
+      appClass?.dwgVersion, appClass?.maintVersion);
   };
   const CLS_IMAGE = usesImages ? clsFor('IMAGE', 'AcDbRasterImage', 'ISM', true) : 0;
   const CLS_IMAGEDEF = usesImages ? clsFor('IMAGEDEF', 'AcDbRasterImageDef', 'ISM', false) : 0;
@@ -1663,7 +1691,7 @@ const writeDwgImpl = (
     }
     /* sealed unknowns that are class records need their class re-emitted;
        fixed-type ones (typeCode) go out under their original number */
-    if (e.type === 'unknown' && (e.data || e.graphicsData)
+    if (e.type === 'unknown' && (e.data || e.graphicsData || tagSealed(e))
         && e.typeCode === undefined) {
       addProxyCls(e.appClass, e.sourceType, 'ACAD_PROXY_ENTITY', true);
     }
@@ -1771,6 +1799,89 @@ const writeDwgImpl = (
   const wrapped = (p: Sealed): boolean =>
     p.data !== undefined && p.encoding !== encodingGroup(V)
     && !isDict(p) && kindOf(p) !== 'ACDBPLACEHOLDER' && typedXrecord(p) === undefined;
+  /** Whether a class is the reference's own — one it loads itself, so a
+   *  proxy record of that class it unwraps on open: the classes it
+   *  registers as "ObjectDBX Classes", its image and light enabler
+   *  (ISM), its wipeout enabler, and the older per-class application
+   *  names of its own (ACDB_MLEADERSTYLE_CLASS and kin). */
+  const refClass = (p: { appClass?: { appName: string } }): boolean => {
+    const app = p.appClass?.appName ?? '';
+    return /^(ObjectDBX Classes|ISM|SCENEOE)$/i.test(app)
+      || /^"?WipeOut/i.test(app) || /^ACDB_\w+_CLASS$/i.test(app);
+  };
+  /** A foreign-generation seal that leaves in this library's own
+   *  envelope (SEAL_MAGIC): the payload of a class that is not the
+   *  reference's, which it can only keep as an unknown proxy. A seal
+   *  of one of the reference's own classes leaves as a proxy under the
+   *  version word of the filer that wrote the bits instead (see
+   *  filerProxy below), and the reference unwraps it on open — so for
+   *  the listing rules below it counts as native. */
+  const filerProxy = (p: Sealed): boolean =>
+    wrapped(p) && refClass(p) && p.typeCode === undefined
+    /* The associative framework — AcDbAssoc* and the dependency bodies —
+       into R2007: unwrapped from the filer-tagged form the reference
+       repairs the drawing on open (24 AUDIT fixes on Structural - Metric,
+       six of its fourteen constraint parameters erased with them; with
+       the family alone left opaque the graphs and every parameter stay
+       native at AUDIT 0, and the same records unwrap clean in a 2004
+       file — measured on four patched variants). In the private
+       envelope it keeps them as it always did, opaque but whole. */
+    && !(V === 2007 && (kindOf(p).startsWith('ACDBASSOC')
+      || kindOf(p).startsWith('ASSOC') || /DEPENDENCYBODY$/.test(kindOf(p))));
+  const sealWrap = (p: Sealed): boolean => wrapped(p) && !filerProxy(p);
+  /** The groups of a DXF-born record that are the record's own data —
+   *  what the reference keeps in a DXF-format proxy (bit-walked on its
+   *  2000/2004/2018 saves of a probe: the payload opened with the
+   *  subclass marker, nothing of the common section before it). Left
+   *  out: the handle (5), the fenced runs ({ACAD_REACTORS …}, the
+   *  extension dictionary), the owner (the first 330 before the first
+   *  marker) and the extended data (1000+), which the record's own
+   *  prologue carries. */
+  const payloadGroups = (tags: [number, string][]): [number, string][] => {
+    const out: [number, string][] = [];
+    let fenced = false, marker = false, ownerSeen = false, common = false;
+    for (const [c, v] of tags) {
+      if (c === 102) { fenced = v.trim().startsWith('{'); continue; }
+      if (fenced) continue;
+      if (c === 0 || c === 5 || c >= 1000) continue;
+      /* an entity's AcDbEntity section (layer, colour, linetype, the
+         cached graphics …) is the record's common data, written by the
+         prologue: the reference's own DXF-format proxy of an entity
+         keeps nothing of it (probed: the payload opens with the class's
+         own marker) */
+      if (c === 100) {
+        marker = true;
+        common = /^AcDbEntity$/i.test(v.trim());
+        if (common) continue;
+      } else if (common) continue;
+      if (c === 330 && !marker && !ownerSeen) { ownerSeen = true; continue; }
+      out.push([c, v]);
+    }
+    return out;
+  };
+  /** Drawing-format codes, as a proxy's version word spells the filer
+   *  that wrote its payload, and the encoding group of each release. */
+  const FORMAT_CODE: Record<string, number> = {
+    R13: 19, R14: 21, R2000: 23, R2004: 25, R2007: 27, R2010: 29, R2013: 31, R2018: 33
+  };
+  const GROUP_OF_VERSION: Record<string, number> = {
+    R13: 14, R14: 14, R2000: 2000, R2004: 2004, R2007: 2007, R2010: 2018, R2013: 2018, R2018: 2018
+  };
+  /** The format code of a seal's bits: the source file's own release
+   *  when the seal's group is the file's (an R2010 file's records are
+   *  R2010 bits, though the group says 2018), else the group's first. */
+  const formatCodeOf = (enc: number | undefined): number => {
+    const hv = drawing.header.version ?? '';
+    if (enc !== undefined && GROUP_OF_VERSION[hv] === enc) return FORMAT_CODE[hv];
+    return enc === 14 ? 21 : enc === 2000 ? 23 : enc === 2004 ? 25 : enc === 2007 ? 27 : 33;
+  };
+  /** This file's own format code (what a DXF-born record is stamped
+   *  with when the DXF's release is unknown). */
+  const OWN_CODE = V <= 14 ? 21 : V === 2000 ? 23 : V === 2004 ? 25 : V === 2007 ? 27 : 33;
+  /** The format code a DXF-born record's tags are stamped with: the
+   *  DXF's own release (the reference stamps 23 on the proxies it makes
+   *  of an AC1015 DXF's unknown classes). */
+  const DXF_CODE = FORMAT_CODE[drawing.header.version ?? ''] ?? OWN_CODE;
   /** The reference's own visual styles, by name: the set it creates in
    *  every drawing (the 16 of 2007, the 19 of 2010). A drawing of another
    *  generation cannot carry them across — the family changed spelling
@@ -1811,11 +1922,25 @@ const writeDwgImpl = (
        without its sealed objects beats one that does not open at all.
        A dictionary is re-encoded from its entries and an XRECORD from its
        typed values, so their bits' generation does not matter. */
-    if (foreign && (V === 2004 || V < 2000)) return p.sourceType ?? p.name ?? 'sealed object';
+    if (foreign && V < 2000) return p.sourceType ?? p.name ?? 'sealed object';
+    /* the reference's own classes leave R2004 as filer-tagged proxies in
+       its own spelling (the "cn:" text before the version word — its
+       2004 re-save of an R2007 payload, bit-walked); the private
+       envelope of any other class is what every spelling tried was */
+    if (foreign && V === 2004 && !filerProxy(p)) return p.sourceType ?? p.name ?? 'sealed object';
+    /* A DXF-born view style: the reference checks the entries of its
+       section- and detail-view-style dictionaries for the class BEFORE
+       it unwraps a DXF-format proxy (measured: listed, the entry is
+       deleted "eNotThatKindOfClass" and the default style recreated;
+       flat under the root the same proxy unwraps at AUDIT 0 — but an
+       unlisted style is nothing to the reference either). */
+    if (tagSealed(p) && /^ACDB(SECTION|DETAIL)VIEWSTYLE$/.test(kind)) {
+      return `${kind} (from DXF; the reference checks its view-style dictionaries before unwrapping a DXF-format proxy)`;
+    }
     /* the annotative context records of a later generation, wrapped for
        R2007: refused as a group by the reference (an AC1024 sample's 27 of
        them, each alone accepted at R2018) */
-    if (V === 2007 && foreign && /OBJECTCONTEXTDATA/.test(kind)) return p.sourceType ?? kind;
+    if (V === 2007 && foreign && !filerProxy(p) && /OBJECTCONTEXTDATA/.test(kind)) return p.sourceType ?? kind;
     /* R2010 and R2013+ share one encoding group here (there is no R2010
        writer), but two families changed their spelling at R2013: the
        visual styles and the AcDbAssoc* framework. Their R2010 bits
@@ -1854,7 +1979,10 @@ const writeDwgImpl = (
   const hasRecord = (p: Sealed): boolean =>
     !!p.data || p.typeCode !== undefined || isDict(p)
     || (p.encoding !== undefined && !!p.xdata?.length
-        && !!(p.appClass?.dxfName ?? p.sourceType));
+        && !!(p.appClass?.dxfName ?? p.sourceType))
+    /* a DXF-born record of a named class: its tags are its record, in
+       DXF format (the reference's own spelling for such an object) */
+    || tagSealed(p);
   /** The named-object dictionaries this writer builds itself. A sealed
    *  dictionary of the tree that carries one of these keys (the source's
    *  own ACAD_LAYOUT, say, sealed on a previous read of a file of ours)
@@ -1960,6 +2088,12 @@ const writeDwgImpl = (
       addRef(b.handle); scanRefs(b.entities);
     }
     addRef(modelMeta?.blockHandle); addRef(paperMeta?.blockHandle);
+    /* the two space blocks by the reader's structure handles as well: an
+       R13/R14 file of this library's own has no LAYOUT objects to name
+       them through, and their extension dictionaries (the reference's
+       ACAD_LAYOUTSELFREF chain) were "of an object not written" on the
+       second generation */
+    addRef(sh('MODEL_SPACE')); addRef(sh('PAPER_SPACE'));
     for (const p of drawing.proxyObjects ?? []) addRef(p.handle);
     for (const ly of drawing.layers) addRef(ly.handle);
     for (const lt of drawing.linetypes) addRef(lt.handle);
@@ -2043,7 +2177,21 @@ const writeDwgImpl = (
     if (!written(en.handle)) return false;
     if (d.dictPath === undefined) return true;
     const t = sealedByH.get(en.handle.toUpperCase());
-    return !t || !wrapped(t);
+    return !t || !sealWrap(t);
+  };
+  /** The references a DXF-born record's tags carry (handle-typed groups
+   *  past the common section), as the reference codes they become in
+   *  its handle stream: 330 soft pointer 4, 340 hard pointer 5, 350 soft
+   *  owner 2, 360 hard owner 3, the arbitrary 320s soft (4), the 390s
+   *  hard (5). */
+  const tagRefs = (p: { tags?: [number, string][] }): { code: number; value: string }[] => {
+    const out: { code: number; value: string }[] = [];
+    for (const [c, v] of payloadGroups(p.tags ?? [])) {
+      if (resbufKind(c) !== 'handle') continue;
+      const code = c >= 390 ? 5 : c >= 360 ? 3 : c >= 350 ? 2 : c >= 340 ? 5 : 4;
+      out.push({ code, value: v.trim().toUpperCase() });
+    }
+    return out;
   };
   for (const p of sealedAll) {
     /* the reference's own visual styles of another spelling: dropped as
@@ -2093,7 +2241,7 @@ const writeDwgImpl = (
           } else if (!ownerIn) {
             why = `${p.sourceType ?? kind} (extension dictionary of an object not written)`;
           }
-        } else if (wrapped(p) && ownerTree && chained(p)) {
+        } else if (sealWrap(p) && ownerTree && chained(p)) {
           /* a seal-wrap inside the reference's own dictionary is audited,
              and this kind is refused re-homed anywhere else */
           why = `${p.sourceType ?? kind} (of another generation, listed by one of the reference's own dictionaries)`;
@@ -2101,7 +2249,7 @@ const writeDwgImpl = (
           why = isXrecord(p)
             ? `${p.sourceType ?? kind} (its owner is not written)`
             : p.sourceType ?? kind;
-        } else if (!(p.refs ?? []).every((r) =>
+        } else if (!(p.refs ?? (tagSealed(p) ? tagRefs(p) : [])).every((r) =>
           (r.code !== 3 && r.code !== 5) || r.value === '0' || written(r.value))) {
           why = p.sourceType ?? 'sealed object';
         }
@@ -2238,7 +2386,7 @@ const writeDwgImpl = (
     const o = outOf(p.ownerHandle);
     if (o === undefined || !p.ownerHandle) return undefined;
     const self = p.handle ? sealedByH.get(p.handle.toUpperCase()) : undefined;
-    if (self && wrapped(self)) {
+    if (self && sealWrap(self)) {
       const os = sealedByH.get(p.ownerHandle.toUpperCase());
       if (os && isDict(os) && os.dictPath !== undefined) return undefined;
     }
@@ -2498,6 +2646,119 @@ const writeDwgImpl = (
        (a seal with no string stream at all was refused; the reference's
        re-save of ours replaces whatever was there with exactly this) */
     if (V >= 2007) w.t('cn:' + (cppName ?? s.appClass?.cppName ?? 'AcDbObject'));
+  };
+
+  /** The head of a proxy record past the common data, in the spelling
+   *  the reference gives its own (bit-walked on its 2000, 2004, 2007
+   *  and 2018 saves of one probe): the class id; in the R2004 family
+   *  alone the "cn:<class>" text inline, NUL-closed; the version word —
+   *  before R2018 the drawing-format code of the filer that wrote the
+   *  payload in the low word and the maintenance number in the high,
+   *  from R2018 two words; and the from-DXF flag. R2007+ keep the "cn:"
+   *  text in the string stream instead (proxyCn). */
+  const proxyHead = (
+    w: BitWriter, clsNum: number, cpp: string, code: number, maint: number, fromDxf: boolean
+  ): void => {
+    w.bl(clsNum);
+    if (V === 2004) w.t('cn:' + cpp + '\0');
+    if (V >= 2018) { w.bl(code >>> 0); w.bl(maint >>> 0); }
+    else {
+      /* the high half: a maintenance number that fits, else its upper
+         half — the reference's 2000/2004 saves spell the 0x7FFFFFFE of
+         a DXF-format proxy as 0x7FFF; a word read from a pre-2018 file
+         goes back as it was */
+      const hi = maint > 0xffff ? (maint >>> 16) & 0xffff : maint & 0xffff;
+      w.bl(((hi << 16) | (code & 0xffff)) >>> 0);
+    }
+    if (V >= 2000) w.b(fromDxf ? 1 : 0);
+  };
+  /** The R2007+ string stream of a proxy record opens with the "cn:"
+   *  text; whatever strings the payload keeps there follow it. */
+  const proxyCn = (w: BitWriter, cpp: string): void => {
+    if (V >= 2007) w.t('cn:' + cpp);
+  };
+  /** A foreign-generation seal's payload under its own filer: the data
+   *  bits as that generation's record lays them out. An R2007+
+   *  payload's strings ride this record's own string stream (behind
+   *  "cn:") in an R2007+ file, and close the payload — stream, size
+   *  word, flag — in a pre-2007 one, a bare 0 flag when it has none;
+   *  both are the reference's own spellings (its 2018 and 2004
+   *  re-saves of an R2007-filer proxy carrying a string, bit-walked),
+   *  and the reference unwraps such a proxy of its own classes on open. */
+  const filerPayload = (
+    w: BitWriter,
+    s: { data?: string; dataBits?: number; strData?: string; strBits?: number; encoding?: number }
+  ): void => {
+    if (s.data && s.dataBits) w.putBits(fromBase64(s.data), s.dataBits);
+    if ((s.encoding ?? 0) < 2007) return;
+    if (V >= 2007) {
+      if (s.strData && s.strBits) w.strTarget?.putBits(fromBase64(s.strData), s.strBits);
+    } else if (s.strData && s.strBits) {
+      w.putBits(fromBase64(s.strData), s.strBits);
+      strStreamSize(w, s.strBits);
+      w.b(1);
+    } else {
+      w.b(0);
+    }
+  };
+  /** The payload of a DXF-format proxy — a record that arrived as DXF
+   *  tags — spelled the way the reference writes such an object into a
+   *  DWG when it cannot load its class (decoded from its 2000, 2004 and
+   *  2018 saves of one probe, every field landing on the record's last
+   *  bit; payloadGroups says what goes in): the proxy's fixed type (499
+   *  for an object, 498 an entity), the record's class number, then one
+   *  (BS code, value) pair per group — a real BD, a point three BD (the
+   *  y and z groups folded into their x), a 16-bit or 8-bit integer BS,
+   *  a 32-bit BL, a 64-bit BLL, a byte run BL n + bytes, a text TV
+   *  (inline and NUL-closed before R2007, in the string stream from
+   *  it), a handle in the handle stream under the code of tagRefs —
+   *  closed by BS 0. The reference opens such a proxy of its own
+   *  classes as the record itself. Returns the handle-stream writer. */
+  const tagPayload = (
+    w: BitWriter, p: { tags?: [number, string][] }, fixedType: number, clsNum: number
+  ): ((h: BitWriter) => void) => {
+    const groups = payloadGroups(p.tags ?? []);
+    const refs = tagRefs(p);
+    const num = (s: string): number => Number(s.trim()) || 0;
+    w.bl(fixedType);
+    w.bl(clsNum);
+    for (let i = 0; i < groups.length; i++) {
+      const [c, v] = groups[i];
+      switch (resbufKind(c)) {
+        case 'string':
+          w.bs(c);
+          if (V >= 2007) w.t(v); else w.t(outText(v) + '\0');
+          break;
+        case 'real': w.bs(c); w.bd(num(v)); break;
+        case 'point': {
+          /* the x group opens a point; its y and z (c+10, c+20) follow */
+          const isX = (c >= 10 && c <= 18) || (c >= 110 && c <= 119) || (c >= 210 && c <= 219);
+          let y = 0, z = 0;
+          if (isX) {
+            if (i + 1 < groups.length && groups[i + 1][0] === c + 10) y = num(groups[++i][1]);
+            if (i + 1 < groups.length && groups[i + 1][0] === c + 20) z = num(groups[++i][1]);
+          }
+          w.bs(c); w.bd(num(v)); w.bd(y); w.bd(z);
+          break;
+        }
+        case 'int16': case 'int8': case 'bool': w.bs(c); w.bs(num(v) & 0xffff); break;
+        case 'int32': w.bs(c); w.bl(num(v) >>> 0); break;
+        case 'int64': w.bs(c); w.bll(num(v)); break;
+        case 'binary': {
+          const hex = v.replace(/[^0-9a-fA-F]/g, '');
+          const n = hex.length >> 1;
+          w.bs(c); w.bl(n);
+          for (let k = 0; k < n; k++) w.rc(parseInt(hex.slice(k * 2, k * 2 + 2), 16));
+          break;
+        }
+        case 'handle': w.bs(c); break;      /* the value rides the handle stream */
+        default: break;                     /* an invalid group is not a value */
+      }
+    }
+    w.bs(0);
+    return (h: BitWriter): void => {
+      for (const r of refs) h.h(r.code, outOf(r.value) ?? 0);
+    };
   };
 
   /** An XRECORD's data from its typed values: the byte-counted run of
@@ -4598,11 +4859,17 @@ const writeDwgImpl = (
            still knows what the object was. */
         const key = e.appClass?.dxfName ?? e.sourceType ?? 'ACAD_PROXY_ENTITY';
         const cls = proxyClsH.get(key);
+        const cpp = e.appClass?.cppName ?? 'AcDbEntity';
         makeEntity(0x1f2, handle, e, ctx, (w) => {
-          w.bl(cls?.num ?? 0x1f2);
-          w.bl(e.proxyVersion ?? 0);
-          if (V >= 2018) w.bl(e.proxyMaint ?? 0);
-          if (V >= 2000) w.b(e.fromDxf ? 1 : 0);
+          /* the head in this release's spelling (proxyHead): the version
+             word's low half is the format code, its high half the
+             maintenance number where the source packed them together */
+          const word = e.proxyVersion ?? 0;
+          proxyHead(w, cls?.num ?? 0x1f2, cpp, word & 0xffff, e.proxyMaint ?? (word >>> 16), !!e.fromDxf);
+          if (V >= 2007) {
+            if (e.strData && e.strBits) w.strTarget?.putBits(fromBase64(e.strData), e.strBits);
+            else proxyCn(w, cpp);
+          }
           if (e.data && e.dataBits) w.putBits(fromBase64(e.data), e.dataBits);
         }, (w) => {
           for (const ref of e.refs ?? []) {
@@ -4619,7 +4886,7 @@ const writeDwgImpl = (
            format's own idiom for data the host release cannot hold —
            tagged with their generation, and unwrap back to the native
            form the next time the generations match (A→B→A). */
-        if (!e.data && !e.graphicsData) { skipped.push(e.sourceType); return; }
+        if (!e.data && !e.graphicsData && !tagSealed(e)) { skipped.push(e.sourceType); return; }
         const graphics = e.graphicsData ? fromBase64(e.graphicsData) : undefined;
         const refs = (w: BitWriter): void => {
           for (const ref of e.refs ?? []) {
@@ -4627,6 +4894,18 @@ const writeDwgImpl = (
           }
         };
         const key = e.appClass?.dxfName ?? e.sourceType;
+        const cpp = e.appClass?.cppName ?? 'AcDbEntity';
+        /* a DXF-born entity: its tags as a DXF-format proxy (tagPayload) */
+        if (tagSealed(e)) {
+          const clsNum = proxyClsH.get(key)?.num ?? 0x1f2;
+          let tail: (h: BitWriter) => void = () => { /* no references */ };
+          makeEntity(0x1f2, handle, e, ctx, (w) => {
+            proxyHead(w, clsNum, cpp, DXF_CODE, 0x7ffffffe, true);
+            proxyCn(w, cpp);
+            tail = tagPayload(w, e, 0x1f2, clsNum);
+          }, (w) => tail(w), graphics);
+          return;
+        }
         if (e.encoding === encodingGroup(V) || e.data === undefined) {
           const typeNum = e.typeCode ?? proxyClsH.get(key)?.num ?? 0x1f2;
           makeEntity(typeNum, handle, e, ctx, (w) => {
@@ -4634,6 +4913,15 @@ const writeDwgImpl = (
             if (e.strData && e.strBits) {
               w.strTarget?.putBits(fromBase64(e.strData), e.strBits);
             }
+          }, refs, graphics);
+        } else if (refClass(e) && e.typeCode === undefined) {
+          /* the reference's own class, bits of another generation: a
+             proxy under the filer that wrote them (filerPayload), which
+             the reference unwraps into the entity itself on open */
+          makeEntity(0x1f2, handle, e, ctx, (w) => {
+            proxyHead(w, proxyClsH.get(key)?.num ?? 0x1f2, cpp, formatCodeOf(e.encoding), 0, false);
+            proxyCn(w, cpp);
+            filerPayload(w, e);
           }, refs, graphics);
         } else {
           makeEntity(0x1f2, handle, e, ctx, (w) => {
@@ -5949,9 +6237,21 @@ const writeDwgImpl = (
   proxyObjs.forEach((p, i) => {
     const key = p.appClass?.dxfName ?? p.sourceType ?? 'ACAD_PROXY_OBJECT';
     const cls = proxyClsH.get(key);
+    const h = proxyObjH[i];
+    /* the common prologue of the handle stream, as a sealed object's: the
+       owner (else the root dictionary), the reactors that are in this
+       file — the associative framework's records, DXF-format proxies
+       of them included, are dropped by the reference without their
+       reactors — and the extension dictionary when the sealed one goes
+       out under this record */
+    const reactors = (p.reactors ?? [])
+      .map((r) => outOf(r))
+      .filter((r): r is number => r !== undefined);
+    const xd = xdictByOwner.get(h)?.h ?? 0;
     const refs = (w: BitWriter): void => {
       w.h(4, ownerOut(p) ?? nod);         /* its owner, else the root dictionary */
-      if (V < 2004) w.h(3, 0);
+      for (const r of reactors) w.h(4, r);
+      if (V < 2004 || xd) w.h(3, xd);
       for (const ref of p.refs ?? []) {
         w.h(ref.code, mapRef(ref.value));
       }
@@ -5965,17 +6265,23 @@ const writeDwgImpl = (
        makes it refuse the drawing outright (ErrorStatus 53, measured on
        its dbConnect sample, EED or no EED). */
     if (!p.data && cls) {
-      makeObject(cls.num, proxyObjH[i], () => { /* the object is its EED */ },
-        refs, 0, p.xdata);
+      makeObject(cls.num, h, () => { /* the object is its EED */ },
+        refs, xd, p.xdata, reactors.length);
       return;
     }
-    makeObject(0x1f3, proxyObjH[i], (w) => {
-      w.bl(cls?.num ?? 0x1f3);
-      w.bl(p.proxyVersion ?? 0);
-      if (V >= 2018) w.bl(p.proxyMaint ?? 0);
-      if (V >= 2000) w.b(p.fromDxf ? 1 : 0);
+    makeObject(0x1f3, h, (w) => {
+      /* the head in this release's spelling (proxyHead), the R2007+
+         string stream as the source carried it — or the "cn:" text the
+         reference gives every proxy when the source had none */
+      const cpp = p.appClass?.cppName ?? 'AcDbObject';
+      const word = p.proxyVersion ?? 0;
+      proxyHead(w, cls?.num ?? 0x1f3, cpp, word & 0xffff, p.proxyMaint ?? (word >>> 16), !!p.fromDxf);
+      if (V >= 2007) {
+        if (p.strData && p.strBits) w.strTarget?.putBits(fromBase64(p.strData), p.strBits);
+        else proxyCn(w, cpp);
+      }
       if (p.data && p.dataBits) w.putBits(fromBase64(p.data), p.dataBits);
-    }, refs, 0, p.xdata);
+    }, refs, xd, p.xdata, reactors.length);
   });
 
   /* ---- sealed unknown objects: universal passthrough, object side.
@@ -6063,6 +6369,20 @@ const writeDwgImpl = (
       }, refs, xd, p.xdata, reactors.length);
       return;
     }
+    /* a DXF-born record: its tags as a DXF-format proxy (tagPayload),
+       under its owner like any other, the handle-typed groups in the
+       handle stream behind the prologue */
+    if (tagSealed(p)) {
+      const clsNum = proxyClsH.get(key)?.num ?? 0x1f3;
+      const cpp = p.appClass?.cppName ?? 'AcDbObject';
+      let tail: (w: BitWriter) => void = () => { /* no references */ };
+      makeObject(0x1f3, h, (w) => {
+        proxyHead(w, clsNum, cpp, DXF_CODE, 0x7ffffffe, true);
+        proxyCn(w, cpp);
+        tail = tagPayload(w, p, 0x1f3, clsNum);
+      }, (w) => { prologue(w); tail(w); }, xd, p.xdata, reactors.length);
+      return;
+    }
     if (p.encoding === encodingGroup(V) || p.data === undefined) {
       makeObject(isXrecord(p) && V <= 14 ? xrecordType()
         : p.typeCode ?? proxyClsH.get(key)?.num ?? 0x1f3,
@@ -6072,6 +6392,18 @@ const writeDwgImpl = (
             w.strTarget?.putBits(fromBase64(p.strData), p.strBits);
           }
         }, refs, xd, p.xdata, reactors.length);
+    } else if (filerProxy(p)) {
+      /* the reference's own class, bits of another generation: a proxy
+         under the filer that wrote them (filerPayload), which the
+         reference unwraps into the record itself on open — so it is
+         listed by its dictionary and owned by its owner like a native
+         record, where a private seal-wrap had to be re-homed */
+      const cpp = p.appClass?.cppName ?? 'AcDbObject';
+      makeObject(0x1f3, h, (w) => {
+        proxyHead(w, proxyClsH.get(key)?.num ?? 0x1f3, cpp, formatCodeOf(p.encoding), 0, false);
+        proxyCn(w, cpp);
+        filerPayload(w, p);
+      }, refs, xd, p.xdata, reactors.length);
     } else {
       makeObject(0x1f3, h, (w) => {
         w.bl(p.typeCode === undefined ? (proxyClsH.get(key)?.num ?? 0) : 0);
@@ -6750,14 +7082,20 @@ const writeDwgImpl = (
       clsW.rc(0); clsW.rc(0); clsW.b(1);
     }
     const cls = (
-      num: number, dxf: string, cpp: string, entity: boolean, app = 'ISM'
+      num: number, dxf: string, cpp: string, entity: boolean, app = 'ISM',
+      ver?: number, maint?: number
     ): void => {
       clsW.bs(num); clsW.bs(127);
       clsW.t(app); clsW.t(cpp); clsW.t(dxf);
       clsW.b(0); clsW.bs(entity ? 0x1f2 : 0x1f3);
       if (V >= 2004) {
         clsW.bl(1);                       /* instance count */
-        clsW.bs(0x19); clsW.bs(0);        /* dwg/maint version */
+        /* the class's version pair: the source's own where it named the
+           class (the reference keeps a constant pair per class — 28/1
+           for its constraint parameters, 27/45 for the associative
+           network — the same in every release it saves to), else the
+           R2004 code the writer always wrote */
+        clsW.bl(ver ?? 0x19); clsW.bl(maint ?? 0);
         clsW.bl(0); clsW.bl(0);
       }
     };
@@ -6766,7 +7104,7 @@ const writeDwgImpl = (
        the application classes behind the proxies and sealed objects
        being passed through, the dynamic-block and draw-order records */
     for (const [dxfName, c] of proxyClsH) {
-      cls(c.num, dxfName, c.cpp, c.ent, c.app);
+      cls(c.num, dxfName, c.cpp, c.ent, c.app, c.ver, c.maint);
     }
     if (noClasses) {
       /* the benign stub record that keeps the 2018 section non-empty */

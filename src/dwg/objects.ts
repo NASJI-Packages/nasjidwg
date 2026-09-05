@@ -928,8 +928,8 @@ const decodeTextLike = (
  *  bit-exact, and the rest of the handle stream code-for-code. Shared by
  *  the entity (0x1F2) and object (0x1F3) forms — the two records differ
  *  only in their common prologue. */
-const captureProxyTail = (x: Ctx): {
-  data?: string; dataBits?: number; refs?: { code: number; value: string }[];
+const captureProxyBits = (x: Ctx): {
+  blob: Uint8Array; nbits: number; refs?: { code: number; value: string }[];
 } => {
   const { r } = x;
   const end = Math.max(r.pos, Math.min(x.dataEnd, r.endBit));
@@ -951,10 +951,16 @@ const captureProxyTail = (x: Ctx): {
   /* record padding can masquerade as null references at the tail */
   while (refs.length && refs[refs.length - 1].code === 0
          && refs[refs.length - 1].value === '0') refs.pop();
+  return { blob, nbits, refs: refs.length ? refs : undefined };
+};
+const captureProxyTail = (x: Ctx): {
+  data?: string; dataBits?: number; refs?: { code: number; value: string }[];
+} => {
+  const { blob, nbits, refs } = captureProxyBits(x);
   return {
     data: nbits > 0 ? toBase64(blob) : undefined,
     dataBits: nbits > 0 ? nbits : undefined,
-    refs: refs.length ? refs : undefined
+    refs
   };
 };
 
@@ -984,6 +990,141 @@ const readSealBody = (x: Ctx): {
     if (r.b()) strBlob[i >> 3] |= 0x80 >> (i & 7);
   }
   return { dataBits, blob, strBits, strBlob };
+};
+
+/** The application class of a class-based record, as the model carries
+ *  it: the three names, and the version pair where the CLASSES record
+ *  has one (R2004+). */
+const appClassOf = (cls: {
+  dxfName: string; cppName: string; appName: string;
+  dwgVersion?: number; maintVersion?: number;
+}): { dxfName: string; cppName: string; appName: string; dwgVersion?: number; maintVersion?: number } => ({
+  dxfName: cls.dxfName, cppName: cls.cppName, appName: cls.appName,
+  ...(cls.dwgVersion !== undefined
+    ? { dwgVersion: cls.dwgVersion, maintVersion: cls.maintVersion } : {})
+});
+
+/** A bit-exact slice of a record's bytes. */
+const sliceBits = (data: Uint8Array, from: number, nbits: number): Uint8Array => {
+  const out = new Uint8Array((nbits + 7) >> 3);
+  const rd = new BitReader(data, from, from + nbits);
+  for (let i = 0; i < nbits; i++) if (rd.b()) out[i >> 3] |= 0x80 >> (i & 7);
+  return out;
+};
+
+/** The head every proxy record shares past the common data: the class
+ *  id; in the R2004 family alone the "cn:<class>" text the reference
+ *  writes inline right there (R2007+ keep it in the string stream,
+ *  R2000 has none — bit-walked on its 2000, 2004 and 2018 saves of one
+ *  probe); the version word — before R2018 the drawing-format code of
+ *  the filer that wrote the payload in the low word (23 R2000 … 33
+ *  R2018) and the maintenance number in the high; R2018's separate
+ *  maintenance word; and the from-DXF flag (R2000+). A nasjidwg
+ *  seal-wrap carries its magic word where the text would sit, so at
+ *  R2004 the word is peeked first. R13/R14 keep their legacy read. */
+const readProxyHead = (x: Ctx): {
+  classId: number; proxyVersion: number; proxyMaint?: number;
+  fromDxf?: boolean; magic: boolean;
+} => {
+  const { r, v } = x;
+  const classId = r.bl();
+  let magic = false;
+  if (v === 2004) {
+    /* the text is there when a counted string starting "cn:" is: files
+       this library wrote before it knew of the text (and its own
+       seal-wraps) carry the version word right here */
+    const at = r.pos;
+    let text = false;
+    try {
+      const n = r.bs();
+      text = n >= 3 && n < 256 && r.rc() === 0x63 && r.rc() === 0x6e && r.rc() === 0x3a;
+      if (text) for (let i = 3; i < n; i++) r.rc();
+    } catch { /* a short record has no text either */ }
+    if (!text) r.pos = at;
+  }
+  const proxyVersion = r.bl();
+  if (((proxyVersion & 0xffff0000) >>> 0) === SEAL_MAGIC) magic = true;
+  const proxyMaint = v >= 2018 ? r.bl() : undefined;
+  const fromDxf = v >= 2000 ? r.b() === 1 : undefined;
+  return { classId, proxyVersion, proxyMaint, fromDxf, magic };
+};
+
+/** The encoding group a proxy version word's drawing-format code names. */
+const groupOfFormatCode = (code: number): number | undefined =>
+  code === 23 ? 2000 : code === 25 ? 2004 : code === 27 ? 2007
+  : code === 29 || code === 31 || code === 33 ? 2018 : undefined;
+
+/** An R2007+ proxy record's own string stream, whole and bit-exact. */
+const proxyStringStream = (x: Ctx): { strData?: string; strBits?: number } => {
+  if (x.v < 2007 || !x.sr || x.srBits <= 0) return {};
+  return { strData: toBase64(sliceBits(x.r.data, x.srStart, x.srBits)), strBits: x.srBits };
+};
+
+/** A proxy carrying DWG-format bits under the version word of a filer
+ *  of ANOTHER generation, of a class the file names: the record itself,
+ *  re-sealed in that generation's encoding — what the writers emit for
+ *  a foreign-generation seal of the reference's own classes, and what
+ *  the reference writes when it re-saves an object it cannot load into
+ *  another release. The payload is the record's data area as that filer
+ *  laid it out; where an R2007+ payload's strings sit depends on the
+ *  FILE — an R2007+ file keeps them in the record's own string stream
+ *  behind the "cn:<class>" text, a pre-2007 file keeps the payload
+ *  whole (data, string stream, size word, flag), both bit-walked on
+ *  the reference's 2004 and 2018 re-saves of an R2007-filer proxy.
+ *  Null when the code is unknown or of this file's own generation: then
+ *  the proxy is a proxy. */
+const resealForeign = (x: Ctx, code: number): {
+  encoding: number; data?: string; dataBits?: number;
+  strData?: string; strBits?: number; refs?: { code: number; value: string }[];
+} | null => {
+  const enc = groupOfFormatCode(code);
+  if (enc === undefined || enc === encodingGroup(x.v)) return null;
+  const { blob, nbits, refs } = captureProxyBits(x);
+  const out: NonNullable<ReturnType<typeof resealForeign>> = {
+    encoding: enc,
+    data: nbits > 0 ? toBase64(blob) : undefined,
+    dataBits: nbits > 0 ? nbits : undefined,
+    refs
+  };
+  if (enc < 2007) return out;
+  if (x.v >= 2007) {
+    if (x.sr && x.srBits > 0) {
+      const sr = new BitReader(x.r.data, x.srStart, x.srStart + x.srBits);
+      const n = sr.bs();
+      for (let i = 0; i < n; i++) sr.rs();
+      const rest = x.srStart + x.srBits - sr.pos;
+      if (rest > 0) {
+        out.strData = toBase64(sliceBits(x.r.data, sr.pos, rest));
+        out.strBits = rest;
+      }
+    }
+    return out;
+  }
+  /* a pre-2007 file: the payload closes with the strings-present flag,
+     before it the string stream's size (one word, or two past 0x7FFF
+     bits with the high word first) and the stream itself */
+  if (nbits <= 0) return out;
+  const bit = (i: number): number => (blob[i >> 3] >> (7 - (i & 7))) & 1;
+  const rsAt = (at: number): number => new BitReader(blob, at, at + 16).rs();
+  if (!bit(nbits - 1)) {
+    out.data = nbits > 1 ? toBase64(sliceBits(blob, 0, nbits - 1)) : undefined;
+    out.dataBits = nbits > 1 ? nbits - 1 : undefined;
+    return out;
+  }
+  if (nbits < 17) return out;
+  let size = rsAt(nbits - 17), hdr = 16;
+  if (size & 0x8000) {
+    if (nbits < 33) return out;
+    size = (size & 0x7fff) | (rsAt(nbits - 33) << 15);
+    hdr = 32;
+  }
+  const start = nbits - 1 - hdr - size;
+  if (start < 0) return out;
+  out.data = start > 0 ? toBase64(sliceBits(blob, 0, start)) : undefined;
+  out.dataBits = start > 0 ? start : undefined;
+  out.strData = size > 0 ? toBase64(sliceBits(blob, start, size)) : undefined;
+  out.strBits = size > 0 ? size : undefined;
+  return out;
 };
 
 const captureSealed = (x: Ctx): {
@@ -1698,12 +1839,12 @@ const decodeEntitySpecific = (
          the owning application still recognizes its object. The cached
          display list rides the common entity data; the reader attaches
          both its bytes and its decoded primitives. */
-      const classId = r.bl();
-      const proxyVersion = r.bl();
-      const proxyMaint = v >= 2018 ? r.bl() : undefined;
-      const fromDxf = v >= 2000 ? r.b() === 1 : undefined;
+      const { classId, proxyVersion, proxyMaint, fromDxf, magic } = readProxyHead(x);
       const cls = x.c.classes.get(classId);
-      if (((proxyVersion & 0xffff0000) >>> 0) === SEAL_MAGIC) {
+      const appClass = cls
+        ? appClassOf(cls)
+        : undefined;
+      if (magic) {
         /* A nasjidwg seal-wrap: a record whose bits belong to another
            encoding generation, carried through this file inside a proxy —
            the format's own idiom for "data the host release cannot hold".
@@ -1714,9 +1855,7 @@ const decodeEntitySpecific = (
         return {
           type: 'unknown', layer: '0', color: { kind: 'byLayer' },
           sourceType: cls?.dxfName ?? typeName,
-          appClass: cls
-            ? { dxfName: cls.dxfName, cppName: cls.cppName, appName: cls.appName }
-            : undefined,
+          appClass,
           encoding: proxyVersion & 0xffff,
           data: dataBits > 0 ? toBase64(blob) : undefined,
           dataBits: dataBits > 0 ? dataBits : undefined,
@@ -1725,17 +1864,30 @@ const decodeEntitySpecific = (
           refs: tail.refs
         };
       }
+      /* DWG-format bits of a class the file names, written by the filer
+         of another generation: the record itself, re-sealed in that
+         generation (see resealForeign) — a rewrite carries it native
+         where the generations match and as this proxy where they do
+         not, a fixed point either way */
+      if (cls && v >= 2000 && !fromDxf) {
+        const foreign = resealForeign(x, proxyVersion & 0xffff);
+        if (foreign) {
+          return {
+            type: 'unknown', layer: '0', color: { kind: 'byLayer' },
+            sourceType: cls.dxfName, appClass, ...foreign
+          };
+        }
+      }
       return {
         type: 'proxy', layer: '0', color: { kind: 'byLayer' },
         sourceType: cls?.dxfName ?? typeName,
         graphics: [],
-        appClass: cls
-          ? { dxfName: cls.dxfName, cppName: cls.cppName, appName: cls.appName }
-          : undefined,
+        appClass,
         proxyVersion,
         proxyMaint,
         fromDxf,
-        ...captureProxyTail(x)
+        ...captureProxyTail(x),
+        ...proxyStringStream(x)
       };
     }
 
@@ -3018,13 +3170,26 @@ const decodeTable = (x: Ctx, raw: RawObject): Entity => {
       rowHeights: [], columnWidths: [], cells: []
     };
   }
-  /* AcDbBlockReference part */
+  /* AcDbBlockReference part. The scale is spelled the way the release
+     spells an INSERT's: the R2000+ data flag with its default-elided
+     values, and in R13/R14 three explicit BD values — the reference
+     writes ACAD_TABLE into an R14 save (a class entity, CLASSES 506)
+     with exactly the INSERT head of that release (bit-walked on its R14
+     save of A-01: `10 10 10` for a unit scale, then rotation, extrusion
+     0,0,1, no attributes, the 22 flag word and a 4×6 grid). Read with
+     the flag form, that head handed back an extrusion of −1.29e156 and
+     a negative column count, and the rewrite audited "Invalid number
+     in object's normal vector". */
   const [ix, iy, iz] = r.bd3();
-  const sf = r.bb();
-  if (sf === 3) { /* all 1.0 */ }
-  else if (sf === 1) { r.dd(1); r.dd(1); }
-  else if (sf === 2) { r.rd(); }
-  else { const sx = r.rd(); r.dd(sx); r.dd(sx); }
+  if (v >= 2000) {
+    const sf = r.bb();
+    if (sf === 3) { /* all 1.0 */ }
+    else if (sf === 1) { r.dd(1); r.dd(1); }
+    else if (sf === 2) { r.rd(); }
+    else { const sx = r.rd(); r.dd(sx); r.dd(sx); }
+  } else {
+    r.bd(); r.bd(); r.bd();               /* x, y, z scale */
+  }
   r.bd();                                 /* rotation */
   const tblExtOld = extrusionOf(r.bd3());
   const hasAttribs = r.b() === 1;
@@ -3494,20 +3659,18 @@ const decodeObjectSpecific = (x: Ctx, typeName: string, raw: RawObject): void =>
     case 'ACAD_PROXY_OBJECT': {
       /* The dictionary-owned twin of the proxy entity: same prologue, same
          opaque tail, retained the same way so it can be written back. */
-      const classId = r.bl();
-      const proxyVersion = r.bl();
-      const proxyMaint = v >= 2018 ? r.bl() : undefined;
-      const fromDxf = v >= 2000 ? r.b() === 1 : undefined;
+      const { classId, proxyVersion, proxyMaint, fromDxf, magic } = readProxyHead(x);
       const cls = x.c.classes.get(classId);
-      if (((proxyVersion & 0xffff0000) >>> 0) === SEAL_MAGIC) {
+      const appClass = cls
+        ? appClassOf(cls)
+        : undefined;
+      if (magic) {
         /* seal-wrap: unwrap to a sealed unknown object (see entity twin) */
         const { dataBits, blob, strBits, strBlob } = readSealBody(x);
         const tail = captureProxyTail(x);
         raw.unknownObject = {
           sourceType: cls?.dxfName ?? typeName,
-          appClass: cls
-            ? { dxfName: cls.dxfName, cppName: cls.cppName, appName: cls.appName }
-            : undefined,
+          appClass,
           encoding: proxyVersion & 0xffff,
           data: dataBits > 0 ? toBase64(blob) : undefined,
           dataBits: dataBits > 0 ? dataBits : undefined,
@@ -3517,13 +3680,24 @@ const decodeObjectSpecific = (x: Ctx, typeName: string, raw: RawObject): void =>
         };
         return;
       }
+      /* a foreign filer's bits of a named class: the record, re-sealed
+         (see the entity twin and resealForeign) */
+      if (cls && v >= 2000 && !fromDxf) {
+        const foreign = resealForeign(x, proxyVersion & 0xffff);
+        if (foreign) {
+          raw.unknownObject = {
+            sourceType: cls.dxfName, appClass, ...foreign,
+            ...(x.xdata ? { xdata: x.xdata } : {})
+          };
+          return;
+        }
+      }
       raw.proxyObject = {
         sourceType: cls?.dxfName ?? typeName,
-        appClass: cls
-          ? { dxfName: cls.dxfName, cppName: cls.cppName, appName: cls.appName }
-          : undefined,
+        appClass,
         proxyVersion, proxyMaint, fromDxf,
         ...captureProxyTail(x),
+        ...proxyStringStream(x),
         /* the record's own EED rides along: for some applications it is
            the whole object (the reference's dbConnect link records) */
         ...(x.xdata ? { xdata: x.xdata } : {})
@@ -4499,7 +4673,7 @@ export const decodeObjectBody = (
         type: 'unknown', layer: '0', color: { kind: 'byLayer' },
         sourceType: cls?.dxfName ?? typeName,
         appClass: cls
-          ? { dxfName: cls.dxfName, cppName: cls.cppName, appName: cls.appName }
+          ? appClassOf(cls)
           : undefined,
         typeCode: FIXED_TYPES[type] ? type : undefined,
         encoding: encodingGroup(ctx.v),
@@ -4568,7 +4742,7 @@ export const decodeObjectBody = (
     raw.unknownObject = {
       sourceType: cls?.dxfName ?? typeName,
       appClass: cls
-        ? { dxfName: cls.dxfName, cppName: cls.cppName, appName: cls.appName }
+        ? appClassOf(cls)
         : undefined,
       typeCode: FIXED_TYPES[type] ? type : undefined,
       encoding: encodingGroup(ctx.v),
@@ -4591,7 +4765,7 @@ export const decodeObjectBody = (
     raw.unknownObject = {
       sourceType: cls?.dxfName ?? typeName,
       appClass: cls
-        ? { dxfName: cls.dxfName, cppName: cls.cppName, appName: cls.appName }
+        ? appClassOf(cls)
         : undefined,
       typeCode: FIXED_TYPES[type] ? type : undefined,
       encoding: encodingGroup(ctx.v),

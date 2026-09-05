@@ -2269,6 +2269,8 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
           const h = q.str(5, '');
           if (h) po.handle = h.toUpperCase();
           if (com.owner) po.ownerHandle = com.owner;
+          if (com.xdict) po.xdict = com.xdict;
+          if (com.reactors) po.reactors = com.reactors;
           if (cls) { po.sourceType = cls.dxfName; po.appClass = { ...cls }; }
           if (p.data?.length) {
             po.data = bytesToB64(p.data);

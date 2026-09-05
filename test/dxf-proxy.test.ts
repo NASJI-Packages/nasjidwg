@@ -95,7 +95,8 @@ const findProxy = (d: Drawing): ProxyEntity | undefined =>
 const expectSealed = (proxy: ProxyEntity | undefined): void => {
   expect(proxy).toBeTruthy();
   expect(proxy?.sourceType).toBe('MPOLYGON');
-  expect(proxy?.appClass).toEqual({
+  /* a DWG leg adds the class's version pair beside the names */
+  expect(proxy?.appClass).toMatchObject({
     dxfName: 'MPOLYGON', cppName: 'AcDbMPolygon', appName: 'AcMPolygonObj15'
   });
   expect(proxy?.data).toBe(b64(PAYLOAD));

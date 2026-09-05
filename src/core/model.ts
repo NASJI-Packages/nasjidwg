@@ -704,6 +704,22 @@ export interface TableEntity extends EntityCommon {
  *  references. A drawing that arrives with a proxy leaves with the same
  *  proxy, so the owning application still recognizes its object after a
  *  round trip through this library. */
+/** The application class behind a class-based record, as the source's
+ *  CLASSES section named it: the DXF name, the C++ class name, the
+ *  application that registers it — and, from R2004 files, the record's
+ *  version pair (the drawing-format code and the maintenance number the
+ *  reference keeps constant per class: 28/1 for its constraint
+ *  parameters, 27/45 for the associative network, 25/55 for the
+ *  evaluation graph), re-emitted with the class so a reader of the
+ *  output sees the class as the source described it. */
+export interface AppClass {
+  dxfName: string;
+  cppName: string;
+  appName: string;
+  dwgVersion?: number;
+  maintVersion?: number;
+}
+
 export interface ProxyEntity extends EntityCommon {
   type: 'proxy';
   /** Source class name, e.g. ACAD_PROXY_ENTITY or the original type. */
@@ -712,7 +728,7 @@ export interface ProxyEntity extends EntityCommon {
   graphics: Entity[];
   /** The application class the proxy stands in for, as the source file's
    *  CLASSES section named it — re-emitted on write. */
-  appClass?: { dxfName: string; cppName: string; appName: string };
+  appClass?: AppClass;
   /** Format/version word(s) exactly as the record stored them. */
   proxyVersion?: number;
   /** R2018+ second version word (maintenance), when present. */
@@ -723,6 +739,13 @@ export interface ProxyEntity extends EntityCommon {
    *  length in bits (the stream is not byte-aligned). */
   data?: string;
   dataBits?: number;
+  /** R2007+ files: the record's own string stream, bit-exact (base64,
+   *  `strBits` long) — the "cn:<class>" text the reference gives every
+   *  proxy, and behind it the strings of a payload that came from DXF
+   *  (a DXF-format proxy keeps its string groups there). Re-emitted as
+   *  it was; absent, the writer gives an R2007+ record the "cn:" text. */
+  strData?: string;
+  strBits?: number;
   /** The raw cached display list, byte for byte, base64. `graphics` is
    *  its decoded form; this is what a rewrite emits. */
   graphicsData?: string;
@@ -766,7 +789,7 @@ export interface UnknownEntity extends EntityCommon {
   /** Decoded proxy graphics: plain entities in world coordinates. */
   graphics?: Entity[];
   /** The application class behind the record, when CLASSES named it. */
-  appClass?: { dxfName: string; cppName: string; appName: string };
+  appClass?: AppClass;
   /** Fixed DWG type number, when the record is not class-based. */
   typeCode?: number;
   /** Encoding generation of the sealed bits: 14, 2000, 2004, 2007, 2018. */
@@ -810,7 +833,7 @@ export interface UnknownObject {
   /** Name under which the owning dictionary lists it. */
   name?: string;
   sourceType: string;
-  appClass?: { dxfName: string; cppName: string; appName: string };
+  appClass?: AppClass;
   typeCode?: number;
   encoding?: number;
   data?: string;
@@ -1378,15 +1401,28 @@ export interface ProxyObject {
   /** Handle of the source file's owner (hex), recorded so a future
    *  rewrite can restore the original parent chain. */
   ownerHandle?: string;
+  /** Handle (hex) of the record's extension dictionary in the source
+   *  file, sealed in `drawing.unknownObjects` and owned by this handle;
+   *  and its persistent reactors, written back for every target that is
+   *  in the file (the associative framework's records are dropped by the
+   *  reference without theirs). */
+  xdict?: string;
+  reactors?: string[];
   /** Original class DXF name, when the source file's CLASSES named it. */
   sourceType?: string;
-  appClass?: { dxfName: string; cppName: string; appName: string };
+  appClass?: AppClass;
   proxyVersion?: number;
   proxyMaint?: number;
   fromDxf?: boolean;
   /** Opaque application payload, base64; exact bit length in dataBits. */
   data?: string;
   dataBits?: number;
+  /** R2007+ files: the record's own string stream, bit-exact (base64,
+   *  `strBits` long) — the "cn:<class>" text, then the string groups of
+   *  a DXF-format payload. Re-emitted as it was; absent, the writer
+   *  gives an R2007+ record the "cn:" text alone. */
+  strData?: string;
+  strBits?: number;
   refs?: { code: number; value: string }[];
   /** The record's own extended data (EED), per registered application.
    *  Some applications keep a proxy object's whole content here — the

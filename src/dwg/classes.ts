@@ -16,6 +16,11 @@ export interface DwgClassInfo {
   cppName: string;
   appName: string;
   isEntity: boolean;                     /* itemclass 0x1F2 = entity */
+  /** R2004+: the drawing-format code and maintenance number the record
+   *  carries for the class (the reference's own files: 33/427 for its
+   *  dynamic-block graph classes, say). */
+  dwgVersion?: number;
+  maintVersion?: number;
 }
 
 const CLASSES_SENTINEL_FIRST = 0x8d;
@@ -96,6 +101,7 @@ export const readClasses = (
       const dxfName = text();
       r.b();                             /* was-a-proxy flag */
       const itemClass = r.bs();
+      let dwgVersion: number | undefined, maintVersion: number | undefined;
       if (v >= 2004) {
         /* The record tail is FIVE bitlongs: instance count, dwg version,
            maintenance version, and two unknowns. For values 0..255 a BS
@@ -104,13 +110,14 @@ export const readClasses = (
            the old BS read (16-bit payload) misaligned every record after
            it. Reading BLs accepts both spellings for small values. */
         r.bl();                          /* number of instances */
-        r.bl(); r.bl();                  /* dwg/maint version pair */
+        dwgVersion = r.bl(); maintVersion = r.bl();   /* dwg/maint version pair */
         r.bl(); r.bl();                  /* two unknowns */
       }
       if (classNum < 500 || classNum > 5000 || !dxfName) break;
       out.set(classNum, {
         classNum, dxfName, cppName, appName,
-        isEntity: itemClass === 0x1f2
+        isEntity: itemClass === 0x1f2,
+        ...(dwgVersion !== undefined ? { dwgVersion, maintVersion } : {})
       });
     }
   } catch {
