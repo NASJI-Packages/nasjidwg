@@ -16,3 +16,4 @@ test/.data-removed/
 # AutoCAD campaign leftovers
 ErrorReports/
 *.scr
+test/zz-validate-emit-*.test.ts
