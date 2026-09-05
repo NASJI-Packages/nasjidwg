@@ -28,6 +28,7 @@ export {
 export type { DwgWriteResult, DwgWriteOptions } from './dwg/writer.js';
 export { readDxf } from './dxf/reader.js';
 export { writeDxf, writeDxfBinary } from './dxf/writer.js';
+export type { DxfWriteOptions } from './dxf/writer.js';
 export { isBinaryDxf, isNarrowCodeBinaryDxf } from './dxf/binary.js';
 
 /* exports beyond CAD formats */

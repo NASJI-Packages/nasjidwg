@@ -265,16 +265,24 @@ application class. The same sealed retention covers *every* record the
 library does not model — and even a known record whose decode fails: it
 rewinds and is kept whole instead of being reduced to its common data.
 And it keeps its place: an entity's extension dictionary (`xdict`), a
-block record's, a layer's, every sub-dictionary of the named-object tree
-is sealed with its entries decoded, the XRECORDs it lists bit-exact, and
-a rewrite hangs each sealed object back under its original owner
+block record's, a layer's, a layout's, a view's, a dimension style's, a
+table style's, the layer table's, every sub-dictionary of the named-object
+tree is sealed with its entries decoded, the XRECORDs it lists bit-exact,
+and a rewrite hangs each sealed object back under its original owner
 whenever that owner is in the file — fields under their text, a clipped
 xref's SPATIAL_FILTER under its INSERT, a dynamic block's whole
 evaluation graph under its block record, a constraint network with its
-dependencies as reactors on the entities they watch. Under
-`preserveHandles` every link keeps its source number, so the chains the
-reference checks survive any number of rewrites; only a record whose
-owner is not written is re-homed under the named objects dictionary.
+dependencies as reactors on the entities they watch, the layer states
+and filters under the layer table, a view's thumbnail under the view.
+Under `preserveHandles` every link keeps its source number — the
+layouts, views, viewports, dimension styles, groups, styles, controls
+and dictionaries included (`drawing.structureHandles`) — so the chains
+the reference checks survive any number of rewrites. Across generations
+a dictionary of the tree is re-encoded from its entries and an XRECORD
+from its typed values, so both travel native into any release; the plot
+style name dictionary travels with its placeholder. Only a record whose
+owner is not written is re-homed under the named objects dictionary,
+and what cannot travel says so.
 
 Nothing is dropped quietly. A writer that cannot encode something
 reports it in a `skipped` list; something it writes in a simpler form

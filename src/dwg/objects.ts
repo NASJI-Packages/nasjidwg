@@ -24,7 +24,7 @@ import type {
   MeshEntity, MLeaderAttribute, MLeaderStyle, MLineVertex, Point2, Point3,
   PolylineVertex,
   ProxyObject, TableBorder, TableCell, TableStyle, TableStyleCell,
-  TextHAlign, TextVAlign, UnknownObject, ViewportEntity, VPort, XdataGroup,
+  TextHAlign, TextVAlign, UnknownObject, View, ViewportEntity, VPort, XdataGroup,
   XdataValue
 } from '../core/model.js';
 import type { DwgClassInfo } from './classes.js';
@@ -35,7 +35,7 @@ import type { DwgClassInfo } from './classes.js';
  *  than re-create — extension dictionaries with the XRECORDs they list,
  *  and the nodes of a dynamic block's evaluation graph. */
 const DUAL_SEALED = new Set([
-  'DICTIONARY', 'XRECORD', 'BLOCKVISIBILITYPARAMETER',
+  'DICTIONARY', 'ACDBDICTIONARYWDFLT', 'XRECORD', 'BLOCKVISIBILITYPARAMETER',
   'BLOCKLINEARPARAMETER', 'BLOCKROTATIONPARAMETER', 'BLOCKFLIPPARAMETER',
   'BLOCKALIGNMENTPARAMETER', 'BLOCKBASEPOINTPARAMETER', 'BLOCKXYPARAMETER',
   'BLOCKPOLARPARAMETER', 'BLOCKPOINTPARAMETER', 'BLOCKLOOKUPPARAMETER',
@@ -46,6 +46,12 @@ const DUAL_SEALED = new Set([
 
 const STRUCTURAL_TYPES = new Set([
   'POLYLINE_2D', 'POLYLINE_3D', 'BLOCK', 'ENDBLK', 'SEQEND']);
+
+/** Fixed-type objects with no decoder that are retained sealed all the
+ *  same: the ACDBPLACEHOLDER (type 80) is an empty body the plot style
+ *  name dictionary names as its default — without it that dictionary
+ *  cannot be written back (its default would dangle). */
+const SEAL_FIXED = new Set(['ACDBPLACEHOLDER']);
 
 /* Colour singletons. A million-entity drawing builds a Color object per
  * entity; ByLayer alone accounted for most of them, and none is ever
@@ -229,6 +235,8 @@ export interface RawObject {
   dictionary?: {
     names: string[]; handles: number[]; codes: number[];
     cloning?: number; hardOwner?: boolean;
+    /** ACDBDICTIONARYWDFLT: the default record's handle. */
+    defaultHandle?: number;
   };
   /** ACAD_PROXY_OBJECT (0x1F3): the retained record, named by the
    *  assembler from its owning dictionary. */
@@ -253,10 +261,7 @@ export interface RawObject {
   };
   /** UCS / VIEW / VPORT table payloads. */
   ucs?: { name: string; origin: Point3; xAxis: Point3; yAxis: Point3 };
-  view?: {
-    name: string; center: Point2; height: number; width: number;
-    direction?: Point3; target?: Point3; lensLength?: number;
-  };
+  view?: View;
   vport?: {
     name: string; lowerLeft: Point2; upperRight: Point2; center: Point2;
     height: number; aspectRatio?: number; direction?: Point3; target?: Point3;
@@ -349,17 +354,20 @@ type ResbufKind =
   | 'string' | 'real' | 'point' | 'int8' | 'int16' | 'int32' | 'int64'
   | 'bool' | 'binary' | 'handle' | 'invalid';
 
-const resbufKind = (gc: number): ResbufKind => {
+export const resbufKind = (gc: number): ResbufKind => {
   if (gc < 0) return 'handle';
-  if (gc <= 4) return 'string';
-  if (gc === 5) return 'handle';
+  /* 5 (and 105) is a handle spelled as TEXT in an XRECORD — a counted
+     string like any other, not an object id: the reference's own
+     data-extraction records carry a code-5 group of length 0 right
+     before the run ends, and read as an 8-byte id it overran the record
+     and lost the record to the seal */
   if (gc <= 9) return 'string';
   if (gc <= 37) return 'point';
   if (gc <= 59) return 'real';
   if (gc <= 79) return 'int16';
   if (gc <= 99) return 'int32';
   if (gc <= 102) return 'string';
-  if (gc === 105) return 'handle';
+  if (gc === 105) return 'string';
   if (gc <= 109) return 'invalid';
   if (gc <= 139) return 'point';
   if (gc <= 149) return 'real';
@@ -3931,7 +3939,12 @@ const decodeObjectSpecific = (x: Ctx, typeName: string, raw: RawObject): void =>
       return;
     }
 
-    case 'DICTIONARY': {
+    case 'DICTIONARY':
+    /* the dictionary with a default (the plot style name dictionary): a
+       DICTIONARY body, then the default record's handle closing the
+       handle stream (the reference's own DXF: AcDbDictionary, then
+       AcDbDictionaryWithDefault with its 340) */
+    case 'ACDBDICTIONARYWDFLT': {
       const num = r.bl();
       if (num > 100000) return;
       const cloning = v >= 2000 ? r.bs() : undefined;   /* cloning */
@@ -3957,6 +3970,9 @@ const decodeObjectSpecific = (x: Ctx, typeName: string, raw: RawObject): void =>
                   : ref.value);
       }
       raw.dictionary = { names, handles, codes, cloning, hardOwner };
+      if (typeName === 'ACDBDICTIONARYWDFLT') {
+        raw.dictionary.defaultHandle = x.handle(raw.handle);
+      }
       return;
     }
 
@@ -4072,19 +4088,55 @@ const decodeObjectSpecific = (x: Ctx, typeName: string, raw: RawObject): void =>
     }
 
     case 'VIEW': {
+      /* The record in the VPORT's order: height, width, centre, TARGET
+       * then direction, twist, lens length, the two clip distances, the
+       * four mode bits (three of them VIEWMODE, the fourth always set),
+       * the R2000+ render mode, the R2007+ lighting block, the paper
+       * space flag and the R2000+ associated UCS. Graded against the
+       * reference's own table of its sheet-set samples ((tblnext "VIEW"):
+       * 11 = direction (0,0,1), 12 = target (0,0,0), 42 = 50) — the
+       * earlier walk read the target as the direction and the twist as
+       * the lens length. */
       const name = x.tableFlags();
       const height = r.bd();
       const width = r.bd();
       const cx = r.rd(), cy = r.rd();
-      const [dx2, dy2, dz2] = r.bd3();
       const [tx, ty, tz] = r.bd3();
+      const [dx2, dy2, dz2] = r.bd3();
+      const twist = r.bd();
       const lensLength = r.bd();
-      raw.table = { kind: 'view', name };
-      raw.view = {
+      const frontClip = r.bd();
+      const backClip = r.bd();
+      const viewMode = r.b() | (r.b() << 1) | (r.b() << 2);
+      r.b();                              /* the fourth bit: always 1 */
+      const renderMode = v >= 2000 ? r.rc() : undefined;
+      if (v >= 2007) {
+        r.b();                            /* use default lights */
+        r.rc();                           /* default lighting type */
+        r.bd(); r.bd();                   /* brightness, contrast */
+        x.cmc();                          /* ambient colour */
+      }
+      const paperSpace = r.b() === 1;
+      const view: View = {
         name, center: { x: cx, y: cy }, height, width,
         direction: pt3(dx2, dy2, dz2), target: pt3(tx, ty, tz),
-        lensLength: lensLength || undefined
+        lensLength: lensLength || undefined,
+        twist, frontClip, backClip, viewMode
       };
+      if (renderMode !== undefined) view.renderMode = renderMode;
+      if (paperSpace) view.paperSpace = true;
+      if (v >= 2000 && r.b() === 1) {     /* associated UCS */
+        const [ox, oy, oz] = r.bd3();
+        const [uxx, uxy, uxz] = r.bd3();
+        const [uyx, uyy, uyz] = r.bd3();
+        view.ucsOrigin = pt3(ox, oy, oz);
+        view.ucsXAxis = pt3(uxx, uxy, uxz);
+        view.ucsYAxis = pt3(uyx, uyy, uyz);
+        view.ucsElevation = r.bd();
+        view.ucsOrthoType = r.bs();
+      }
+      raw.table = { kind: 'view', name };
+      raw.view = view;
       return;
     }
 
@@ -4437,7 +4489,8 @@ export const decodeObjectBody = (
     || raw.blockAction || raw.tableContent || raw.geoData || raw.mlineStyle
     || raw.table || raw.proxyObject || raw.ucs || raw.view || raw.vport
     || raw.sortents || raw.tableStyleObj || raw.mleaderStyleObj;
-  if ((failed && !modeled) || (cls && !modeled && !isControl)) {
+  if ((failed && !modeled) || (cls && !modeled && !isControl)
+    || (!modeled && !isControl && SEAL_FIXED.has(typeName))) {
     r.pos = dpos;
     x.hr.pos = hpos;
     if (x.sr && spos !== undefined) x.sr.pos = spos;

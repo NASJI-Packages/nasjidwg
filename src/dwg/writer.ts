@@ -15,15 +15,15 @@
 import { BitWriter, ByteSink, crc16 } from './bitwriter.js';
 import { BitReader } from './bitstream.js';
 import { compressR2004 } from './compress.js';
-import { SEAL_MAGIC, encodingGroup } from './objects.js';
+import { SEAL_MAGIC, encodingGroup, resbufKind } from './objects.js';
 import { assemble2007 } from './container2007.js';
 import { buildAcDs } from './meta.js';
 import { sabToSat } from '../acis/sab.js';
 import { nearestAci } from '../core/color.js';
 import type {
-  Color, DimStyle, Drawing, Entity, Layer, Linetype, MLeaderStyle, Point2, Point3,
+  Color, DimStyle, Drawing, Entity, Group, Layer, Linetype, MLeaderStyle, Point2, Point3,
   PolylineVertex, TableCell, TableStyle, TableStyleCell, TextEntity, TextStyle,
-  XdataGroup, XdataValue
+  View, XdataGroup, XdataValue
 } from '../core/model.js';
 import { shapeArabic, mirrorBrackets, hasComplexScript } from '../text/arabic.js';
 import { flattenMtextParagraphs } from '../text/mtext.js';
@@ -981,6 +981,17 @@ const writeDwgImpl = (
     for (const lt of drawing.linetypes) scanH(lt.handle);
     for (const st of drawing.textStyles) scanH(st.handle);
     for (const b of Object.values(drawing.blocks)) scanH(b.handle);
+    /* and the rest of what keeps its number: layouts, views, viewports,
+       dimension styles, groups, the table and multileader styles, the
+       structural objects (controls, the root and its sub-dictionaries) */
+    for (const l of drawing.layouts ?? []) scanH(l.handle);
+    for (const vw of drawing.views ?? []) scanH(vw.handle);
+    for (const vp of drawing.vports ?? []) scanH(vp.handle);
+    for (const ds of drawing.dimStyles ?? []) scanH(ds.handle);
+    for (const g of drawing.groups ?? []) scanH(g.handle);
+    for (const s of drawing.tableStyles ?? []) scanH(s.handle);
+    for (const s of drawing.mleaderStyles ?? []) scanH(s.handle);
+    for (const h of Object.values(drawing.structureHandles ?? {})) scanH(h);
   }
   let nextHandle = maxSrc;
   const H = (): number => ++nextHandle;
@@ -1035,11 +1046,20 @@ const writeDwgImpl = (
    *  spell the sibling chain out inside the record, and a fresh handle
    *  anywhere in a space breaks the chain its neighbours remember. */
   let chainKept = true;
-  const blockControl = H(), layerControl = H(), styleControl = H(),
-    ltypeControl = H(), viewControl = H(), ucsControl = H(),
-    vportControl = H(), appidControl = H(), dimstyleControl = H(),
-    vxControl = H();
-  const nod = H(), groupDict = H(), mlineDict = H();
+  /* The structural objects — the symbol-table controls, the root
+     dictionary and the sub-dictionaries this writer rebuilds — keep the
+     source's numbers under preserveHandles like everything else (the
+     reader lists them in `structureHandles`): a sealed extension
+     dictionary owned by one of them (the layer table's ACAD_LAYERSTATES,
+     ACAD_LAYERFILTERS) follows the number to the object built here. */
+  const sh = (key: string): string | undefined => drawing.structureHandles?.[key];
+  const blockControl = keepH(sh('BLOCK_CONTROL')), layerControl = keepH(sh('LAYER_CONTROL')),
+    styleControl = keepH(sh('STYLE_CONTROL')), ltypeControl = keepH(sh('LTYPE_CONTROL')),
+    viewControl = keepH(sh('VIEW_CONTROL')), ucsControl = keepH(sh('UCS_CONTROL')),
+    vportControl = keepH(sh('VPORT_CONTROL')), appidControl = keepH(sh('APPID_CONTROL')),
+    dimstyleControl = keepH(sh('DIMSTYLE_CONTROL')), vxControl = keepH(sh('VX_CONTROL'));
+  const nod = keepH(sh('NOD')), groupDict = keepH(sh('ACAD_GROUP')),
+    mlineDict = keepH(sh('ACAD_MLINESTYLE'));
   const appidAcad = H();
   /* ByLayer/ByBlock are synthesized rather than listed among the user
      linetypes, but a drawing that came from a file knows their numbers:
@@ -1051,8 +1071,11 @@ const writeDwgImpl = (
   const ltByblock = keepH(srcLtH(/^byblock$/i));
   /* Layouts arrived with R2000, and AutoCAD refuses to open a 2000+
    * drawing without the Model/paper LAYOUT objects behind the tabs. */
-  const layoutDict = H(), layoutModelH = H(), layoutPaperH = H();
-  const vportActive = H();
+  const layoutDict = keepH(sh('ACAD_LAYOUT'));
+  /* the active model viewport: the drawing's own record when it has one
+     (its number and extension dictionary kept), defaults otherwise */
+  const activeVport = (drawing.vports ?? []).find((p) => /^\*active$/i.test(p.name));
+  const vportActive = keepH(activeVport?.handle);
 
   /* An external reference's own layers, linetypes and text styles
      (`xref|name`) exist only while that file is attached. They travel
@@ -1134,8 +1157,15 @@ const writeDwgImpl = (
     dimStyles.unshift({ name: 'Standard' });
   }
   const dimStyleH = new Map<string, number>();      /* lower-cased name */
-  for (const ds of dimStyles) dimStyleH.set(ds.name.toLowerCase(), H());
+  for (const ds of dimStyles) dimStyleH.set(ds.name.toLowerCase(), keepH(ds.handle));
   const dimStandardH = dimStyleH.get('standard')!;
+  /* the named views, every one of them a record of its own (the
+     reference keeps a view's thumbnail in its extension dictionary) */
+  const views: View[] = drawing.views ?? [];
+  const viewH = views.map((vw) => keepH(vw.handle));
+  /* the entity groups, listed by name under ACAD_GROUP */
+  const groupsOut: Group[] = drawing.groups ?? [];
+  const groupH = groupsOut.map((g) => keepH(g.handle));
   const dimStyleRef = (name?: string): number =>
     (name && dimStyleH.get(name.toLowerCase())) || dimStandardH;
   /* Every release gets the MLINESTYLE "STANDARD" object under an
@@ -1173,6 +1203,16 @@ const writeDwgImpl = (
   const paperMeta = layoutMetas.find((l) => !/^model$/i.test(l.name)
       && !(l.blockName && isExtraPaper(l.blockName)))
     ?? layoutMetas.find((l) => !/^model$/i.test(l.name));
+  /* the LAYOUT objects behind the tabs keep their numbers as well (their
+     extension dictionaries hang off them): the two space layouts, then
+     one per further paper-space block */
+  const layoutModelH = keepH(modelMeta?.handle);
+  const layoutPaperH = keepH(paperMeta?.handle);
+  const extraLayouts = extraPaperBlocks.map((nm) => {
+    const meta = layoutMetas.find((l) => l !== paperMeta
+      && l.blockName?.toLowerCase() === nm.toLowerCase());
+    return { nm, meta, h: keepH(meta?.handle) };
+  });
   const mapSpace = (meta: { blockHandle?: string } | undefined, h: number): void => {
     const old = meta?.blockHandle ? parseInt(meta.blockHandle, 16) : NaN;
     if (Number.isFinite(old) && old > 0 && !oldToNew.has(old)) oldToNew.set(old, h);
@@ -1459,10 +1499,39 @@ const writeDwgImpl = (
      Numbers are therefore handed out in emission order, and only to the
      classes this drawing actually carries. */
   let clsNext = 500;
-  const CLS_IMAGE = usesImages ? clsNext++ : 0;
-  const CLS_IMAGEDEF = usesImages ? clsNext++ : 0;
-  const CLS_WIPEOUT = usesImages ? clsNext++ : 0;
-  const CLS_LIGHT = usesLights ? clsNext++ : 0;
+  /** The CLASSES registry: one record per class NAME, numbered in the
+   *  order the classes are registered. A class this writer builds
+   *  records of its own for (a rebuilt visibility graph's nodes, the
+   *  draw-order table) and a sealed object of the same class travelling
+   *  from the source share one number — two records of one name would
+   *  register the class twice, and the reference binds a record to the
+   *  first number it sees. */
+  const proxyClsH = new Map<string, {
+    num: number; cpp: string; app: string; ent: boolean;
+  }>();
+  const clsFor = (dxf: string, cpp: string, app: string, ent: boolean): number => {
+    const have = proxyClsH.get(dxf);
+    if (have) return have.num;
+    const num = clsNext++;
+    proxyClsH.set(dxf, { num, cpp, app, ent });
+    return num;
+  };
+  /* proxy passthrough: each distinct application class behind a proxy gets
+     its own CLASSES record, and the proxy record's class id points at it —
+     that is how a reader learns what the opaque object was. R13/R14 have
+     no CLASSES section but predate the class-id indirection too: their
+     zombie records carry the id verbatim, so passthrough still works. */
+  const addProxyCls = (
+    appClass: { dxfName: string; cppName: string; appName: string } | undefined,
+    sourceType: string | undefined, fallback: string, ent: boolean
+  ): void => {
+    const key = appClass?.dxfName ?? sourceType ?? fallback;
+    clsFor(key, appClass?.cppName ?? key, appClass?.appName ?? 'ObjectDBX Classes', ent);
+  };
+  const CLS_IMAGE = usesImages ? clsFor('IMAGE', 'AcDbRasterImage', 'ISM', true) : 0;
+  const CLS_IMAGEDEF = usesImages ? clsFor('IMAGEDEF', 'AcDbRasterImageDef', 'ISM', false) : 0;
+  const CLS_WIPEOUT = usesImages ? clsFor('WIPEOUT', 'AcDbWipeout', 'ISM', true) : 0;
+  const CLS_LIGHT = usesLights ? clsFor('LIGHT', 'AcDbLight', 'ISM', true) : 0;
   /* Every ACAD_TABLE and MULTILEADER needs a style to resolve (the
      reference audits a null one), so each class travels with its style
      class. The styles written are the drawing's own — a "Standard"
@@ -1472,10 +1541,12 @@ const writeDwgImpl = (
      styles too (R2000+, where a class can be declared). */
   const usesTableStyles = usesTables || (V >= 2000 && !!drawing.tableStyles?.length);
   const usesMLeaderStyles = usesMLeaders || (V >= 2000 && !!drawing.mleaderStyles?.length);
-  const CLS_TABLE = usesTables ? clsNext++ : 0;
-  const CLS_TABLESTYLE = usesTableStyles ? clsNext++ : 0;
-  const CLS_MLEADER = usesMLeaders ? clsNext++ : 0;
-  const CLS_MLEADERSTYLE = usesMLeaderStyles ? clsNext++ : 0;
+  const CLS_TABLE = usesTables ? clsFor('ACAD_TABLE', 'AcDbTable', 'ISM', true) : 0;
+  const CLS_TABLESTYLE = usesTableStyles
+    ? clsFor('TABLESTYLE', 'AcDbTableStyle', 'ObjectDBX Classes', false) : 0;
+  const CLS_MLEADER = usesMLeaders ? clsFor('MULTILEADER', 'AcDbMLeader', 'ISM', true) : 0;
+  const CLS_MLEADERSTYLE = usesMLeaderStyles
+    ? clsFor('MLEADERSTYLE', 'AcDbMLeaderStyle', 'ACDB_MLEADERSTYLE_CLASS', false) : 0;
   const withStandard = <T extends { name: string }>(list: T[] | undefined, standard: T): T[] => {
     const seen = new Set<string>();
     /* one record per name: a second style of the same name would share
@@ -1487,8 +1558,8 @@ const writeDwgImpl = (
     ? withStandard(drawing.tableStyles, { name: 'Standard' }) : [];
   const mleaderStylesOut = usesMLeaderStyles
     ? withStandard(drawing.mleaderStyles, { name: 'Standard' }) : [];
-  const tableDictH = usesTableStyles ? H() : 0;
-  const mleaderDictH = usesMLeaderStyles ? H() : 0;
+  const tableDictH = usesTableStyles ? keepH(sh('ACAD_TABLESTYLE')) : 0;
+  const mleaderDictH = usesMLeaderStyles ? keepH(sh('ACAD_MLEADERSTYLE')) : 0;
   const tableStyleHByName = new Map<string, number>();
   for (const s of tableStylesOut) tableStyleHByName.set(s.name.toLowerCase(), keepH(s.handle));
   const mleaderStyleHByName = new Map<string, number>();
@@ -1519,7 +1590,11 @@ const writeDwgImpl = (
     ? [modelEnts, paperEnts, ...userBlocks.map((nm) => blockEnts.get(nm)!)]
       .flat().filter((e) => isColumnParent(e) || e.type === 'table')
     : [];
-  const CLS_XRECORD = V <= 14 && columnParents.length ? clsNext++ : 0;
+  /** The type an XRECORD is written under: fixed type 79 from R2000 on,
+   *  the application class R14 knew it as before. */
+  const xrecordType = (): number =>
+    V <= 14 ? clsFor('XRECORD', 'AcDbXrecord', 'ObjectDBX Classes', false) : 79;
+  const CLS_XRECORD = V <= 14 && columnParents.length ? xrecordType() : 0;
   const recomposeH = columnParents.length ? H() : 0;
   /* PDF/DGN/DWF underlays: a class pair and a shared definition per kind */
   const underlayKinds = [...new Set(allEnts
@@ -1527,34 +1602,16 @@ const writeDwgImpl = (
     .map((e) => e.underlayKind))].sort();
   const underlayCls = new Map<string, { ent: number; def: number }>();
   underlayKinds.forEach((kind) => {
-    underlayCls.set(kind, { ent: clsNext++, def: clsNext++ });
+    const cap = kind.charAt(0).toUpperCase() + kind.slice(1);
+    underlayCls.set(kind, {
+      ent: clsFor(kind.toUpperCase() + 'UNDERLAY', `AcDb${cap}Reference`, 'ISM', true),
+      def: clsFor(kind.toUpperCase() + 'DEFINITION', `AcDb${cap}Definition`, 'ISM', false)
+    });
   });
   /* geographic placement: one object, listed in the root dictionary */
   const geoData = drawing.geoData;
-  const CLS_GEODATA = geoData ? clsNext++ : 0;
+  const CLS_GEODATA = geoData ? clsFor('GEODATA', 'AcDbGeoData', 'ISM', false) : 0;
   const geoDataH = geoData ? H() : 0;
-  /* proxy passthrough: each distinct application class behind a proxy gets
-     its own CLASSES record, and the proxy record's class id points at it —
-     that is how a reader learns what the opaque object was. R13/R14 have
-     no CLASSES section but predate the class-id indirection too: their
-     zombie records carry the id verbatim, so passthrough still works. */
-  const proxyClsH = new Map<string, {
-    num: number; cpp: string; app: string; ent: boolean;
-  }>();
-  const addProxyCls = (
-    appClass: { dxfName: string; cppName: string; appName: string } | undefined,
-    sourceType: string | undefined, fallback: string, ent: boolean
-  ): void => {
-    const key = appClass?.dxfName ?? sourceType ?? fallback;
-    if (!proxyClsH.has(key)) {
-      proxyClsH.set(key, {
-        num: clsNext++,
-        cpp: appClass?.cppName ?? key,
-        app: appClass?.appName ?? 'ObjectDBX Classes',
-        ent
-      });
-    }
-  };
   for (const e of allEnts) {
     if (e.type === 'proxy') {
       addProxyCls(e.appClass, e.sourceType, 'ACAD_PROXY_ENTITY', true);
@@ -1606,8 +1663,81 @@ const writeDwgImpl = (
    *  own records (a draw-order table, a rebuilt visibility graph) can be
    *  listed beside the ones that came with it. */
   const isDict = (p: Sealed): boolean =>
-    kindOf(p) === 'DICTIONARY' && p.entries !== undefined;
+    (kindOf(p) === 'DICTIONARY' || kindOf(p) === 'ACDBDICTIONARYWDFLT')
+    && p.entries !== undefined;
+  /** The dictionary with a default (the plot style name dictionary): a
+   *  DICTIONARY body under its own class, its default record's handle
+   *  closing the handle stream. */
+  const isWdflt = (p: Sealed): boolean =>
+    kindOf(p) === 'ACDBDICTIONARYWDFLT' && p.entries !== undefined;
   const isXrecord = (p: Sealed): boolean => kindOf(p) === 'XRECORD';
+  /** The typed values of a sealed XRECORD, when the reader decoded the
+   *  whole record: what an XRECORD of another generation is re-encoded
+   *  from. Its grammar is fixed in every release — a byte-counted run of
+   *  (group, value) — and only the string spelling moves (codepage
+   *  bytes through R2004, UTF-16 from R2007). The decoded run is trusted
+   *  only when it accounts for every byte the record declared: a decode
+   *  that stopped short (an unknown group) keeps its bits. */
+  const xrecordValues = new Map<string, XdataValue[]>();
+  for (const x of drawing.xrecords ?? []) {
+    if (x.handle) xrecordValues.set(x.handle.toUpperCase(), x.values);
+  }
+  const xrecordRunSize = (values: XdataValue[], gen: number): number => {
+    let n = 0;
+    for (const val of values) {
+      n += 2;
+      if ('point' in val) { n += 24; continue; }
+      const s = String(val.value);
+      switch (resbufKind(val.code)) {
+        case 'string': n += gen >= 2007 ? 2 + 2 * s.length : 3 + s.length; break;
+        case 'real': n += 8; break;
+        case 'point': n += 24; break;
+        case 'int8': case 'bool': n += 1; break;
+        case 'int16': n += 2; break;
+        case 'int32': n += 4; break;
+        case 'int64': n += 8; break;
+        case 'binary': n += 1 + (s.replace(/[^0-9a-fA-F]/g, '').length >> 1); break;
+        case 'handle': n += 8; break;
+        default: return -1;
+      }
+    }
+    return n;
+  };
+  const typedCache = new Map<Sealed, XdataValue[] | null>();
+  const typedXrecord = (p: Sealed): XdataValue[] | undefined => {
+    if (!isXrecord(p) || !p.handle || !p.data || p.encoding === undefined) return undefined;
+    let hit = typedCache.get(p);
+    if (hit === undefined) {
+      const values = xrecordValues.get(p.handle.toUpperCase());
+      let declared = -1;
+      try { declared = new BitReader(fromBase64(p.data)).bl(); } catch { /* not a run */ }
+      hit = values && declared >= 0 && xrecordRunSize(values, p.encoding) === declared
+        ? values : null;
+      typedCache.set(p, hit);
+    }
+    return hit ?? undefined;
+  };
+  /** Whether a sealed object's bits belong to another encoding generation
+   *  than this file's — then it goes out wrapped in a proxy record (the
+   *  format's own idiom for foreign data), or not at all where no envelope
+   *  is accepted. Not what is re-encoded from its decoded form instead:
+   *  a dictionary (from its entries), an XRECORD (from its typed values),
+   *  the empty-bodied placeholder. */
+  const wrapped = (p: Sealed): boolean =>
+    p.data !== undefined && p.encoding !== encodingGroup(V)
+    && !isDict(p) && kindOf(p) !== 'ACDBPLACEHOLDER' && typedXrecord(p) === undefined;
+  /** The reference's own visual styles, by name: the set it creates in
+   *  every drawing (the 16 of 2007, the 19 of 2010). A drawing of another
+   *  generation cannot carry them across — the family changed spelling
+   *  at R2013 — and does not need to: the reference recreates the set
+   *  when it opens a drawing without one. */
+  const STANDARD_VISUAL_STYLES = new Set(['2dwireframe', '3dwireframe',
+    '3d hidden', 'basic', 'realistic', 'conceptual', 'dim', 'brighten',
+    'thicken', 'linepattern', 'facepattern', 'colorchange', 'flat',
+    'flatwithedges', 'gouraud', 'gouraudwithedges', 'jitteroff', 'overhangoff',
+    'edgecoloroff', 'shaded', 'shaded with edges', 'shades of gray', 'sketchy',
+    'x-ray', 'hidden', 'wireframe']);
+  let standardVisualStyles = 0;
   /** Kinds that only make sense under their own owner: the ones above,
    *  the AcDbAssoc* framework (a network the reference resolves from
    *  its block's extension dictionary), an extension dictionary and
@@ -1628,15 +1758,15 @@ const writeDwgImpl = (
    *  does, or null when it may go. */
   const staysHome = (p: Sealed): string | null => {
     const kind = kindOf(p);
-    const foreign = p.data !== undefined && p.encoding !== encodingGroup(V);
+    const foreign = wrapped(p);
     /* A foreign-generation seal rides inside a proxy object. The envelope
        the reference accepts is measured for R2000 and R2007+ (see
        sealBody); in R2004 and R13/R14 files every spelling tried so far
        is refused outright (ErrorStatus 53), and a drawing that opens
        without its sealed objects beats one that does not open at all.
-       A dictionary is re-encoded from its entries, so its bits' generation
-       does not matter. */
-    if (foreign && !isDict(p) && (V === 2004 || V < 2000)) return p.sourceType ?? p.name ?? 'sealed object';
+       A dictionary is re-encoded from its entries and an XRECORD from its
+       typed values, so their bits' generation does not matter. */
+    if (foreign && (V === 2004 || V < 2000)) return p.sourceType ?? p.name ?? 'sealed object';
     /* the annotative context records of a later generation, wrapped for
        R2007: refused as a group by the reference (an AC1024 sample's 27 of
        them, each alone accepted at R2018) */
@@ -1677,7 +1807,7 @@ const writeDwgImpl = (
    *  its dbConnect link records). A DXF-sealed record has none of
    *  these: its tags are not bits, and an empty body is not its own. */
   const hasRecord = (p: Sealed): boolean =>
-    !!p.data || p.typeCode !== undefined
+    !!p.data || p.typeCode !== undefined || isDict(p)
     || (p.encoding !== undefined && !!p.xdata?.length
         && !!(p.appClass?.dxfName ?? p.sourceType));
   /** The named-object dictionaries this writer builds itself. A sealed
@@ -1688,10 +1818,17 @@ const writeDwgImpl = (
    *  line styles) or re-homed as before. */
   const BUILT_NOD = new Set(['ACAD_LAYOUT', 'ACAD_GROUP', 'ACAD_MLINESTYLE',
     'ACAD_TABLESTYLE', 'ACAD_MLEADERSTYLE', 'ACDB_RECOMPOSE_DATA',
-    'ACAD_GEOGRAPHICDATA', 'ACAD_PLOTSTYLENAME']);
+    'ACAD_GEOGRAPHICDATA']);
   const sealedAll = (drawing.unknownObjects ?? []).filter((p) => {
     if (kindOf(p) === 'DICTIONARY' && p.dictPath?.length === 0 && p.name
       && BUILT_NOD.has(p.name.toUpperCase())) return false;
+    /* the plot style name dictionary (with its default, the placeholder)
+       is R2000's: R13/R14 have no plot styles to name */
+    if (V < 2000 && isWdflt(p)) {
+      skipped.push('ACDBDICTIONARYWDFLT (needs R2000 or later)');
+      return false;
+    }
+    if (V < 2000 && kindOf(p) === 'ACDBPLACEHOLDER') return false;
     /* nothing retained to write — a record that arrived through DXF
        as tags alone, or an empty one with no class to write it under.
        Out of the file, and said so. */
@@ -1735,18 +1872,43 @@ const writeDwgImpl = (
     for (const st of drawing.textStyles) addRef(st.handle);
     for (const s of tableStylesOut) addRef(s.handle);
     for (const s of mleaderStylesOut) addRef(s.handle);
-  }
-  /* The source's named objects dictionary. A sealed object listed
-     straight under it (dictPath []) is written under this file's root
-     dictionary — its original owner, under its original key — and a
-     reference to it (a FIELDLIST's reactor) follows the same way. */
-  {
-    const nodSrc = sealedAll.find((p) => p.dictPath?.length === 0 && p.ownerHandle)?.ownerHandle;
-    const old = nodSrc ? parseInt(nodSrc, 16) : NaN;
-    if (nodSrc && Number.isFinite(old) && old > 0 && !oldToNew.has(old)) {
-      oldToNew.set(old, nod);
-      baseKept.add(nodSrc.toUpperCase());
+    /* the layouts, views, the active viewport, the dimension styles and
+       the groups are records of this file too */
+    if (V >= 2000) {
+      for (const l of [modelMeta, paperMeta, ...extraLayouts.map((x) => x.meta)]) addRef(l?.handle);
     }
+    for (const vw of views) addRef(vw.handle);
+    addRef(activeVport?.handle);
+    for (const ds of dimStyles) addRef(ds.handle);
+    for (const g of groupsOut) addRef(g.handle);
+  }
+  /* The source's structural objects: the named objects dictionary, its
+     sub-dictionaries this writer rebuilds, the symbol-table controls. A
+     sealed object owned by one of them — a record listed straight under
+     the root (dictPath []), the layer table's extension dictionary — is
+     written under the object built here in its place, and a reference
+     to it (a FIELDLIST's reactor) follows the same way. The root is
+     inferred from what hangs under it when the model does not name it
+     (a drawing that came through DXF). */
+  {
+    const map = (src: string | undefined, out: number): void => {
+      const old = src ? parseInt(src, 16) : NaN;
+      if (!src || !Number.isFinite(old) || old <= 0) return;
+      if (!oldToNew.has(old)) oldToNew.set(old, out);
+      baseKept.add(src.toUpperCase());
+    };
+    map(sh('NOD') ?? sealedAll.find((p) => p.dictPath?.length === 0 && p.ownerHandle)?.ownerHandle, nod);
+    if (V >= 2000) map(sh('ACAD_LAYOUT'), layoutDict);
+    map(sh('ACAD_GROUP'), groupDict);
+    map(sh('ACAD_MLINESTYLE'), mlineDict);
+    if (usesTableStyles) map(sh('ACAD_TABLESTYLE'), tableDictH);
+    if (usesMLeaderStyles) map(sh('ACAD_MLEADERSTYLE'), mleaderDictH);
+    map(sh('BLOCK_CONTROL'), blockControl); map(sh('LAYER_CONTROL'), layerControl);
+    map(sh('STYLE_CONTROL'), styleControl); map(sh('LTYPE_CONTROL'), ltypeControl);
+    map(sh('VIEW_CONTROL'), viewControl); map(sh('UCS_CONTROL'), ucsControl);
+    map(sh('VPORT_CONTROL'), vportControl); map(sh('APPID_CONTROL'), appidControl);
+    map(sh('DIMSTYLE_CONTROL'), dimstyleControl);
+    if (V <= 2000) map(sh('VX_CONTROL'), vxControl);
   }
   /** The sealed objects that go, settled to a fixed point: out by kind
    *  first (staysHome), then anything whose owner is a sealed object
@@ -1770,19 +1932,33 @@ const writeDwgImpl = (
     whyNot.set(p, why);
     if (quiet) silent.add(p);
   };
+  /** Whether a sealed dictionary lists an entry in this file: its target
+   *  is written and — in a dictionary of the named-objects tree — goes
+   *  out native. A seal-wrap inside one of the reference's own
+   *  dictionaries is audited (147 findings on A-01 into 2018, a proxy
+   *  where a SCALE was expected); such a record is re-homed flat under
+   *  the root instead, where a proxy is harmless, and the dictionary —
+   *  its grammar the same in every release — is re-encoded from the
+   *  entries that stay native: the XRECORDs of AcDbVariableDictionary,
+   *  say, which travel into any generation from their typed values. */
+  const listable = (d: Sealed, en: { handle: string }): boolean => {
+    if (!written(en.handle)) return false;
+    if (d.dictPath === undefined) return true;
+    const t = sealedByH.get(en.handle.toUpperCase());
+    return !t || !wrapped(t);
+  };
   for (const p of sealedAll) {
+    /* the reference's own visual styles of another spelling: dropped as
+       a set, reported once — the reference recreates them on open */
+    if (kindOf(p) === 'VISUALSTYLE'
+      && (wrapped(p) || (V >= 2018 && drawing.header.version === 'R2010'))
+      && STANDARD_VISUAL_STYLES.has((p.name ?? '').toLowerCase())) {
+      standardVisualStyles++;
+      stay(p, 'VISUALSTYLE (the reference\'s standard set)', true);
+      continue;
+    }
     const why = staysHome(p);
     if (why !== null) stay(p, why);
-    /* a dictionary of the named-objects tree goes only into its own
-       generation: written into another, its records would be proxies
-       (the foreign wrap), and the reference audits a proxy inside one
-       of its own dictionaries — 147 findings on A-01 into 2018. It
-       stays home quietly; what it listed is re-homed flat under the
-       root as before, where a proxy is harmless. */
-    else if (isDict(p) && p.dictPath !== undefined
-      && p.encoding !== undefined && p.encoding !== encodingGroup(V)) {
-      stay(p, `${p.sourceType ?? 'DICTIONARY'} (tree dictionary of another generation)`, true);
-    }
   }
   const settle = (): void => {
     for (let changed = true; changed;) {
@@ -1792,23 +1968,27 @@ const writeDwgImpl = (
         const o = p.ownerHandle?.toUpperCase();
         const ownerSealed = o ? sealedByH.get(o) : undefined;
         const ownerIn = !!o && written(o);
+        /* (a record listed by a tree dictionary that stays home is
+           re-homed flat under the root, as it always was) */
+        const ownerTree = !!ownerSealed && isDict(ownerSealed) && ownerSealed.dictPath !== undefined;
         let why: string | null = null;
         let quiet = false;
-        if (ownerSealed && !travel.has(ownerSealed)
-          /* (a record listed by a tree dictionary that stays home is
-             re-homed flat under the root, as it always was) */
-          && !(isDict(ownerSealed) && ownerSealed.dictPath !== undefined)) {
+        if (ownerSealed && !travel.has(ownerSealed) && !ownerTree) {
           /* the owner's own line in `skipped` covers everything hanging
              off it: one chain, one loss, reported once at its root */
           why = `${p.sourceType ?? 'sealed object'} (its owner stays home)`;
           quiet = true;
         } else if (isDict(p)) {
-          if (!(p.entries ?? []).some((en) => written(en.handle))) {
+          if (!(p.entries ?? []).some((en) => listable(p, en))) {
             why = `${p.sourceType ?? kind} (nothing it lists is written)`;
             quiet = true;
           } else if (!ownerIn) {
             why = `${p.sourceType ?? kind} (extension dictionary of an object not written)`;
           }
+        } else if (wrapped(p) && ownerTree && chained(p)) {
+          /* a seal-wrap inside the reference's own dictionary is audited,
+             and this kind is refused re-homed anywhere else */
+          why = `${p.sourceType ?? kind} (of another generation, listed by one of the reference's own dictionaries)`;
         } else if (!ownerIn && chained(p)) {
           why = isXrecord(p)
             ? `${p.sourceType ?? kind} (its owner is not written)`
@@ -1903,13 +2083,27 @@ const writeDwgImpl = (
     if (p.handle && supersededGraph.has(p.handle.toUpperCase())) continue;
     skipped.push(whyNot.get(p)!);
   }
+  if (standardVisualStyles) {
+    skipped.push(`${standardVisualStyles} VISUALSTYLE records `
+      + '(the reference\'s standard set, in another generation\'s spelling; recreated on open)');
+  }
   const unknownObjs = sealedAll.filter((p) => travel.has(p));
   for (const p of unknownObjs) {
     if (p.typeCode === undefined) {
       addProxyCls(p.appClass, p.sourceType, 'ACAD_PROXY_OBJECT', false);
     }
+    /* an XRECORD re-encoded into an R14 file is typed with its class */
+    if (V <= 14 && isXrecord(p)) xrecordType();
   }
   const unknownObjH = unknownObjs.map((p) => keepH(p.handle));
+  /** The plot style name dictionary of this file: the source's, carried
+   *  with its default (the placeholder), when it travels — the header
+   *  names it. */
+  const plotStyleDictH = ((): number => {
+    const i = unknownObjs.findIndex((p) => isWdflt(p) && p.dictPath?.length === 0
+      && (p.name ?? '').toUpperCase() === 'ACAD_PLOTSTYLENAME');
+    return i >= 0 ? unknownObjH[i] : 0;
+  })();
   /* Every handle is allocated now: this is where a source handle maps
      to this file's number, and where the chains are wired. */
   const sealedOut = new Map<string, number>();
@@ -1929,23 +2123,36 @@ const writeDwgImpl = (
     return oldToNew.get(old);
   };
   /** The owner a sealed or proxy object is written under, or undefined
-   *  when its source owner is not in this file (then: the NOD). */
-  const ownerOut = (p: { ownerHandle?: string }): number | undefined => outOf(p.ownerHandle);
+   *  when its source owner is not in this file (then: the NOD). A
+   *  seal-wrap is never listed by a dictionary of the reference's own
+   *  tree (see `listable`): re-homed flat under the root. */
+  const ownerOut = (p: { handle?: string; ownerHandle?: string }): number | undefined => {
+    const o = outOf(p.ownerHandle);
+    if (o === undefined || !p.ownerHandle) return undefined;
+    const self = p.handle ? sealedByH.get(p.handle.toUpperCase()) : undefined;
+    if (self && wrapped(self)) {
+      const os = sealedByH.get(p.ownerHandle.toUpperCase());
+      if (os && isDict(os) && os.dictPath !== undefined) return undefined;
+    }
+    return o;
+  };
   /** Listed in this file's root dictionary: a record whose owner is not
    *  in the file (re-homed), or whose owner was the source's root
    *  dictionary (home). */
-  const underNod = (p: { ownerHandle?: string }): boolean => {
+  const underNod = (p: { handle?: string; ownerHandle?: string }): boolean => {
     const o = ownerOut(p);
     return o === undefined || o === nod;
   };
   /** The sealed extension dictionaries that go out under their owner, by
-   *  the owner's handle in this file. A dictionary owned by another
-   *  sealed dictionary is that one's entry, not an extension dictionary. */
+   *  the owner's handle in this file. A dictionary another sealed
+   *  dictionary LISTS is that one's entry, not an extension dictionary;
+   *  one it owns without listing is its extension dictionary. */
   const xdictByOwner = new Map<number, { p: Sealed; h: number }>();
   unknownObjs.forEach((p, i) => {
     if (!isDict(p) || !p.ownerHandle) return;
     const os = sealedByH.get(p.ownerHandle.toUpperCase());
-    if (os && isDict(os)) return;
+    if (os && isDict(os)
+      && (os.entries ?? []).some((en) => en.handle.toUpperCase() === p.handle?.toUpperCase())) return;
     const oh = ownerOut(p);
     if (oh !== undefined) xdictByOwner.set(oh, { p, h: unknownObjH[i] });
   });
@@ -1971,11 +2178,18 @@ const writeDwgImpl = (
      from the decoded states; the sealed remnants stay home, reported by
      kind. */
   const usesDynBlocks = dynBlocks.length > 0 && V >= 2000;
-  const CLS_BLOCKVIS = usesDynBlocks ? clsNext++ : 0;
-  const CLS_EVALGRAPH = usesDynBlocks ? clsNext++ : 0;
-  const CLS_BLOCKVISGRIP = usesDynBlocks ? clsNext++ : 0;
-  const CLS_BLOCKGRIPEXPR = usesDynBlocks ? clsNext++ : 0;
-  const CLS_DYNPURGE = usesDynBlocks ? clsNext++ : 0;
+  /* (one number per class name: a genuine graph travelling from the
+     source beside a rebuilt one shares these records) */
+  const CLS_BLOCKVIS = usesDynBlocks
+    ? clsFor('BLOCKVISIBILITYPARAMETER', 'AcDbBlockVisibilityParameter', 'ObjectDBX Classes', false) : 0;
+  const CLS_EVALGRAPH = usesDynBlocks
+    ? clsFor('ACAD_EVALUATION_GRAPH', 'AcDbEvalGraph', 'ObjectDBX Classes', false) : 0;
+  const CLS_BLOCKVISGRIP = usesDynBlocks
+    ? clsFor('BLOCKVISIBILITYGRIP', 'AcDbBlockVisibilityGrip', 'ObjectDBX Classes', false) : 0;
+  const CLS_BLOCKGRIPEXPR = usesDynBlocks
+    ? clsFor('BLOCKGRIPLOCATIONCOMPONENT', 'AcDbBlockGripExpr', 'ObjectDBX Classes', false) : 0;
+  const CLS_DYNPURGE = usesDynBlocks
+    ? clsFor('ACDB_DYNAMICBLOCKPURGEPREVENTER_VERSION', 'AcDbDynamicBlockPurgePreventer', 'ObjectDBX Classes', false) : 0;
   /* Draw order. A default write needs nothing: fresh handles ascend in
      array order, and array order IS the draw order. Under preserveHandles
      a space whose array order differs from its ascending handle order
@@ -2001,7 +2215,8 @@ const writeDwgImpl = (
       sortSpaces.push({ block, hs });
     }
   }
-  const CLS_SORTENTS = sortSpaces.length ? clsNext++ : 0;
+  const CLS_SORTENTS = sortSpaces.length
+    ? clsFor('SORTENTSTABLE', 'AcDbSortentsTable', 'ObjectDBX Classes', false) : 0;
   const sortentsFor = new Map<number, { dict: number; table: number }>();
   for (const s of sortSpaces) {
     /* the block's sealed extension dictionary, when it travels, is the
@@ -2068,6 +2283,60 @@ const writeDwgImpl = (
        (a seal with no string stream at all was refused; the reference's
        re-save of ours replaces whatever was there with exactly this) */
     if (V >= 2007) w.t('cn:' + (cppName ?? s.appClass?.cppName ?? 'AcDbObject'));
+  };
+
+  /** An XRECORD's data from its typed values: the byte-counted run of
+   *  (RS group, value) the reader decodes — reals as RD, points as three,
+   *  8/16/32/64-bit integers as RC/RS/RL/RLL, binary as a counted byte
+   *  run, an object id as an absolute 64-bit handle (followed through
+   *  this file's numbering), and strings as this release spells them:
+   *  a UTF-16 run from R2007, a counted byte run behind a codepage
+   *  byte before. The run is byte-aligned by construction. */
+  const xrecordBody = (w: BitWriter, values: XdataValue[]): void => {
+    const run = new BitWriter();
+    for (const val of values) {
+      if ('point' in val) {
+        run.rs(val.code);
+        run.rd(val.point.x); run.rd(val.point.y); run.rd(val.point.z ?? 0);
+        continue;
+      }
+      const value = val.value;
+      const num = typeof value === 'number' ? value : Number(value) || 0;
+      switch (resbufKind(val.code)) {
+        case 'string': {
+          run.rs(val.code);
+          if (V >= 2007) {
+            const s = String(value);
+            run.rs(s.length);
+            for (let i = 0; i < s.length; i++) run.rs(s.charCodeAt(i));
+          } else {
+            const s = outText(String(value));
+            run.rs(s.length);
+            run.rc(30);                   /* ANSI_1252, the file's codepage */
+            for (let i = 0; i < s.length; i++) run.rc(s.charCodeAt(i) & 0xff);
+          }
+          break;
+        }
+        case 'real': run.rs(val.code); run.rd(num); break;
+        case 'point': run.rs(val.code); run.rd(num); run.rd(0); run.rd(0); break;
+        case 'int8': case 'bool': run.rs(val.code); run.rc(num & 0xff); break;
+        case 'int16': run.rs(val.code); run.rs(num & 0xffff); break;
+        case 'int32': run.rs(val.code); run.rl(num >>> 0); break;
+        case 'int64': run.rs(val.code); run.rll(num); break;
+        case 'binary': {
+          const hex = String(value).replace(/[^0-9a-fA-F]/g, '');
+          const n = Math.min(255, hex.length >> 1);
+          run.rs(val.code); run.rc(n);
+          for (let i = 0; i < n; i++) run.rc(parseInt(hex.slice(i * 2, i * 2 + 2), 16));
+          break;
+        }
+        case 'handle': run.rs(val.code); run.rll(mapRef(String(value))); break;
+        default: break;                   /* an unknown group is not a value */
+      }
+    }
+    const bytes = run.bytes();
+    w.bl(bytes.length);
+    w.raw(bytes);
   };
 
   /** Object type + (pre-R2010) the inline bitsize field. R2010+ moves the
@@ -4408,7 +4677,9 @@ const writeDwgImpl = (
     const txstyName = typeof vars.DIMTXSTY === 'string' ? vars.DIMTXSTY : '';
     const txsty = styleH.get(txstyName)
       ?? styleH.get('Standard') ?? [...styleH.values()][0];
-    makeObject(69, dimStyleH.get(ds.name.toLowerCase())!, (w) => {
+    const h = dimStyleH.get(ds.name.toLowerCase())!;
+    const xd = xdictByOwner.get(h)?.h ?? 0;
+    makeObject(69, h, (w) => {
       tableFlags(w, ds.name);
       if (V <= 14) {
         w.b(flag('DIMTOL')); w.b(flag('DIMLIM'));
@@ -4483,14 +4754,87 @@ const writeDwgImpl = (
       w.b(0);                           /* unknown flag bit, always 0 */
     }, (w) => {
       w.h(4, dimstyleControl);
-      if (V < 2004) w.h(3, 0);          /* xdict */
+      if (V < 2004 || xd) w.h(3, xd);   /* xdict */
       w.h(5, 0);                        /* xref block */
       w.h(5, txsty);                    /* DIMTXSTY */
       if (V >= 2000) {
         w.h(5, 0); w.h(5, 0); w.h(5, 0); w.h(5, 0);   /* DIMLDRBLK, DIMBLK/1/2 */
       }
       if (V >= 2007) { w.h(5, 0); w.h(5, 0); w.h(5, 0); }   /* DIMLTYPE, DIMLTEX1/2 */
-    });
+    }, xd);
+  };
+
+  /** A named VIEW record — the VPORT's layout up to the paper-space
+   *  flag (height, width, centre, target THEN direction, twist, lens,
+   *  clips, the four mode bits, the R2000+ render mode, the R2007+
+   *  lighting block), then the flag, the R2000+ associated UCS and the
+   *  R2007+ camera flag; in the handle stream the xref slot, the R2007+
+   *  background / visual style / sun, the UCS pair when the view keeps
+   *  one, and the R2007+ live section. Named views are what a sheet
+   *  set's view list and the reference's own VIEW command hold, their
+   *  thumbnails in the record's extension dictionary. */
+  const makeView = (vw: View, h: number): void => {
+    const xd = xdictByOwner.get(h)?.h ?? 0;
+    const hasUcs = V >= 2000 && !!(vw.ucsOrigin || vw.ucsXAxis || vw.ucsYAxis);
+    makeObject(61, h, (w) => {
+      tableFlags(w, vw.name);
+      w.bd(vw.height); w.bd(vw.width);
+      w.rd(vw.center.x); w.rd(vw.center.y);
+      const t = vw.target ?? { x: 0, y: 0, z: 0 };
+      w.bd3(t.x, t.y, t.z ?? 0);
+      const d = vw.direction ?? { x: 0, y: 0, z: 1 };
+      w.bd3(d.x, d.y, d.z ?? 0);
+      w.bd(vw.twist ?? 0);
+      w.bd(vw.lensLength ?? 50);
+      w.bd(vw.frontClip ?? 0); w.bd(vw.backClip ?? 0);
+      const vm = vw.viewMode ?? 0;
+      w.b(vm & 1); w.b((vm >> 1) & 1); w.b((vm >> 2) & 1); w.b(1);
+      if (V >= 2000) w.rc(vw.renderMode ?? 0);
+      if (V >= 2007) {
+        w.b(1);                           /* default lights */
+        w.rc(1);                          /* default lighting type */
+        w.bd(0); w.bd(0);                 /* brightness, contrast */
+        w.bs(250); w.bl(0); w.rc(0);      /* ambient colour (CMC) */
+      }
+      w.b(vw.paperSpace ? 1 : 0);
+      if (V >= 2000) {
+        w.b(hasUcs ? 1 : 0);
+        if (hasUcs) {
+          const o = vw.ucsOrigin ?? { x: 0, y: 0, z: 0 };
+          const ux = vw.ucsXAxis ?? { x: 1, y: 0, z: 0 };
+          const uy = vw.ucsYAxis ?? { x: 0, y: 1, z: 0 };
+          w.bd3(o.x, o.y, o.z ?? 0);
+          w.bd3(ux.x, ux.y, ux.z ?? 0); w.bd3(uy.x, uy.y, uy.z ?? 0);
+          w.bd(vw.ucsElevation ?? 0);
+          w.bs(vw.ucsOrthoType ?? 0);
+        }
+      }
+      if (V >= 2007) w.b(0);              /* camera plottable */
+    }, (w) => {
+      w.h(4, viewControl);
+      if (V < 2004 || xd) w.h(3, xd);
+      w.h(5, 0);                          /* xref */
+      if (V >= 2007) { w.h(4, 0); w.h(5, 0); w.h(3, 0); }  /* bg, style, sun */
+      if (hasUcs) { w.h(5, 0); w.h(5, 0); }   /* base / named UCS */
+      if (V >= 2007) w.h(4, 0);           /* live section */
+    }, xd);
+  };
+
+  /** A GROUP object: the description, the unnamed and selectable flags,
+   *  the member count, then the members as hard pointers — the ones that
+   *  are in this file. The name is its ACAD_GROUP key. */
+  const makeGroup = (g: Group, h: number, members: number[]): void => {
+    const xd = xdictByOwner.get(h)?.h ?? 0;
+    makeObject(72, h, (w) => {
+      w.t(outText(r14Str(g.description ?? '')));
+      w.bs(/^\*/.test(g.name) ? 1 : 0);   /* unnamed */
+      w.bs(g.selectable === false ? 0 : 1);
+      w.bl(members.length);
+    }, (w) => {
+      w.h(4, groupDict);
+      if (V < 2004 || xd) w.h(3, xd);
+      for (const m of members) w.h(5, m);
+    }, xd);
   };
 
   /** The MLINESTYLE "STANDARD" object — present in every real file,
@@ -4585,6 +4929,9 @@ const writeDwgImpl = (
       c.borders?.[i] ?? {};
     const hm = s.horizontalMargin ?? 0.06, vm = s.verticalMargin ?? 0.06;
     const desc = s.description ?? s.name;
+    /* the style's extension dictionary (the reference's 2008 cell-style
+       map lives there), when the sealed one goes out under it */
+    const xd = xdictByOwner.get(handle)?.h ?? 0;
     if (V < 2010) {
       makeObject(CLS_TABLESTYLE, handle, (w) => {
         w.t(nameText(desc) + (V < 2007 ? '\0' : ''));
@@ -4612,9 +4959,9 @@ const writeDwgImpl = (
         }
       }, (w) => {
         w.h(4, tableDictH);             /* owner */
-        if (V < 2004) w.h(3, 0);        /* xdict */
+        if (V < 2004 || xd) w.h(3, xd); /* xdict */
         for (const c of [data, title, header]) w.h(5, textStyleRef(c.textStyle));
-      }, 0, s.xdata);
+      }, xd, s.xdata);
       return;
     }
     const margins = [vm, hm, vm, hm, 0.18, 0.18];
@@ -4668,13 +5015,14 @@ const writeDwgImpl = (
       }
     }, (w) => {
       w.h(4, tableDictH);               /* owner */
+      if (xd) w.h(3, xd);               /* xdict */
       w.h(3, 0);                        /* unknown hard owner */
       w.h(5, 0);                        /* the table cell style's text style */
       for (const [, c] of entries) {
         w.h(5, textStyleRef(c.textStyle));
         for (let i = 0; i < 6; i++) w.h(5, 0);   /* border linetypes */
       }
-    }, 0, s.xdata);
+    }, xd, s.xdata);
   };
 
   /** An MLEADERSTYLE — the record every MULTILEADER's style handle must
@@ -4691,6 +5039,7 @@ const writeDwgImpl = (
     const MLVER = 'ACAD_MLEADERVER';
     const xdata = s.xdata?.some((g) => g.appName === MLVER) ? s.xdata
       : [...(s.xdata ?? []), { appName: MLVER, values: [{ code: 1070, value: 2 }] }];
+    const xd = xdictByOwner.get(handle)?.h ?? 0;
     makeObject(CLS_MLEADERSTYLE, handle, (w) => {
       if (V >= 2010) w.bs(2);           /* class version */
       w.bs(s.contentType ?? 2);         /* content type: mtext */
@@ -4734,12 +5083,12 @@ const writeDwgImpl = (
       if (V >= 2013) w.b(0);            /* extended text */
     }, (w) => {
       w.h(4, mleaderDictH);             /* owner */
-      if (V < 2004) w.h(3, 0);          /* xdict */
+      if (V < 2004 || xd) w.h(3, xd);   /* xdict */
       w.h(5, (s.linetype && ltypeH.get(s.linetype)) || ltByblock);
       w.h(5, (s.arrowBlock && blockH.get(s.arrowBlock)) || 0);   /* arrowhead */
       w.h(5, textStyleRef(s.textStyle));
       w.h(5, (s.blockName && blockH.get(s.blockName)) || 0);     /* block content */
-    }, 0, xdata);
+    }, xd, xdata);
   };
 
   /** The stored name of an anonymous block. The file keeps the bare
@@ -4853,11 +5202,14 @@ const writeDwgImpl = (
 
   /* ---- control objects ---- */
 
-  /** Control object: BL count, then INLINE handles (R2000 layout). */
+  /** Control object: BL count, then INLINE handles (R2000 layout). Its
+   *  extension dictionary, when the sealed one goes out under it (the
+   *  layer table's ACAD_LAYERSTATES / ACAD_LAYERFILTERS chain). */
   const makeControl = (
     type: number, handle: number, entries: number[],
     tail?: (w: BitWriter) => void
   ): void => {
+    const xd = xdictByOwner.get(handle)?.h ?? 0;
     const w = new BitWriter();
     let sizePos = objectPrologue(w, type);
     const sw = withStrings(w);
@@ -4865,7 +5217,7 @@ const writeDwgImpl = (
     w.bs(0);                              /* EED */
     if (V <= 14) { sizePos = w.pos; w.rl(0); }  /* handle-stream position */
     w.bl(0);                              /* reactors */
-    if (V >= 2004) w.b(1);                /* xdict missing */
+    if (V >= 2004) w.b(xd ? 0 : 1);       /* xdict missing */
     if (V >= 2018) w.b(0);                /* has_ds_data (2013+) */
     w.bl(entries.length);
     /* the R2000+ DIMSTYLE control carries an extra RC: the count of
@@ -4877,7 +5229,7 @@ const writeDwgImpl = (
     const bitsize = closeData(w, sw);
     if (sizePos >= 0) w.patchRl(sizePos, bitsize);
     w.h(4, 0);                            /* owner (null) */
-    if (V < 2004) w.h(3, 0);              /* xdict */
+    if (V < 2004 || xd) w.h(3, xd);       /* xdict */
     for (const h of entries) w.h(2, h);
     tail?.(w);
     finishObject(w, handle, bitsize);
@@ -4890,6 +5242,9 @@ const writeDwgImpl = (
   const makeDictionary = (
     handle: number, owner: number, items: [string, number][]
   ): void => {
+    /* the dictionary's own extension dictionary, when the source's sealed
+       one goes out under it (the root's, a sub-dictionary's) */
+    const xd = xdictByOwner.get(handle)?.h ?? 0;
     makeObject(42, handle, (w) => {
       w.bl(items.length);
       if (V >= 2000) w.bs(1);             /* cloning (R2000+ only) */
@@ -4897,9 +5252,9 @@ const writeDwgImpl = (
       for (const [name] of items) w.t(nameText(r14Str(name)));
     }, (w) => {
       w.h(4, owner);
-      if (V < 2004) w.h(3, 0);
+      if (V < 2004 || xd) w.h(3, xd);
       for (const [, h] of items) w.h(2, h);
-    });
+    }, xd);
   };
 
   /* ---------------- build all objects ---------------- */
@@ -5015,7 +5370,7 @@ const writeDwgImpl = (
      is reversed ("Special Name Incorrect", 2 errors) */
   makeControl(56, ltypeControl, userLtypes.map((lt) => ltypeH.get(lt.name)!),
     (w) => { w.h(3, ltByblock); w.h(3, ltBylayer); });
-  makeControl(60, viewControl, []);
+  makeControl(60, viewControl, viewH);
   makeControl(62, ucsControl, []);
   makeControl(64, vportControl, [vportActive]);
   makeControl(66, appidControl, [appidAcad, ...extraAppids.map((a) => a.handle)]);
@@ -5055,7 +5410,25 @@ const writeDwgImpl = (
     out.push([key, h]);
     return out;
   }, []));
-  makeDictionary(groupDict, nod, []);
+  /* the groups: one key each (a second of the same name is numbered),
+     the members that are in this file */
+  {
+    const keys = new Set<string>();
+    const items: [string, number][] = groupsOut.map((g, i) => {
+      let key = g.name || '*A';
+      for (let n = 2; keys.has(key.toLowerCase()); n++) key = `${g.name || '*A'}${n}`;
+      keys.add(key.toLowerCase());
+      return [key, groupH[i]];
+    });
+    makeDictionary(groupDict, nod, items);
+    groupsOut.forEach((g, i) => {
+      const members = g.entityHandles
+        .map((eh) => outOf(eh))
+        .filter((m): m is number => m !== undefined);
+      makeGroup(g, groupH[i], members);
+    });
+  }
+  views.forEach((vw, i) => makeView(vw, viewH[i]));
   if (recomposeH) {
     /* the XRECORD's data is a byte-counted run of (RS group, value):
        RL for 90, an absolute 64-bit handle for 330 — walked bit-exact
@@ -5101,14 +5474,11 @@ const writeDwgImpl = (
        LAYOUT record that points at the block, else Layout<n>; every
        tab name is unique in the dictionary */
     const usedNames = new Set(['model', paperName.toLowerCase()]);
-    const extras = extraPaperBlocks.map((nm, i) => {
-      const meta = metas.find((l) => l !== paperMeta
-        && l.blockName?.toLowerCase() === nm.toLowerCase());
+    const extras = extraLayouts.map(({ nm, meta, h }, i) => {
       const stem = meta?.name ?? 'Layout';
       let name = meta?.name ?? stem + (i + 2);
       for (let k = 2; usedNames.has(name.toLowerCase()); k++) name = stem + k;
       usedNames.add(name.toLowerCase());
-      const h = H();
       layoutOfBlock.set(nm, h);
       return { nm, h, name, meta, tabOrder: meta?.tabOrder ?? i + 2 };
     });
@@ -5120,6 +5490,7 @@ const writeDwgImpl = (
       handle: number, name: string, tabOrder: number, blockHdr: number,
       meta: typeof metas[number] | undefined
     ): void => {
+      const xd = xdictByOwner.get(handle)?.h ?? 0;
       makeObject(82, handle, (w) => {
         /* AcDbPlotSettings — a no-printer default plot setup */
         w.t('');                          /* printer config */
@@ -5153,13 +5524,13 @@ const writeDwgImpl = (
         if (V >= 2004) w.bl(0);           /* viewport count */
       }, (w) => {
         w.h(4, layoutDict);               /* owner */
-        if (V < 2004) w.h(3, 0);          /* xdict */
+        if (V < 2004 || xd) w.h(3, xd);   /* xdict */
         if (V >= 2004) w.h(4, 0);         /* plot view */
         if (V >= 2007) w.h(4, 0);         /* shade plot */
         w.h(4, blockHdr);                 /* the space it lays out */
         w.h(4, 0);                        /* active viewport */
         w.h(5, 0); w.h(5, 0);             /* base / named UCS */
-      });
+      }, xd);
     };
     makeLayout(layoutModelH, 'Model', modelMeta?.tabOrder ?? 0, msBH, modelMeta);
     makeLayout(layoutPaperH, paperName, paperMeta?.tabOrder ?? 1, psBH, paperMeta);
@@ -5172,7 +5543,8 @@ const writeDwgImpl = (
        all, since a drawing laid out at an angle is drawn turned without
        it. A drawing with no view of its own gets the defaults that were
        here before. */
-    const av = (drawing.vports ?? []).find((p) => /^\*active$/i.test(p.name));
+    const av = activeVport;
+    const xd = xdictByOwner.get(vportActive)?.h ?? 0;
     const p2 = (p: Point2 | undefined, dx: number, dy: number): [number, number] =>
       p ? [p.x, p.y] : [dx, dy];
     const p3v = (p: Point3 | undefined, d: readonly [number, number, number])
@@ -5240,11 +5612,11 @@ const writeDwgImpl = (
       if (V >= 2007) { w.bs(3); w.bs(5); }  /* grid flags, major */
     }, (w) => {
       w.h(4, vportControl);
-      if (V < 2004) w.h(3, 0);            /* xdict */
+      if (V < 2004 || xd) w.h(3, xd);     /* xdict */
       w.h(5, 0);                          /* xref */
       if (V >= 2007) { w.h(4, 0); w.h(5, 0); w.h(3, 0); }  /* bg, style, sun */
       if (V >= 2000) { w.h(5, 0); w.h(5, 0); }  /* named / base UCS */
-    });
+    }, xd);
   }
 
   /* ---- dictionary-owned proxy objects: passthrough, same discipline as
@@ -5303,25 +5675,33 @@ const writeDwgImpl = (
       if (V < 2004 || xd) w.h(3, xd);
     };
     if (isDict(p)) {
-      /* An extension dictionary, re-encoded from its entries in the
-         spelling of makeDictionary: the entries whose targets are in
-         this file, each under the code the source gave it, and after
-         them this writer's own (a draw-order table, a rebuilt graph),
-         which replace a stale entry of the same key. The cloning code
-         and the hard-owner flag are the record's own. */
+      /* A dictionary — an extension dictionary, one of the named-objects
+         tree, the plot style name dictionary with its default —
+         re-encoded from its entries in the spelling of makeDictionary:
+         the entries whose targets are in this file (and, in a tree
+         dictionary, native — see `listable`), each under the code the
+         source gave it, and after them this writer's own (a draw-order
+         table, a rebuilt graph), which replace a stale entry of the same
+         key. The cloning code and the hard-owner flag are the record's
+         own. */
       const fresh = extraDictEntries.get(h) ?? [];
       const freshKeys = new Set(fresh.map(([n]) => n.toUpperCase()));
       const ownCode = p.hardOwner ? 3 : 2;
       const items: [string, number, number][] = [];
       for (const en of p.entries ?? []) {
         if (freshKeys.has(en.name.toUpperCase())) continue;
+        if (!listable(p, en)) continue;
         const t = outOf(en.handle);
         if (t === undefined) continue;
         const code = en.code !== undefined && en.code >= 2 && en.code <= 5 ? en.code : ownCode;
         items.push([en.name, t, code]);
       }
       for (const [n, t] of fresh) items.push([n, t, ownCode]);
-      makeObject(42, h, (w) => {
+      const wdflt = isWdflt(p);
+      const type = wdflt
+        ? clsFor('ACDBDICTIONARYWDFLT', 'AcDbDictionaryWithDefault', 'ObjectDBX Classes', false)
+        : 42;
+      makeObject(type, h, (w) => {
         w.bl(items.length);
         if (V >= 2000) w.bs(p.cloning ?? 1);
         if (V >= 14) w.rc(p.hardOwner ? 1 : 0);
@@ -5329,6 +5709,8 @@ const writeDwgImpl = (
       }, (w) => {
         prologue(w);
         for (const [, t, code] of items) w.h(code, t);
+        /* the default record closes the handle stream */
+        if (wdflt) w.h(5, outOf(p.defaultHandle) ?? 0);
       }, xd, p.xdata, reactors.length);
       return;
     }
@@ -5338,8 +5720,27 @@ const writeDwgImpl = (
         w.h(ref.code, mapRef(ref.value));
       }
     };
+    /* the placeholder: an empty body under its fixed type in every
+       release, the plot style name dictionary's default */
+    if (kindOf(p) === 'ACDBPLACEHOLDER') {
+      makeObject(80, h, () => { /* no data */ }, refs, xd, p.xdata, reactors.length);
+      return;
+    }
+    /* an XRECORD of another generation, re-encoded from its typed values
+       in this file's spelling (the bits of its own generation go out
+       whole, below): the byte-counted run of (group, value), then the
+       R2000+ cloning flag */
+    const typed = p.encoding !== encodingGroup(V) ? typedXrecord(p) : undefined;
+    if (typed) {
+      makeObject(xrecordType(), h, (w) => {
+        xrecordBody(w, typed);
+        if (V >= 2000) w.bs(1);
+      }, refs, xd, p.xdata, reactors.length);
+      return;
+    }
     if (p.encoding === encodingGroup(V) || p.data === undefined) {
-      makeObject(p.typeCode ?? proxyClsH.get(key)?.num ?? 0x1f3,
+      makeObject(isXrecord(p) && V <= 14 ? xrecordType()
+        : p.typeCode ?? proxyClsH.get(key)?.num ?? 0x1f3,
         h, (w) => {
           if (p.data && p.dataBits) w.putBits(fromBase64(p.data), p.dataBits);
           if (p.strData && p.strBits) {
@@ -5890,7 +6291,8 @@ const writeDwgImpl = (
     if (V >= 2000) {
       w.bs(1); w.bs(70);                  /* TSTACKALIGN, TSTACKSIZE */
       w.t(''); w.t('');                   /* HYPERLINKBASE, STYLESHEET */
-      H(5, layoutDict); H(5, 0); H(5, 0); /* LAYOUT/PLOTSETTINGS/PLOTSTYLE dicts */
+      H(5, layoutDict); H(5, 0);          /* LAYOUT / PLOTSETTINGS dicts */
+      H(5, plotStyleDictH);               /* PLOTSTYLE dict: the source's when carried */
       if (V >= 2004) { H(5, 0); H(5, 0); }  /* material, color dicts */
       if (V >= 2007) H(5, 0);             /* visualstyle dict */
       if (V >= 2013) H(5, 0);             /* lightlist dict */
@@ -5989,10 +6391,7 @@ const writeDwgImpl = (
   /** CLASSES payload (records only; the section wrapper differs by version). */
   function clsBytes(): Uint8Array {
     const clsW = new BitWriter();
-    const noClasses = !usesImages && !usesLights && !usesTables
-        && !usesMLeaders && !usesTableStyles && !usesMLeaderStyles
-        && !CLS_XRECORD && !underlayKinds.length && !geoData
-        && !proxyClsH.size && !usesDynBlocks && !sortSpaces.length;
+    const noClasses = proxyClsH.size === 0;
     /* AutoCAD 2027 refuses an AC1032 drawing whose CLASSES section is
        empty — the R2018 'tight' wrap has no accepted empty form
        (externally proven: the same minimal drawing opens once a single
@@ -6032,51 +6431,12 @@ const writeDwgImpl = (
         clsW.bl(0); clsW.bl(0);
       }
     };
-    if (usesImages) {
-      cls(CLS_IMAGE, 'IMAGE', 'AcDbRasterImage', true);
-      cls(CLS_IMAGEDEF, 'IMAGEDEF', 'AcDbRasterImageDef', false);
-      cls(CLS_WIPEOUT, 'WIPEOUT', 'AcDbWipeout', true);
-    }
-    if (usesLights) cls(CLS_LIGHT, 'LIGHT', 'AcDbLight', true);
-    if (usesTables) cls(CLS_TABLE, 'ACAD_TABLE', 'AcDbTable', true);
-    if (usesTableStyles) {
-      cls(CLS_TABLESTYLE, 'TABLESTYLE', 'AcDbTableStyle', false, 'ObjectDBX Classes');
-    }
-    if (usesMLeaders) cls(CLS_MLEADER, 'MULTILEADER', 'AcDbMLeader', true);
-    if (usesMLeaderStyles) {
-      cls(CLS_MLEADERSTYLE, 'MLEADERSTYLE', 'AcDbMLeaderStyle', false,
-        'ACDB_MLEADERSTYLE_CLASS');
-    }
-    /* R14 only (numbered right after the MLEADERSTYLE slot, so emitted
-       here): the class the ACDB_RECOMPOSE_DATA record is typed with */
-    if (CLS_XRECORD) {
-      cls(CLS_XRECORD, 'XRECORD', 'AcDbXrecord', false, 'ObjectDBX Classes');
-    }
-    for (const [kind, nums] of underlayCls) {
-      const cap = kind.charAt(0).toUpperCase() + kind.slice(1);
-      cls(nums.ent, kind.toUpperCase() + 'UNDERLAY', `AcDb${cap}Reference`, true);
-      cls(nums.def, kind.toUpperCase() + 'DEFINITION', `AcDb${cap}Definition`, false);
-    }
-    if (geoData) cls(CLS_GEODATA, 'GEODATA', 'AcDbGeoData', false);
-    /* the application classes behind the proxies being passed through */
+    /* every class this file names, in the order the numbers were handed
+       out (the registry is insertion-ordered): the writer's own classes,
+       the application classes behind the proxies and sealed objects
+       being passed through, the dynamic-block and draw-order records */
     for (const [dxfName, c] of proxyClsH) {
       cls(c.num, dxfName, c.cpp, c.ent, c.app);
-    }
-    if (usesDynBlocks) {
-      cls(CLS_BLOCKVIS, 'BLOCKVISIBILITYPARAMETER',
-        'AcDbBlockVisibilityParameter', false, 'ObjectDBX Classes');
-      cls(CLS_EVALGRAPH, 'ACAD_EVALUATION_GRAPH', 'AcDbEvalGraph', false,
-        'ObjectDBX Classes');
-      cls(CLS_BLOCKVISGRIP, 'BLOCKVISIBILITYGRIP', 'AcDbBlockVisibilityGrip',
-        false, 'ObjectDBX Classes');
-      cls(CLS_BLOCKGRIPEXPR, 'BLOCKGRIPLOCATIONCOMPONENT', 'AcDbBlockGripExpr',
-        false, 'ObjectDBX Classes');
-      cls(CLS_DYNPURGE, 'ACDB_DYNAMICBLOCKPURGEPREVENTER_VERSION',
-        'AcDbDynamicBlockPurgePreventer', false, 'ObjectDBX Classes');
-    }
-    if (sortSpaces.length) {
-      cls(CLS_SORTENTS, 'SORTENTSTABLE', 'AcDbSortentsTable', false,
-        'ObjectDBX Classes');
     }
     if (noClasses) {
       /* the benign stub record that keeps the 2018 section non-empty */

@@ -844,6 +844,9 @@ export interface UnknownObject {
    *  code, as the record carried them. */
   hardOwner?: boolean;
   cloning?: number;
+  /** An ACDBDICTIONARYWDFLT (a dictionary with a default — the plot
+   *  style name dictionary): the handle (hex) of its default record. */
+  defaultHandle?: string;
   /** Where the record hangs on the named-objects tree: the dictionary
    *  keys from the named objects dictionary down to the dictionary that
    *  owns it — `['ACAD_SCALELIST']` for a SCALE listed under the scale
@@ -1069,6 +1072,12 @@ export interface Layout {
   /** Plot settings that survive a round trip. */
   paperSize?: string;
   plotStyleSheet?: string;
+  /** Source-file handle (hex) of the LAYOUT object, for handle-stable
+   *  rewrites. */
+  handle?: string;
+  /** Handle (hex) of the layout's extension dictionary in the source
+   *  file; sealed in `drawing.unknownObjects`, owned by this record. */
+  xdict?: string;
 }
 
 /** A named group of entities (DXF GROUP object). */
@@ -1078,6 +1087,11 @@ export interface Group {
   selectable?: boolean;
   /** Handles of the member entities (hex, matching Entity.handle). */
   entityHandles: string[];
+  /** Source-file handle (hex), for handle-stable rewrites. */
+  handle?: string;
+  /** Handle (hex) of the group's extension dictionary in the source
+   *  file; sealed in `drawing.unknownObjects`, owned by this record. */
+  xdict?: string;
 }
 
 export interface MLineStyleElement {
@@ -1095,6 +1109,11 @@ export interface MLineStyle {
   startAngle?: number;             /* radians */
   endAngle?: number;
   elements: MLineStyleElement[];
+  /** Source-file handle (hex), for handle-stable rewrites. */
+  handle?: string;
+  /** Handle (hex) of the style's extension dictionary in the source
+   *  file; sealed in `drawing.unknownObjects`, owned by this record. */
+  xdict?: string;
 }
 
 /** One edge of a table cell as a table style draws it. */
@@ -1132,6 +1151,10 @@ export interface TableStyle {
   name: string;
   /** Source-file handle (hex), for handle-stable rewrites. */
   handle?: string;
+  /** Handle (hex) of the style's extension dictionary in the source
+   *  file (the reference keeps its 2008 cell-style map there); sealed in
+   *  `drawing.unknownObjects`, owned by this record. */
+  xdict?: string;
   description?: string;
   /** 0 down, 1 up. */
   flowDirection?: number;
@@ -1152,6 +1175,9 @@ export interface MLeaderStyle {
   name: string;
   /** Source-file handle (hex), for handle-stable rewrites. */
   handle?: string;
+  /** Handle (hex) of the style's extension dictionary in the source
+   *  file; sealed in `drawing.unknownObjects`, owned by this record. */
+  xdict?: string;
   description?: string;
   /** 0 none, 1 block, 2 mtext, 3 tolerance. */
   contentType?: number;
@@ -1223,6 +1249,27 @@ export interface View {
   direction?: Point3;
   target?: Point3;
   lensLength?: number;
+  /** View twist, radians (DXF 50). */
+  twist?: number;
+  frontClip?: number;
+  backClip?: number;
+  /** DXF 71: bit 0 perspective, bit 1 front clip, bit 2 back clip. */
+  viewMode?: number;
+  renderMode?: number;
+  /** DXF 67: the view was saved in paper space. */
+  paperSpace?: boolean;
+  /** The view's own UCS (R2000+ carries it in the record itself). */
+  ucsOrigin?: Point3;
+  ucsXAxis?: Point3;
+  ucsYAxis?: Point3;
+  ucsElevation?: number;
+  ucsOrthoType?: number;
+  /** Source-file handle (hex), for handle-stable rewrites. */
+  handle?: string;
+  /** Handle (hex) of the record's extension dictionary in the source
+   *  file (the reference keeps a view's thumbnail there); sealed in
+   *  `drawing.unknownObjects`, owned by this record. */
+  xdict?: string;
 }
 
 /** A viewport configuration (DXF VPORT table record). */
@@ -1269,6 +1316,11 @@ export interface VPort {
   /** UCSVP: whether the viewport keeps its own UCS. */
   ucsPerViewport?: boolean;
   renderMode?: number;
+  /** Source-file handle (hex), for handle-stable rewrites. */
+  handle?: string;
+  /** Handle (hex) of the record's extension dictionary in the source
+   *  file; sealed in `drawing.unknownObjects`, owned by this record. */
+  xdict?: string;
 }
 
 /** The drawing's current coordinate system, from the header's UCSORG /
@@ -1326,6 +1378,11 @@ export interface DimStyle {
   name: string;
   /** Variables by name (DIMSCALE, DIMTXT, …) when decoded. */
   vars?: Record<string, number | string | boolean>;
+  /** Source-file handle (hex), for handle-stable rewrites. */
+  handle?: string;
+  /** Handle (hex) of the record's extension dictionary in the source
+   *  file; sealed in `drawing.unknownObjects`, owned by this record. */
+  xdict?: string;
 }
 
 /* ------------------------------------------------------------------ *
@@ -1398,6 +1455,18 @@ export interface Drawing {
   proxyObjects?: ProxyObject[];
   /** Every other unmodeled object, retained sealed for passthrough. */
   unknownObjects?: UnknownObject[];
+  /** Source-file handles (hex) of the structural objects the readers
+   *  consume and the writers rebuild, keyed by what they are: the named
+   *  objects dictionary (`NOD`), the sub-dictionaries whose contents the
+   *  model carries as its own (`ACAD_LAYOUT`, `ACAD_GROUP`,
+   *  `ACAD_MLINESTYLE`, `ACAD_TABLESTYLE`, `ACAD_MLEADERSTYLE`) and the
+   *  symbol-table controls (`BLOCK_CONTROL`, `LAYER_CONTROL`,
+   *  `STYLE_CONTROL`, `LTYPE_CONTROL`, `VIEW_CONTROL`, `UCS_CONTROL`,
+   *  `VPORT_CONTROL`, `APPID_CONTROL`, `DIMSTYLE_CONTROL`). A sealed
+   *  extension dictionary owned by one of them (the layer table's
+   *  ACAD_LAYERSTATES, say) follows the number to the object the writer
+   *  builds in its place, which keeps the number under `preserveHandles`. */
+  structureHandles?: Record<string, string>;
   /** Geographic location data (GEODATA), when the drawing is placed. */
   geoData?: GeoData;
   /** Non-fatal problems encountered while reading. */

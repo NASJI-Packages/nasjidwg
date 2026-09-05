@@ -23,6 +23,8 @@ import type {
   View, VPort, XdataGroup, XdataValue, XRecord
 } from '../core/model.js';
 import { decodeProxyGraphics } from '../dwg/proxy.js';
+import { BitWriter } from '../dwg/bitwriter.js';
+import { encodingGroup } from '../dwg/objects.js';
 import { decodeCadText, stripMtextCodes } from '../text/escapes.js';
 import { binaryDxfToPairs, isBinaryDxf } from './binary.js';
 
@@ -216,6 +218,131 @@ const sampleBSpline = (
   return out;
 };
 
+/** The release number behind a header version, for the encoding group
+ *  a sealed record's bits are tagged with. */
+const VERSION_NUM: Record<string, number> = {
+  R13: 13, R14: 14, R2000: 2000, R2004: 2004, R2007: 2007,
+  R2010: 2010, R2013: 2013, R2018: 2018
+};
+
+/** The typing an XRECORD's data stream gives each group, by DXF group
+ *  code: the resbuf kinds the DWG spelling encodes a value with. */
+type XrecKind = 'string' | 'real' | 'point' | 'int8' | 'int16' | 'int32'
+  | 'int64' | 'bool' | 'binary' | 'handle' | 'invalid';
+const xrecKind = (gc: number): XrecKind => {
+  if (gc < 0) return 'handle';
+  if (gc <= 4) return 'string';
+  if (gc === 5) return 'handle';
+  if (gc <= 9) return 'string';
+  if (gc <= 37) return 'point';
+  if (gc <= 59) return 'real';
+  if (gc <= 79) return 'int16';
+  if (gc <= 99) return 'int32';
+  if (gc <= 102) return 'string';
+  if (gc === 105) return 'handle';
+  if (gc <= 109) return 'invalid';
+  if (gc <= 139) return 'point';
+  if (gc <= 149) return 'real';
+  if (gc <= 169) return 'int64';
+  if (gc <= 179) return 'int16';
+  if (gc <= 209) return 'invalid';
+  if (gc <= 269) return 'point';
+  if (gc <= 279) return 'int16';
+  if (gc <= 289) return 'int8';
+  if (gc <= 299) return 'bool';
+  if (gc <= 309) return 'string';
+  if (gc <= 319) return 'binary';
+  if (gc <= 369) return 'handle';
+  if (gc <= 389) return 'int16';
+  if (gc <= 399) return 'handle';
+  if (gc <= 409) return 'int16';
+  if (gc <= 419) return 'string';
+  if (gc <= 429) return 'int32';
+  if (gc <= 439) return 'string';
+  if (gc <= 459) return 'int32';
+  if (gc <= 469) return 'real';
+  if (gc <= 479) return 'string';
+  if (gc === 999) return 'string';
+  if (gc < 1000) return 'invalid';
+  if (gc === 1004) return 'binary';
+  if (gc <= 1009) return 'string';
+  if (gc <= 1039) return 'point';
+  if (gc <= 1042) return 'real';
+  if (gc <= 1069) return 'point';
+  if (gc <= 1070) return 'int16';
+  if (gc === 1071) return 'int32';
+  return 'invalid';
+};
+
+/** The DWG body of an XRECORD in the R2007+ spelling, from its typed
+ *  values: a byte count, then one (RS group, value) per value in the
+ *  resbuf typing — a string as an RS length and that many UTF-16 units
+ *  (no terminator, as the reference writes one: measured on its own
+ *  layer-filter records), a real as an RD, a point as three, the 8/16/
+ *  32/64-bit integers as RC/RS/RL/RLL, a binary chunk as an RC length
+ *  and its bytes, a handle as a 64-bit number — and the cloning flag.
+ *  With these a DXF-read record is what a DWG-read one is, and the DWG
+ *  writers carry it natively under its owner. The pre-2007 spelling
+ *  (a codepage byte and codepage bytes per string) is not produced.
+ *  Undefined when a value cannot be spelled; the record then travels
+ *  as its tags alone. */
+const xrecordBits = (
+  values: XdataValue[], cloning: number
+): { data: string; dataBits: number } | undefined => {
+  const body = new BitWriter();
+  for (const v of values) {
+    const kind = xrecKind(v.code);
+    const raw = 'value' in v ? v.value : undefined;
+    const num = typeof raw === 'number' ? raw
+      : typeof raw === 'string' && /^\s*-?\d+(\.\d+)?([eE][-+]?\d+)?\s*$/.test(raw)
+        ? parseFloat(raw) : undefined;
+    body.rs(v.code);
+    if (kind === 'point') {
+      if (!('point' in v)) return undefined;
+      body.rd(v.point.x); body.rd(v.point.y); body.rd(v.point.z ?? 0);
+    } else if ('point' in v) {
+      return undefined;
+    } else if (kind === 'string') {
+      const s = typeof raw === 'string' ? raw : String(raw ?? '');
+      if (s.length > 0xffff) return undefined;
+      body.rs(s.length);
+      for (let i = 0; i < s.length; i++) body.rs(s.charCodeAt(i));
+    } else if (kind === 'real') {
+      if (num === undefined) return undefined;
+      body.rd(num);
+    } else if (kind === 'int8' || kind === 'bool') {
+      if (num === undefined) return undefined;
+      body.rc(num);
+    } else if (kind === 'int16') {
+      if (num === undefined) return undefined;
+      body.rs(num);
+    } else if (kind === 'int32') {
+      if (num === undefined) return undefined;
+      body.rl(num >>> 0);
+    } else if (kind === 'int64') {
+      if (num === undefined) return undefined;
+      body.rll(num);
+    } else if (kind === 'binary') {
+      const hex = String(raw ?? '').replace(/[^0-9A-Fa-f]/g, '');
+      if (hex.length & 1 || hex.length > 510) return undefined;
+      body.rc(hex.length >> 1);
+      for (let i = 0; i < hex.length; i += 2) body.rc(parseInt(hex.slice(i, i + 2), 16));
+    } else if (kind === 'handle') {
+      const h = parseInt(String(raw ?? '0'), 16);
+      if (!Number.isFinite(h) || h < 0) return undefined;
+      body.rll(h);
+    } else {
+      return undefined;
+    }
+  }
+  if (body.pos & 7) return undefined;
+  const w = new BitWriter();
+  w.bl(body.pos >> 3);
+  w.appendBits(body);
+  w.bs(cloning);
+  return { data: bytesToB64(w.bytes()), dataBits: w.pos };
+};
+
 /** Read an ASCII or binary DXF. Accepts text, or raw bytes (binary DXF is
  *  detected by its sentinel; anything else is decoded as text). */
 export const readDxf = (text: string | Uint8Array): Drawing => {
@@ -248,11 +375,30 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
      is skipped by the reference without its CLASS record */
   const classByDxfName =
     new Map<string, { dxfName: string; cppName: string; appName: string }>();
-  /* every DICTIONARY, by handle: its owner and entries, so that once the
-     file is read each sealed object can be placed on the tree — reachable
-     from the named objects dictionary through dictionaries alone, or
-     hanging off some record's extension dictionary */
-  const dictRecords = new Map<string, { owner: string; entries: [string, string][] }>();
+  /* every DICTIONARY, by handle: its owner, its entries (key, target and
+     the reference code each was listed with) and the record itself, so
+     that once the file is read each sealed object can be placed on the
+     tree — reachable from the named objects dictionary through
+     dictionaries alone, or hanging off some record's extension
+     dictionary — and the dictionaries that are not the reader's own (the
+     extension dictionaries, the unmodeled branches of the tree) can be
+     sealed with their entries decoded, as the DWG reader seals them */
+  interface DictRecord {
+    handle: string; type: string; owner: string;
+    entries: [string, string][]; codes: number[];
+    tags: Group[]; hardOwner?: boolean; cloning?: number;
+    xdict?: string; reactors?: string[]; xdata?: XdataGroup[];
+  }
+  const dictRecords = new Map<string, DictRecord>();
+  /* BLOCK_RECORD extension dictionaries by record handle: where a dynamic
+     block's evaluation graph and a space's draw-order table hang */
+  const blockRecXdict = new Map<string, string>();
+  /* XRECORDs waiting to be sealed beside their decoded values — every one
+     but those the named objects dictionary owns directly, which are the
+     reader's own (the DWG reader's rule); settled once the tree is known */
+  const xrecordSeals: {
+    uo: UnknownObject; owner: string; values: XdataValue[]; cloning: number;
+  }[] = [];
   /* Which name each DICTIONARY lists a handle under: how a proxy object
      gets its dictionary name back after the OBJECTS section is parsed. */
   const dictEntryName = new Map<string, string>();
@@ -481,11 +627,45 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
       return groups.length ? groups : undefined;
     };
 
+    /** The identity every record spells ahead of its first subclass
+     *  marker: its own handle (5, or 105 for the DIMSTYLE-like records),
+     *  the bare 330 outside any fence — the owner — and the two fenced
+     *  runs the reference writes there: `102 {ACAD_XDICTIONARY 360 h
+     *  102 }` naming the extension dictionary, `102 {ACAD_REACTORS 330 h
+     *  … 102 }` the objects watching the record. A fence of any other
+     *  name is an application's own and says nothing here. */
+    const commonOf = (g: Group[]): {
+      handle?: string; owner?: string; xdict?: string; reactors?: string[];
+    } => {
+      const out: { handle?: string; owner?: string; xdict?: string; reactors?: string[] } = {};
+      const reactors: string[] = [];
+      let fence: string | null = null;
+      for (const [c, v] of g) {
+        if (c === 100) break;
+        const s = v.trim();
+        if (c === 102) { fence = s.startsWith('{') ? s.toUpperCase() : null; continue; }
+        if (fence === '{ACAD_XDICTIONARY') {
+          if (c === 360 && s && s !== '0') out.xdict = s.toUpperCase();
+          continue;
+        }
+        if (fence === '{ACAD_REACTORS') {
+          if (c === 330 && s && s !== '0') reactors.push(s.toUpperCase());
+          continue;
+        }
+        if (fence) continue;
+        if ((c === 5 || c === 105) && !out.handle && s) out.handle = s.toUpperCase();
+        else if (c === 330 && !out.owner && s) out.owner = s.toUpperCase();
+      }
+      if (reactors.length) out.reactors = reactors;
+      return out;
+    };
+
     const baseProps = (q: Q) => {
       const layer = ensureLayer(q.str(8, '0')).name;
       const p: { handle?: string; layer: string; color: Color; linetype?: string;
                  lineweight?: number; linetypeScale?: number; invisible?: boolean;
-                 extrusion?: Point3; xdata?: XdataGroup[] } =
+                 extrusion?: Point3; xdata?: XdataGroup[];
+                 xdict?: string; reactors?: string[] } =
         { layer, color: entityColor(q) };
       /* the OCS normal: only kept when it is not the default (0,0,1) */
       if (q.numOr(210) != null) {
@@ -506,6 +686,11 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
       const lts = q.numOr(48);
       if (lts != null && lts > 0 && Math.abs(lts - 1) > 1e-12) p.linetypeScale = lts;
       if (q.int(60, 0) === 1) p.invisible = true;
+      /* the extension dictionary and the persistent reactors, as the DWG
+         reader keeps them: what a rewrite hangs the sealed chain on */
+      const com = commonOf(q.all());
+      if (com.xdict) p.xdict = com.xdict;
+      if (com.reactors) p.reactors = com.reactors;
       return p;
     };
 
@@ -638,7 +823,14 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
             else if (cc === 10) { cur = { x: num(i), y: 0 }; verts.push(cur); }
             else if (cc === 20 && cur) cur.y = num(i);
             else if (cc === 42 && cur) { const b = num(i); if (b) cur.bulge = b; }
-            else if (cc === 97) { for (i++; i < n && code(i) === 330; i++); break; }
+            else if (cc === 97) {
+              /* the source boundary objects: kept, so an associative
+                 hatch can leave with its links (the DWG reader keeps them) */
+              const hs: string[] = [];
+              for (i++; i < n && code(i) === 330; i++) hs.push(g[i][1].trim().toUpperCase());
+              if (hs.length) lf.boundaryHandles = hs;
+              break;
+            }
           }
           if (verts.length >= 2) loops.push({ kind: 'polyline', vertices: verts, closed, ...lf });
           continue;
@@ -650,7 +842,9 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
           const cc = code(i);
           if (cc === 92 || cc === 75) break;
           if (cc === 97) {                   /* source objects: 97 + 330s */
-            for (i++; i < n && code(i) === 330; i++);
+            const hs: string[] = [];
+            for (i++; i < n && code(i) === 330; i++) hs.push(g[i][1].trim().toUpperCase());
+            if (hs.length) lf.boundaryHandles = hs;
             break;
           }
           if (cc !== 72) { i++; continue; }
@@ -1738,17 +1932,28 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
               const lw = q.int(370, -1);
               if (lw > 0) ly.lineweight = lw / 100;
               if (q.int(290, 1) === 0) ly.plottable = false;
+              /* the record's handle and extension dictionary, as the DWG
+                 reader keeps them: what the sealed chain below a layer
+                 (its filters, its colour history) hangs on */
+              const com = commonOf(rec.g);
+              if (com.handle) ly.handle = com.handle;
+              if (com.xdict) ly.xdict = com.xdict;
             } else if (tName === 'LTYPE') {
               const rec2: Linetype = { name: nm, pattern: q.nums(49) };
               if (q.int(70, 0) & 16) rec2.xrefDependent = true;
               const lh = q.str(5, '');
               if (lh) ltypeNameByHandle.set(lh.toUpperCase(), nm);
+              const com = commonOf(rec.g);
+              if (com.handle) rec2.handle = com.handle;
+              if (com.xdict) rec2.xdict = com.xdict;
               const d = q.str(3, '');
               if (d) rec2.description = d;
               drawing.linetypes.push(rec2);
             } else if (tName === 'BLOCK_RECORD') {
               const h = q.str(5, '');
               if (h) blockRecordName.set(h.toUpperCase(), decodeCadText(nm));
+              const com = commonOf(rec.g);
+              if (com.handle && com.xdict) blockRecXdict.set(com.handle, com.xdict);
             } else if (tName === 'APPID') {
               (drawing.appIds ??= []).push(decodeCadText(nm));
             } else if (tName === 'DIMSTYLE') {
@@ -1834,6 +2039,9 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
               const st: TextStyle = { name: decodeCadText(nm) };
               const sh = q.str(5, '');
               if (sh) styleNameByHandle.set(sh.toUpperCase(), st.name);
+              const com = commonOf(rec.g);
+              if (com.handle) st.handle = com.handle;
+              if (com.xdict) st.xdict = com.xdict;
               const stFlags = q.int(70, 0);
               if (stFlags & 1) st.shapeFile = true;
               if (stFlags & 16) st.xrefDependent = true;
@@ -1906,8 +2114,15 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
             basePoint: pt3(q, 10, 20, 30),
             entities: parseEntities(rec.next, blkEnd)
           };
-          /* the record handle, as the DWG reader keeps a block header's */
-          if (isExtraPaper && recH) def.handle = recH;
+          /* the record handle and its extension dictionary, as the DWG
+             reader keeps a block header's: a handle-stable rewrite keeps
+             the number, and the sealed chain below the record — a dynamic
+             block's evaluation graph, a draw-order table — hangs on it */
+          if (recH) {
+            def.handle = recH;
+            const xd = blockRecXdict.get(recH);
+            if (xd) def.xdict = xd;
+          }
           /* an external reference: 70 bit 4 (8 for an overlay), the
              stored path in group 1 — kept as the DWG reader keeps it,
              so a rewrite re-attaches the file instead of defining an
@@ -1933,25 +2148,50 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
         const q = G(rec.g);
         if (type === 'DICTIONARY' || type === 'ACDBDICTIONARYWDFLT') {
           /* remember which name each entry handle is listed under; a
-             group 3 binds to the next 350/360 that follows it. The
-             dictionary itself is recorded with its owner (the bare 330
-             outside the 102 fences) for the placement pass at the end. */
+             group 3 binds to the next 350/360 that follows it (350 a
+             soft owner, 360 a hard one — the codes the DWG reader
+             decodes as 2 and 3). The dictionary itself is recorded with
+             its owner, flags and raw tags for the placement pass at the
+             end, where the ones that are not the reader's own are
+             sealed with these entries. */
           let entryName: string | null = null;
           const entries: [string, string][] = [];
-          let owner = '';
-          let fenced = false;
+          const codes: number[] = [];
+          let inBody = false;
           for (const [c, v] of rec.g) {
-            if (c === 102) { fenced = !fenced; continue; }
+            if (c === 100) { inBody = /^AcDbDictionary$/i.test(v.trim()); continue; }
+            if (!inBody) continue;
             if (c === 3) entryName = decodeCadText(v.trim());
             else if ((c === 350 || c === 360) && entryName) {
               const eh = v.trim().toUpperCase();
               dictEntryName.set(eh, entryName);
               entries.push([entryName, eh]);
+              codes.push(c === 360 ? 3 : 2);
               entryName = null;
-            } else if (c === 330 && !fenced && !owner) owner = v.trim().toUpperCase();
+            }
           }
-          const dh = q.str(5, '').toUpperCase();
-          if (dh) dictRecords.set(dh, { owner, entries });
+          const com = commonOf(rec.g);
+          const dh = com.handle ?? '';
+          if (dh) {
+            const d: DictRecord = {
+              handle: dh, type, owner: com.owner ?? '', entries, codes,
+              tags: rec.g.map(([c, v]): Group => [c, v])
+            };
+            /* 280 the hard-owner flag, 281 the duplicate-record cloning
+               code — the record's own, past the marker */
+            let past = false;
+            for (const [c, v] of rec.g) {
+              if (c === 100) { past = /^AcDbDictionary$/i.test(v.trim()); continue; }
+              if (!past) continue;
+              if (c === 280) d.hardOwner = parseInt(v, 10) !== 0;
+              else if (c === 281) { const n = parseInt(v, 10); if (isFinite(n)) d.cloning = n; }
+            }
+            if (com.xdict) d.xdict = com.xdict;
+            if (com.reactors) d.reactors = com.reactors;
+            const xd = parseXdata(rec.g);
+            if (xd) d.xdata = xd;
+            dictRecords.set(dh, d);
+          }
         } else if (type === 'ACDBPLACEHOLDER') {
           /* plot-style plumbing. The writer synthesizes the canonical
              ACAD_PLOTSTYLENAME dictionary and placeholder on every
@@ -1965,6 +2205,8 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
           const po: ProxyObject = {};
           const h = q.str(5, '');
           if (h) po.handle = h.toUpperCase();
+          const com = commonOf(rec.g);
+          if (com.owner) po.ownerHandle = com.owner;
           if (cls) { po.sourceType = cls.dxfName; po.appClass = { ...cls }; }
           if (p.data?.length) {
             po.data = bytesToB64(p.data);
@@ -2016,10 +2258,19 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
               if (c === 100) { inLayout = /AcDbLayout/i.test(v); continue; }
               if (inLayout && c === 330) {
                 const h = v.trim().toUpperCase();
-                if (h && h !== '0') pendingLayouts.push({ l, recH: h });
+                if (h && h !== '0') {
+                  pendingLayouts.push({ l, recH: h });
+                  l.blockHandle = h;
+                }
                 break;
               }
             }
+            /* the object's own handle and extension dictionary (a
+               layout's thumbnail record hangs there), as facts a
+               handle-stable rewrite keeps */
+            const com = commonOf(rec.g);
+            if (com.handle) l.handle = com.handle;
+            if (com.xdict) l.xdict = com.xdict;
             (drawing.layouts ??= []).push(l);
           }
         } else if (type === 'GROUP') {
@@ -2076,11 +2327,31 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
             }
           }
           flushPt();
+          const com = commonOf(rec.g);
           if (values.length) {
             const xr: XRecord = { values };
-            const h = q.str(5, '');
-            if (h) xr.handle = h.toUpperCase();
+            if (com.handle) xr.handle = com.handle;
             (drawing.xrecords ??= []).push(xr);
+          }
+          /* and the record itself, sealed under its owner — an extension
+             dictionary's round-trip data, a layer's filter, a layout's
+             thumbnail — the twin the DWG reader keeps beside the values,
+             so a rewrite hangs it back where it was */
+          if (com.handle && com.owner) {
+            const uo: UnknownObject = {
+              handle: com.handle, sourceType: type, ownerHandle: com.owner, typeCode: 79
+            };
+            if (com.xdict) uo.xdict = com.xdict;
+            if (com.reactors) uo.reactors = com.reactors;
+            if (rec.g.length) uo.tags = rec.g.map(([c, v]): Group => [c, v]);
+            let cloning = 1;
+            let past = false;
+            for (const [c, v] of rec.g) {
+              if (c === 100) { past = /AcDbXrecord/i.test(v); continue; }
+              if (past && c === 280) { const n = parseInt(v, 10); if (isFinite(n)) cloning = n; break; }
+              if (past) break;
+            }
+            xrecordSeals.push({ uo, owner: com.owner, values, cloning });
           }
         } else if (type === 'GEODATA') {
           const geo: GeoData = {
@@ -2297,23 +2568,19 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
              through its owning dictionary — the same passthrough the DWG
              side gives unmodeled objects, in DXF's medium */
           const uo: UnknownObject = { sourceType: type };
-          const h = q.str(5, '');
-          if (h) uo.handle = h.toUpperCase();
+          const com = commonOf(rec.g);
+          const h = com.handle ?? q.str(5, '').toUpperCase();
+          if (h) uo.handle = h;
           const cls = classByDxfName.get(type);
           if (cls) uo.appClass = { ...cls };
           /* the owner is the first 330 outside a 102-fenced run — a fence
              holds reactor members and the extension dictionary, never the
-             parent — and it stops mattering past the first subclass */
-          let fenced = false;
-          for (const [c, v] of rec.g) {
-            if (c === 102) { fenced = !fenced; continue; }
-            if (c === 100) break;
-            if (c === 330 && !fenced) {
-              const ov = v.trim();
-              if (ov) uo.ownerHandle = ov.toUpperCase();
-              break;
-            }
-          }
+             parent — and it stops mattering past the first subclass; the
+             fenced runs are the record's extension dictionary and its
+             reactors, kept as the DWG reader keeps them */
+          if (com.owner) uo.ownerHandle = com.owner;
+          if (com.xdict) uo.xdict = com.xdict;
+          if (com.reactors) uo.reactors = com.reactors;
           if (rec.g.length) uo.tags = rec.g.map(([c, v]): Group => [c, v]);
           const xd = parseXdata(rec.g);
           if (xd) uo.xdata = xd;
@@ -2448,7 +2715,7 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
        a table record or an object — is never on that walk, so whatever
        hangs off it stays without a path: attached to a record the
        writers rebuild from the model. */
-    if (dictRecords.size) {
+    {
       let nod = '';
       for (const [h, d] of dictRecords) {
         if (d.owner === '0') { nod = h; break; }
@@ -2459,7 +2726,7 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
          the key it is listed under */
       const dictPathOf = new Map<string, string[]>();
       const listedAs = new Map<string, { path: string[]; key: string }>();
-      const queue: [string, string[]][] = [[nod, []]];
+      const queue: [string, string[]][] = nod ? [[nod, []]] : [];
       for (let qi = 0; qi < queue.length; qi++) {
         const [h, path] = queue[qi];
         if (dictPathOf.has(h)) continue;
@@ -2471,17 +2738,79 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
           else if (!listedAs.has(eh)) listedAs.set(eh, { path, key });
         }
       }
+      /** Where a record hangs on the tree: listed by a reachable
+       *  dictionary → that dictionary's path and the key; owned by one
+       *  without being listed → its path, unnamed; else nowhere. */
+      const placeOf = (h?: string, owner?: string): { dictPath?: string[]; name?: string } => {
+        const listed = h ? listedAs.get(h) : undefined;
+        if (listed) return { dictPath: listed.path, name: listed.key };
+        const ownerPath = owner ? dictPathOf.get(owner) : undefined;
+        return ownerPath ? { dictPath: ownerPath } : {};
+      };
       for (const uo of drawing.unknownObjects ?? []) {
-        const listed = uo.handle ? listedAs.get(uo.handle) : undefined;
-        if (listed) {
-          uo.dictPath = listed.path;
-          uo.name = listed.key;
-          continue;
+        const at = placeOf(uo.handle, uo.ownerHandle);
+        if (at.dictPath) uo.dictPath = at.dictPath;
+        if (at.name) uo.name = at.name;
+      }
+      /* ---- the dictionaries that are not the reader's own, sealed with
+         their entries decoded, exactly as the DWG reader seals them:
+         every extension dictionary (owned by an entity, a table record,
+         an object) and every branch of the tree the model does not
+         consume. The root, the modeled branches (layouts, groups, line
+         styles, table and multileader styles) and the plot-style
+         dictionary the writers synthesize stay consumed. A sealed
+         dictionary carries the fixed DWG type, so the DWG writers
+         re-encode it from its entries. ---- */
+      const CONSUMED = new Set(['ACAD_LAYOUT', 'ACAD_GROUP', 'ACAD_MLINESTYLE',
+        'ACAD_TABLESTYLE', 'ACAD_MLEADERSTYLE', 'ACAD_PLOTSTYLENAME']);
+      for (const [h, d] of dictRecords) {
+        if (h === nod) continue;
+        const path = dictPathOf.get(h);
+        if (path && path.length && CONSUMED.has(path[0].toUpperCase())) continue;
+        const uo: UnknownObject = { handle: h, sourceType: d.type };
+        if (d.owner) uo.ownerHandle = d.owner;
+        if (path) {
+          uo.dictPath = path.slice(0, -1);
+          uo.name = path[path.length - 1];
+        } else {
+          const at = placeOf(h, d.owner || undefined);
+          if (at.dictPath) uo.dictPath = at.dictPath;
+          if (at.name) uo.name = at.name;
         }
-        /* owned by a reachable dictionary without being listed: placed
-           there, unnamed */
-        const ownerPath = uo.ownerHandle ? dictPathOf.get(uo.ownerHandle) : undefined;
-        if (ownerPath) uo.dictPath = ownerPath;
+        if (d.xdict) uo.xdict = d.xdict;
+        if (d.reactors) uo.reactors = d.reactors;
+        uo.entries = d.entries.map(([name, eh], i) => ({ name, handle: eh, code: d.codes[i] }));
+        if (d.hardOwner !== undefined) uo.hardOwner = d.hardOwner;
+        if (d.cloning !== undefined) uo.cloning = d.cloning;
+        if (d.type === 'DICTIONARY') uo.typeCode = 42;
+        const cls = classByDxfName.get(d.type);
+        if (cls) uo.appClass = { ...cls };
+        if (d.tags.length) uo.tags = d.tags;
+        if (d.xdata) uo.xdata = d.xdata;
+        (drawing.unknownObjects ??= []).push(uo);
+      }
+      /* ---- the XRECORDs, sealed beside their values under their
+         owners — all but the ones the named objects dictionary owns
+         directly, which the writers list themselves. From an R2007+
+         source the record carries its DWG bits too, so the DWG writers
+         can hang it back under its owner natively. ---- */
+      const relNum = VERSION_NUM[drawing.header.version ?? ''];
+      const group = relNum ? encodingGroup(relNum) : 0;
+      for (const { uo, owner, values, cloning } of xrecordSeals) {
+        if (owner === nod) continue;
+        const at = placeOf(uo.handle, owner);
+        if (at.dictPath) uo.dictPath = at.dictPath;
+        const nm = at.name ?? (uo.handle ? dictEntryName.get(uo.handle) : undefined);
+        if (nm) uo.name = nm;
+        if (group >= 2007) {
+          const bits = xrecordBits(values, cloning);
+          if (bits) {
+            uo.data = bits.data;
+            uo.dataBits = bits.dataBits;
+            uo.encoding = group;
+          }
+        }
+        (drawing.unknownObjects ??= []).push(uo);
       }
     }
 

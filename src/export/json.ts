@@ -49,6 +49,10 @@ export const readJson = (text: string): Drawing => {
     dimStyles: list(d.dimStyles),
     appIds: list(d.appIds),
     xrecords: list(d.xrecords),
+    proxyObjects: list(d.proxyObjects),
+    unknownObjects: list(d.unknownObjects),
+    structureHandles: typeof d.structureHandles === 'object' && d.structureHandles
+      ? d.structureHandles : undefined,
     geoData: typeof d.geoData === 'object' && d.geoData ? d.geoData : undefined,
     warnings: Array.isArray(d.warnings) ? d.warnings : []
   };

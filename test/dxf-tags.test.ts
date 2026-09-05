@@ -569,9 +569,26 @@ describe('the named-objects tree: placement, rebuild, and what stays out', () =>
     expect(groupOf(cls[0], 281)).toBe('0');
   });
 
-  it('leaves the FIELD out: its owner is rebuilt from the model without an extension dictionary', () => {
-    expect(recs.some((r) => r.type === 'FIELD')).toBe(false);
-    expect(text).not.toContain('{ACAD_XDICTIONARY');
+  it('carries the FIELD under the LINE: the extension dictionary chain travels, owner by owner', () => {
+    const line = recs.find((r) => r.type === 'LINE')!;
+    const at = line.groups.findIndex(([c, v]) => c === 102 && v === '{ACAD_XDICTIONARY');
+    expect(at).toBeGreaterThan(0);
+    expect(line.groups[at + 1][0]).toBe(360);
+    const xd = line.groups[at + 1][1];
+    expect(line.groups[at + 2]).toEqual([102, '}']);
+    /* the fence sits between the handle and the owner, as the reference spells it */
+    expect(line.groups.findIndex(([c]) => c === 330)).toBeGreaterThan(at);
+    const dict = recs.find((r) => r.type === 'DICTIONARY' && groupOf(r, 5) === xd)!;
+    expect(groupOf(dict, 330)).toBe(groupOf(line, 5));
+    const fieldDictH = dict.groups[dict.groups.findIndex(([c, v]) => c === 3 && v === 'ACAD_FIELD') + 1][1];
+    const fieldDict = recs.find((r) => r.type === 'DICTIONARY' && groupOf(r, 5) === fieldDictH)!;
+    expect(groupOf(fieldDict, 330)).toBe(xd);
+    const fieldH = fieldDict.groups[fieldDict.groups.findIndex(([c, v]) => c === 3 && v === 'TEXT') + 1][1];
+    const field = recs.find((r) => r.type === 'FIELD')!;
+    expect(groupOf(field, 5)).toBe(fieldH);
+    expect(groupOf(field, 330)).toBe(fieldDictH);
+    /* every number is this file's own: nothing of the source's numbering leaks */
+    expect([xd, fieldDictH, fieldH].some((h) => ['X1', 'F0', 'F1'].includes(h))).toBe(false);
   });
 
   it('still lists an unlisted record the named objects dictionary owns, under the fallback key', () => {
@@ -588,7 +605,19 @@ describe('the named-objects tree: placement, rebuild, and what stays out', () =>
     expect(byType(second, 'SCALE').map((o) => [o.dictPath, o.name]))
       .toEqual([[['ACAD_SCALELIST'], 'A1'], [['ACAD_SCALELIST'], 'A2']]);
     expect(byType(second, 'WIPEOUTVARIABLES')[0]?.dictPath).toEqual([]);
-    expect(byType(second, 'FIELD')).toEqual([]);
+    /* the chain reads back as it was: the LINE's dictionary, the field
+       dictionary under it, the FIELD under that — none on the tree */
+    const line = second.entities.find((e) => e.type === 'line')!;
+    const dict = (second.unknownObjects ?? []).find((o) => o.handle === line.xdict)!;
+    expect(dict.sourceType).toBe('DICTIONARY');
+    expect(dict.ownerHandle).toBe(line.handle);
+    expect(dict.dictPath).toBeUndefined();
+    const fieldDict = (second.unknownObjects ?? []).find((o) => o.handle === dict.entries?.[0].handle)!;
+    expect(dict.entries?.[0].name).toBe('ACAD_FIELD');
+    const f = byType(second, 'FIELD')[0];
+    expect(f?.ownerHandle).toBe(fieldDict.handle);
+    expect(f?.name).toBe('TEXT');
+    expect(f?.dictPath).toBeUndefined();
   });
 });
 

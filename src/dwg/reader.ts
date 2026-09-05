@@ -985,6 +985,37 @@ export const readDwg = (
     }
   }
   const hexOf = (h: number): string => h.toString(16).toUpperCase();
+  /* the structural objects the writers rebuild, by their source numbers:
+     the root dictionary, the sub-dictionaries the model consumes, the
+     symbol-table controls — what a sealed extension dictionary owned by
+     one of them (the layer table's ACAD_LAYERSTATES) is re-attached
+     through */
+  {
+    const structure: Record<string, string> = {};
+    if (hv?.nodHandle) structure.NOD = hexOf(hv.nodHandle);
+    for (const [h, path] of dictPathOf) {
+      if (path.length === 1 && MODELED_DICTS.has(path[0].toUpperCase())
+        && !structure[path[0].toUpperCase()]) {
+        structure[path[0].toUpperCase()] = hexOf(h);
+      }
+    }
+    const CONTROL_KEYS: Record<string, string> = {
+      BlockTable: 'BLOCK_CONTROL', LayerTable: 'LAYER_CONTROL',
+      TextStyleTable: 'STYLE_CONTROL', LinetypeTable: 'LTYPE_CONTROL',
+      ViewTable: 'VIEW_CONTROL', UcsTable: 'UCS_CONTROL',
+      VPortTable: 'VPORT_CONTROL', AppIdTable: 'APPID_CONTROL',
+      DimStyleTable: 'DIMSTYLE_CONTROL', VxTable: 'VX_CONTROL'
+    };
+    for (const raw of order) {
+      const key = CONTROL_KEYS[raw.typeName];
+      if (key && !structure[key]) structure[key] = hexOf(raw.handle);
+    }
+    if (Object.keys(structure).length) drawing.structureHandles = structure;
+  }
+  /** Whether a tree dictionary lists a record among its entries (as
+   *  opposed to owning it as its extension dictionary). */
+  const listedBy = (owner: number, h: number): boolean =>
+    !!objects.get(owner)?.dictionary?.handles.includes(h);
 
   for (const raw of order) {
     if (raw.xrecord && raw.xrecord.values.length) {
@@ -1030,14 +1061,20 @@ export const readDwg = (
           ownerHandle: raw.owner?.toString(16).toUpperCase(),
           ...(raw.xdict ? { xdict: hexOf(raw.xdict) } : {}),
           ...(raw.reactors?.length ? { reactors: raw.reactors.map(hexOf) } : {}),
+          /* a place on the tree only for a record the owning dictionary
+             LISTS: the extension dictionary of a tree dictionary is owned
+             by it without being an entry, and travels as what it is */
           ...(raw.owner !== undefined && dictPathOf.has(raw.owner)
+            && listedBy(raw.owner, raw.handle)
             ? { dictPath: dictPathOf.get(raw.owner) } : {}),
           ...(d ? {
             entries: d.names.map((name, i) => ({
               name, handle: hexOf(d.handles[i]), code: d.codes[i]
             })),
             ...(d.hardOwner !== undefined ? { hardOwner: d.hardOwner } : {}),
-            ...(d.cloning !== undefined ? { cloning: d.cloning } : {})
+            ...(d.cloning !== undefined ? { cloning: d.cloning } : {}),
+            ...(d.defaultHandle !== undefined
+              ? { defaultHandle: hexOf(d.defaultHandle) } : {})
           } : {}),
           ...raw.unknownObject
         });
@@ -1053,7 +1090,9 @@ export const readDwg = (
           ? { blockHandle: l.blockHandle.toString(16).toUpperCase() } : {}),
         limMin: l.limMin, limMax: l.limMax,
         extMin: l.extMin, extMax: l.extMax, insBase: l.insBase,
-        paperSize: l.paperSize, plotStyleSheet: l.plotStyleSheet
+        paperSize: l.paperSize, plotStyleSheet: l.plotStyleSheet,
+        handle: hexOf(raw.handle),
+        ...(raw.xdict ? { xdict: hexOf(raw.xdict) } : {})
       });
     }
     if (raw.group) {
@@ -1065,7 +1104,9 @@ export const readDwg = (
         selectable: raw.group.selectable,
         entityHandles: raw.group.members
           .filter((h) => entityByHandle.has(h))
-          .map((h) => h.toString(16).toUpperCase())
+          .map((h) => h.toString(16).toUpperCase()),
+        handle: hexOf(raw.handle),
+        ...(raw.xdict ? { xdict: hexOf(raw.xdict) } : {})
       });
     }
     if (raw.mlineStyle) {
@@ -1077,7 +1118,9 @@ export const readDwg = (
         elements: ms.elements.map((el) => ({
           offset: el.offset, color: el.color,
           linetype: el.ltypeHandle ? ltypeName.get(el.ltypeHandle) : undefined
-        }))
+        })),
+        handle: hexOf(raw.handle),
+        ...(raw.xdict ? { xdict: hexOf(raw.xdict) } : {})
       });
     }
     if (raw.tableStyleObj) {
@@ -1110,6 +1153,7 @@ export const readDwg = (
         data: cell(ts.data), title: cell(ts.title), header: cell(ts.header)
       };
       if (raw.xdata) style.xdata = raw.xdata;
+      if (raw.xdict) style.xdict = hexOf(raw.xdict);
       (drawing.tableStyles ??= []).push(style);
     }
     if (raw.mleaderStyleObj) {
@@ -1130,16 +1174,24 @@ export const readDwg = (
       const bn = blockHandle ? blockNameOf(blockHandle) : undefined;
       if (bn) style.blockName = bn;
       if (raw.xdata) style.xdata = raw.xdata;
+      if (raw.xdict) style.xdict = hexOf(raw.xdict);
       (drawing.mleaderStyles ??= []).push(style);
     }
     if (raw.ucs) (drawing.ucs ??= []).push(raw.ucs);
-    if (raw.view) (drawing.views ??= []).push(raw.view);
-    if (raw.vport) (drawing.vports ??= []).push(raw.vport);
+    /* the table records carry their numbers (and their extension
+       dictionaries) so a handle-stable rewrite can hang the sealed
+       chain back under each of them */
+    const numbered = <T extends object>(rec: T): T & { handle: string; xdict?: string } => ({
+      ...rec, handle: hexOf(raw.handle),
+      ...(raw.xdict ? { xdict: hexOf(raw.xdict) } : {})
+    });
+    if (raw.view) (drawing.views ??= []).push(numbered(raw.view));
+    if (raw.vport) (drawing.vports ??= []).push(numbered(raw.vport));
     if (raw.table?.kind === 'appid' && raw.table.name) {
       (drawing.appIds ??= []).push(raw.table.name);
     }
     if (raw.table?.kind === 'dimstyle' && raw.table.name) {
-      (drawing.dimStyles ??= []).push({ name: raw.table.name });
+      (drawing.dimStyles ??= []).push(numbered({ name: raw.table.name }));
     }
   }
   if (drawing.layouts) {
