@@ -112,6 +112,13 @@ describe.each(WRITERS)('the variable dictionary (%s)', (_v, write, release) => {
       expect(back.header.vars?.DIMASSOC).toBe(1);
     }
     expect(vars.SOLIDHIST).toBe(release < 2007 ? '1' : undefined);
+    /* the reference's 2007+ saves carry LAYEREVAL and LAYERNOTIFY (1 and
+       15 when the source had none); its pre-2007 saves do not add them,
+       and its pre-2007 saves take the primitive solid sizes only when
+       they are not its defaults (the fixture's are) */
+    expect(vars.LAYEREVAL).toBe(release >= 2007 ? '1' : undefined);
+    expect(vars.LAYERNOTIFY).toBe(release >= 2007 ? '15' : undefined);
+    expect(vars.PSOLWIDTH).toBeUndefined();
     /* nothing of it is sealed: the dictionary and its records are the
        model's own */
     expect((back.unknownObjects ?? []).filter((u) => /DICTIONARYVAR/i.test(u.sourceType))).toEqual([]);

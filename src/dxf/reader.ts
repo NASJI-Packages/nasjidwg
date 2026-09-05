@@ -175,6 +175,14 @@ interface ProxyPayload {
   graphics?: Uint8Array;
   data?: Uint8Array;
   dataBits?: number;
+  /** The payload's strings as the reference's 2018 DXF spells them apart
+   *  (162 their bit count, 311 the bits): the record's string stream past
+   *  its "cn:" text. */
+  str?: Uint8Array;
+  strBits?: number;
+  /** True when the record used the 2018 size groups (160/161/162): its
+   *  data bits carry no string envelope, the strings being apart. */
+  apart?: boolean;
   refs?: { code: number; value: string }[];
   proxyVersion?: number;
   proxyMaint?: number;
@@ -184,11 +192,12 @@ const parseProxyPayload = (g: Group[]): ProxyPayload => {
   const out: ProxyPayload = { classId: 0 };
   let inProxy = false;
   let refsDone = false;
-  let target: 'graphics' | 'data' = 'graphics';
-  let graphicsHex = '', dataHex = '';
+  let target: 'graphics' | 'data' | 'strings' = 'graphics';
+  let graphicsHex = '', dataHex = '', strHex = '';
   /* every size the record states for the entity data, in whichever
      spelling; the one that fits the bytes is the bit count (below) */
   const sizes: number[] = [];
+  let strSize = 0;
   const refs: { code: number; value: string }[] = [];
   for (const [c, v] of g) {
     if (c === 100) { if (/AcDbProxy/i.test(v)) inProxy = true; continue; }
@@ -206,12 +215,19 @@ const parseProxyPayload = (g: Group[]): ProxyPayload => {
       if (maint) out.proxyMaint = maint;
     } else if (c === 70) out.fromDxf = parseInt(v, 10) !== 0;
     else if (refsDone) continue;
-    else if (c === 92 || c === 160) target = 'graphics';
-    else if (c === 93 || c === 161 || c === 162) {
+    else if (c === 92 || c === 160) { target = 'graphics'; if (c === 160) out.apart = true; }
+    else if (c === 93 || c === 161) {
       target = 'data';
+      if (c === 161) out.apart = true;
       sizes.push(parseInt(v, 10) || 0);
-    } else if (c === 310) {
-      if (target === 'data') dataHex += v; else graphicsHex += v;
+    } else if (c === 162) {
+      target = 'strings';
+      out.apart = true;
+      strSize = parseInt(v, 10) || 0;
+    } else if (c === 310 || c === 311) {
+      if (target === 'strings' || c === 311) strHex += v;
+      else if (target === 'data') dataHex += v;
+      else graphicsHex += v;
     }
     /* each reference under the handle code its group spells: 350 soft
        owner 2, 360 hard owner 3, 330 soft pointer 4, 340 hard pointer 5 */
@@ -231,8 +247,35 @@ const parseProxyPayload = (g: Group[]): ProxyPayload => {
     const bits = sizes.find((n) => n > (bytes.length - 1) * 8 && n <= bytes.length * 8);
     out.dataBits = bits ?? bytes.length * 8;
   }
+  if (strHex) {
+    const bytes = hexToBytes(strHex);
+    out.str = bytes;
+    out.strBits = strSize > (bytes.length - 1) * 8 && strSize <= bytes.length * 8 ? strSize : bytes.length * 8;
+  }
   if (refs.length) out.refs = refs;
   return out;
+};
+
+/** The string stream of an R2007+ proxy record as the DWG reader keeps
+ *  it: the "cn:<class>" text first, then the payload's strings. */
+const proxyStringStream = (cppName: string, str?: Uint8Array, strBits?: number): { strData: string; strBits: number } => {
+  const w = new BitWriter();
+  w.tu('cn:' + cppName);
+  if (str && strBits) w.putBits(str, strBits);
+  return { strData: bytesToB64(w.bytes()), strBits: w.pos };
+};
+/** A DWG-format payload of an R2007+ filer split into its data bits and
+ *  its strings (the layout writeSealedProxy and writeProxyBody lay
+ *  out, unwrapProxyPayload reads); a payload the reference's 2018 DXF
+ *  already spelled apart (162/311) is taken as it came. Null when the
+ *  code is not an R2007+ filer's or the layout does not parse. */
+const splitProxyPayload = (
+  p: ProxyPayload
+): { data: Uint8Array; dataBits: number; str?: Uint8Array; strBits?: number } | null => {
+  const code = p.proxyVersion ?? 0;
+  if (code < 27 || !p.data || !p.dataBits) return null;
+  if (p.apart || p.str) return { data: p.data, dataBits: p.dataBits, str: p.str, strBits: p.strBits };
+  return unwrapProxyPayload(p.data, p.dataBits, 2007);
 };
 
 /* Clamped B-spline sampling (de Boor) — only for hatch SPLINE EDGES, where
@@ -1783,7 +1826,15 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
             const shapes = decodeProxyGraphics(p.graphics, e.layer, e.color);
             if (shapes.length) e.graphics = shapes;
           }
-          if (p.data?.length) {
+          /* an R2007+ filer's payload: its data bits and, past them, the
+             strings that belong in the record's own string stream behind
+             the "cn:" text (see splitProxyPayload) */
+          const split = splitProxyPayload(p);
+          if (split) {
+            e.data = bytesToB64(split.data);
+            e.dataBits = split.dataBits;
+            Object.assign(e, proxyStringStream(cls?.cppName ?? 'AcDbEntity', split.str, split.strBits));
+          } else if (p.data?.length) {
             e.data = bytesToB64(p.data);
             e.dataBits = p.dataBits;
           }
@@ -2246,8 +2297,16 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
              stays a proxy object. */
           const enc = p.proxyVersion !== undefined && !p.fromDxf
             ? encodingOfFormatCode(p.proxyVersion) : undefined;
-          const un = enc !== undefined && cls && p.data && p.dataBits
-            ? unwrapProxyPayload(p.data, p.dataBits, enc) : null;
+          /* a class of the reference's own (the sealed records the DXF
+             writer spells as proxies); a proxy of any other application's
+             class is a proxy object here as it is in a DWG, its string
+             stream whole */
+          const own = !!cls && (/^(ObjectDBX Classes|ISM|SCENEOE)$/i.test(cls.appName ?? '')
+            || /^"?WipeOut/i.test(cls.appName ?? '') || /^ACDB_\w+_CLASS$/i.test(cls.appName ?? ''));
+          const un = enc !== undefined && own && p.data && p.dataBits
+            ? (p.str ? { data: p.data, dataBits: p.dataBits, str: p.str, strBits: p.strBits }
+              : unwrapProxyPayload(p.data, p.dataBits, enc))
+            : null;
           if (un && un.dataBits > 0 && cls) {
             const uo: UnknownObject = {
               sourceType: cls.dxfName, appClass: { ...cls }, encoding: enc,
@@ -2272,7 +2331,14 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
           if (com.xdict) po.xdict = com.xdict;
           if (com.reactors) po.reactors = com.reactors;
           if (cls) { po.sourceType = cls.dxfName; po.appClass = { ...cls }; }
-          if (p.data?.length) {
+          /* an R2007+ filer's payload: data bits, then the strings of the
+             record's own string stream behind "cn:" (splitProxyPayload) */
+          const split = splitProxyPayload(p);
+          if (split) {
+            po.data = bytesToB64(split.data);
+            po.dataBits = split.dataBits;
+            Object.assign(po, proxyStringStream(cls?.cppName ?? 'AcDbObject', split.str, split.strBits));
+          } else if (p.data?.length) {
             po.data = bytesToB64(p.data);
             po.dataBits = p.dataBits;
           }

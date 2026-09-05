@@ -435,15 +435,43 @@ describe('a record that arrived through DXF as tags', () => {
     expect(q.pos).toBe(q.endBit);
   });
 
-  it('R14 has no proxy record for it; a section view style is kept home with its reason', () => {
+  it('R14 has no proxy record for it', () => {
     expect(writeDwgR14(source(), { preserveHandles: true }).skipped)
       .toEqual(['FIELD (no retained record bits)']);
+  });
+
+  it('a section view style travels flat under the root, unlisted by its dictionary, without its reactor', () => {
+    /* the reference type-checks the entries of ACAD_SECTIONVIEWSTYLE before
+       its lazy unwrap of a DXF-format proxy (listed: the entry is deleted,
+       AUDIT 1 fix); flat under the root the same proxy unwraps at AUDIT 0
+       and its DXFOUT lists the style natively — measured on A-01's DXF */
     const d = source();
-    d.unknownObjects![0].sourceType = 'ACDBSECTIONVIEWSTYLE';
-    d.unknownObjects![0].appClass = {
+    const style = d.unknownObjects![0];
+    style.sourceType = 'ACDBSECTIONVIEWSTYLE';
+    style.appClass = {
       dxfName: 'ACDBSECTIONVIEWSTYLE', cppName: 'AcDbSectionViewStyle', appName: 'ObjectDBX Classes'
     };
-    expect(writeDwg2018(d, { preserveHandles: true }).skipped[0]).toMatch(/^ACDBSECTIONVIEWSTYLE \(from DXF/);
+    style.name = 'Imperial24';
+    style.ownerHandle = 'D1';
+    style.dictPath = ['ACAD_SECTIONVIEWSTYLE'];
+    style.reactors = ['D1'];
+    style.tags = style.tags!.map(([c, v]) => (c === 330 ? [c, 'D1'] : [c, v]));
+    d.unknownObjects!.push({
+      handle: 'D1', ownerHandle: 'C', name: 'ACAD_SECTIONVIEWSTYLE', sourceType: 'DICTIONARY',
+      typeCode: 42, encoding: 2000, hardOwner: false, cloning: 1, dictPath: [],
+      entries: [{ name: 'Imperial24', handle: 'F1', code: 2 }]
+    });
+    const res = writeDwg2018(d, { preserveHandles: true });
+    expect(res.skipped).toEqual([]);
+    const back = readDwg(res.data);
+    const p = back.proxyObjects?.find((x) => x.handle === 'F1');
+    expect(p?.fromDxf).toBe(true);
+    expect(p?.ownerHandle).toBe('C');
+    expect(p?.name).toBe('Imperial24');
+    expect(p?.reactors ?? []).toEqual([]);
+    /* the dictionary lost its only entry and was not written: nothing of
+       the reference's own tree lists the proxy */
+    expect(back.unknownObjects?.some((u) => u.entries?.some((e) => e.handle === 'F1')) ?? false).toBe(false);
   });
 });
 

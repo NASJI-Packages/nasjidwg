@@ -428,13 +428,17 @@ describe('ACAD_PROXY_OBJECT in the 2018 spelling, with its xdata', () => {
     expect(q3?.xdata?.[0].values).toEqual(p?.xdata?.[0].values);
   });
 
-  it('the 2018 size groups: 160 opens the graphics, 161/162 the data bits', () => {
+  it('the 2018 size groups: 160 opens the graphics, 162/311 the strings, 161/310 the data bits', () => {
+    /* the reference's own 2018 DXF of an R2007-filer proxy (measured on
+       a proxy of a class it lacks): 162 counts the string bits of the
+       record's stream past its "cn:" text and 311 carries them, 161 the
+       data bits with 310 — the data bits carry no string envelope */
     const e = readDxf(dxf([
       0, 'SECTION', 2, 'ENTITIES',
       0, 'ACAD_PROXY_ENTITY', 5, '20', 100, 'AcDbEntity', 8, '0', 100, 'AcDbProxyEntity',
       90, 498, 91, 500, 71, 27, 97, 50, 70, 0,
       160, 4, 310, 'DEADBEEF',
-      162, 7, 161, 53, 310, 'DEADBEEF0102E0',
+      162, 13, 311, '1120', 161, 53, 310, 'DEADBEEF0102E0',
       330, '2A', 94, 0,
       0, 'ENDSEC', 0, 'EOF'
     ])).entities[0];
@@ -445,6 +449,9 @@ describe('ACAD_PROXY_OBJECT in the 2018 spelling, with its xdata', () => {
     expect(Buffer.from(e.graphicsData!, 'base64')).toEqual(Buffer.from([0xDE, 0xAD, 0xBE, 0xEF]));
     expect(Buffer.from(e.data!, 'base64').length).toBe(7);
     expect(e.dataBits).toBe(53);
+    /* the string stream as the DWG reader keeps it: "cn:AcDbEntity"
+       (the class is not named here) and the 13 bits behind it */
+    expect(e.strBits).toBe(10 + 16 * 'cn:AcDbEntity'.length + 13);
     expect(e.refs).toEqual([{ code: 4, value: '2A' }]);
   });
 });

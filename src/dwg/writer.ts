@@ -16,6 +16,8 @@ import { BitWriter, ByteSink, crc16 } from './bitwriter.js';
 import { BitReader } from './bitstream.js';
 import { compressR2004 } from './compress.js';
 import { SEAL_MAGIC, encodingGroup, resbufKind } from './objects.js';
+import { assocClassPair, isAssocKind, respellAssoc } from './assoc.js';
+import type { AssocSpelling } from './assoc.js';
 import { assemble2007 } from './container2007.js';
 import { buildAcDs } from './meta.js';
 import { sabToSat } from '../acis/sab.js';
@@ -778,6 +780,22 @@ export interface DwgWriteOptions {
    *  still finds the same layer after the rewrite. */
   preserveHandles?: boolean;
 
+  /** Carry the associative framework (AcDbAssoc* — constraint networks,
+   *  variables, geometry dependencies, 2D constraint groups) natively
+   *  across the R2013 respelling: an R2018 source's family into an
+   *  AC1021 file in the R2010 spelling, an R2010 source's into an AC1032
+   *  file in the R2013 one (see assoc.ts — the translation reproduces the
+   *  reference's own re-saves bit for bit, and its DXFOUT then lists the
+   *  family natively). Off by default: in the reference's AUDIT such a
+   *  file still reports silent fixes per network (24 on Structural -
+   *  Metric into 2007, with six constraint parameters erased; the
+   *  reference's own save of the same records audits clean, and every
+   *  record, class pair, reactor and dictionary compared so far is
+   *  identical) — until that cause is found the default keeps the
+   *  family as before, opaque for an R2007 target and home for an R2010
+   *  source into AC1032, which audits clean. */
+  respellAssoc?: boolean;
+
   /** Byte-preserving rewrite. Off by default: `preserveHandles` alone
    *  keeps the classic behaviour of re-encoding every entity from the
    *  model.
@@ -943,12 +961,61 @@ const withTableBlocks = (drawing: Drawing): Drawing => {
   return { ...drawing, blocks, entities, ...(paperSpace ? { paperSpace } : {}) };
 };
 
+/** The associative framework (AcDbAssoc*, the dependency bodies) in the
+ *  spelling this file's release reads natively: the R2013 one for an
+ *  AC1032 target, the R2010 one — which is also R2007's — for an AC1021
+ *  target (see assoc.ts). A record already in that spelling keeps its
+ *  bits and takes this file's encoding; one of the other spelling is
+ *  translated. The family crosses as a whole: one record that cannot
+ *  (a generation with inline strings, an unknown kind or node class, a
+ *  field the other spelling cannot hold) leaves every record as it was,
+ *  and the writer keeps its older ways for them. The translated records
+ *  are collected in `respelled` so the release gates below let them
+ *  through. */
+const respellAssocFamily = (
+  drawing: Drawing, V: number, respelled: Set<NonNullable<Drawing['unknownObjects']>[number]>
+): Drawing => {
+  type Sealed = NonNullable<Drawing['unknownObjects']>[number];
+  const target: AssocSpelling | undefined = V === 2007 ? 'pre2013' : V >= 2018 ? 'r2013' : undefined;
+  const list = drawing.unknownObjects ?? [];
+  if (!target || !list.length) return drawing;
+  const targetEnc = V === 2007 ? 2007 : 2018;
+  const spellingOf = (p: Sealed): AssocSpelling | undefined =>
+    p.encoding === 2007 ? 'pre2013'
+    : p.encoding === 2018 ? (drawing.header.version === 'R2010' ? 'pre2013' : 'r2013')
+    : undefined;
+  const out: Sealed[] = [];
+  const done: Sealed[] = [];
+  for (const p of list) {
+    const kind = (p.appClass?.dxfName ?? p.sourceType ?? '').toUpperCase();
+    if (!isAssocKind(kind) || p.data === undefined || p.tags?.length) { out.push(p); continue; }
+    const from = spellingOf(p);
+    if (from === undefined) return drawing;
+    if (from === target && p.encoding === targetEnc) { out.push(p); continue; }
+    const bits = respellAssoc(kind, p, from, target);
+    if (!bits) return drawing;
+    /* the class's version pair names the spelling to the reference
+       (assocClassPair): the target's, on every record of the class */
+    const pair = assocClassPair(kind, target);
+    const appClass = pair && p.appClass ? { ...p.appClass, ...pair } : p.appClass;
+    const q: Sealed = { ...p, ...bits, encoding: targetEnc, ...(appClass ? { appClass } : {}) };
+    out.push(q);
+    done.push(q);
+  }
+  if (!done.length) return drawing;
+  for (const q of done) respelled.add(q);
+  return { ...drawing, unknownObjects: out };
+};
+
 const writeDwgImpl = (
   source: Drawing, V: 13 | 14 | 2000 | 2004 | 2007 | 2018,
   opts: DwgWriteOptions = {}
 ): DwgWriteResult => {
   const skipped: string[] = [];
-  const drawing = withTableBlocks(source);
+  const respelled = new Set<NonNullable<Drawing['unknownObjects']>[number]>();
+  const drawing = opts.respellAssoc === true
+    ? respellAssocFamily(withTableBlocks(source), V, respelled)
+    : withTableBlocks(source);
 
   /* ---------------- handle allocation ---------------- */
   const preserve = opts.preserveHandles === true;
@@ -1483,7 +1550,9 @@ const writeDwgImpl = (
     for (const hs of loopBounds) {
       for (const tgt of hs) {
         const list = reactorsFor.get(tgt) ?? [];
-        list.push(hatchH);
+        /* one back-link per boundary entity, however many loops of the
+           hatch it bounds (the reference's AUDIT removes the repeat) */
+        if (!list.includes(hatchH)) list.push(hatchH);
         reactorsFor.set(tgt, list);
       }
     }
@@ -1829,6 +1898,17 @@ const writeDwgImpl = (
     && !(V === 2007 && (kindOf(p).startsWith('ACDBASSOC')
       || kindOf(p).startsWith('ASSOC') || /DEPENDENCYBODY$/.test(kindOf(p))));
   const sealWrap = (p: Sealed): boolean => wrapped(p) && !filerProxy(p);
+  /** A section or detail view style that arrived through DXF as tags:
+   *  written as a DXF-format proxy like any tag-born record, but never
+   *  listed by ACAD_SECTIONVIEWSTYLE / ACAD_DETAILVIEWSTYLE — the
+   *  reference type-checks the entries of those two dictionaries BEFORE
+   *  its lazy unwrap of a proxy (listed: "Imperial24 eNotThatKindOfClass,
+   *  Delete Entry", AUDIT 1 fix, the entry gone); re-homed flat under
+   *  the root under its own name the same proxy unwraps on open at
+   *  AUDIT 0, and the reference's DXFOUT lists it as the native
+   *  ACDBSECTIONVIEWSTYLE (measured on A-01's DXF, both variants). */
+  const tagViewStyle = (p: Sealed): boolean =>
+    tagSealed(p) && /^ACDB(SECTION|DETAIL)VIEWSTYLE$/.test(kindOf(p));
   /** The groups of a DXF-born record that are the record's own data —
    *  what the reference keeps in a DXF-format proxy (bit-walked on its
    *  2000/2004/2018 saves of a probe: the payload opened with the
@@ -1928,15 +2008,10 @@ const writeDwgImpl = (
        2004 re-save of an R2007 payload, bit-walked); the private
        envelope of any other class is what every spelling tried was */
     if (foreign && V === 2004 && !filerProxy(p)) return p.sourceType ?? p.name ?? 'sealed object';
-    /* A DXF-born view style: the reference checks the entries of its
-       section- and detail-view-style dictionaries for the class BEFORE
-       it unwraps a DXF-format proxy (measured: listed, the entry is
-       deleted "eNotThatKindOfClass" and the default style recreated;
-       flat under the root the same proxy unwraps at AUDIT 0 — but an
-       unlisted style is nothing to the reference either). */
-    if (tagSealed(p) && /^ACDB(SECTION|DETAIL)VIEWSTYLE$/.test(kind)) {
-      return `${kind} (from DXF; the reference checks its view-style dictionaries before unwrapping a DXF-format proxy)`;
-    }
+    /* (A DXF-born view style travels, but flat under the root — see
+       tagViewStyle: the reference checks the entries of its section- and
+       detail-view-style dictionaries for the class BEFORE it unwraps a
+       DXF-format proxy.) */
     /* the annotative context records of a later generation, wrapped for
        R2007: refused as a group by the reference (an AC1024 sample's 27 of
        them, each alone accepted at R2018) */
@@ -1947,7 +2022,7 @@ const writeDwgImpl = (
        written natively into an AC1032 file are refused (every R2010
        sample of the reference's Dynamic Blocks folder, measured; the
        R2018 ones open with both families intact). */
-    if (V >= 2018 && drawing.header.version === 'R2010'
+    if (V >= 2018 && drawing.header.version === 'R2010' && !respelled.has(p)
       && (kind === 'VISUALSTYLE' || kind.startsWith('ACDBASSOC')
         || kind.startsWith('ASSOC') || /DEPENDENCYBODY$/.test(kind))) {
       return `${p.sourceType ?? kind} (R2010 record; its R2013 spelling differs)`;
@@ -2024,13 +2099,33 @@ const writeDwgImpl = (
       ...(p.handle ? { handle: p.handle } : {}), ...(p.xdict ? { xdict: p.xdict } : {})
     });
   }
-  const headerSlotVar = (name: string): void => {
+  const headerSlotVar = (name: string, unlessDefault?: number, real = false): void => {
     const x = drawing.header.vars?.[name];
     if (typeof x !== 'number' || !Number.isFinite(x) || hasVar(name)) return;
-    variablesOut.push({ name, value: String(x) });
+    if (unlessDefault !== undefined && x === unlessDefault) return;
+    variablesOut.push({ name, value: real ? x.toFixed(6) : String(x) });
   };
-  if (V < 2004) for (const k of ['DIMASSOC', 'INDEXCTL', 'XCLIPFRAME']) headerSlotVar(k);
-  if (V < 2007) headerSlotVar('SOLIDHIST');
+  /* The slots the reference's own saves move into the dictionary, read
+     off its 2000/2004/2007 saves of A-01 (an R2007 source) and of
+     Structural - Metric (R2018): before 2004 DIMASSOC, INDEXCTL, XCLIPFRAME
+     and SORTENTS; before 2007 SOLIDHIST, and the primitive solid sizes
+     when they are not its defaults (A-01's 0.25/4 stay out of its 2004
+     save, Structural - Metric's 5/80 go in, as "5.000000"). From 2007 it
+     writes LAYEREVAL and LAYERNOTIFY into every save (1 and 15 when the
+     source had none: its 2007 save of A-01), and its DXFOUT of a file
+     without them lists them only for a pre-2007 file — so a 2007+ file
+     of ours carries them the way its own do. */
+  if (V < 2004) for (const k of ['DIMASSOC', 'INDEXCTL', 'XCLIPFRAME', 'SORTENTS']) headerSlotVar(k);
+  if (V < 2007) {
+    headerSlotVar('SOLIDHIST');
+    headerSlotVar('PSOLWIDTH', 0.25, true);
+    headerSlotVar('PSOLHEIGHT', 4, true);
+  }
+  if (V >= 2007) {
+    for (const [name, value] of [['LAYEREVAL', '1'], ['LAYERNOTIFY', '15']]) {
+      if (!hasVar(name)) variablesOut.push({ name, value });
+    }
+  }
   const usesVariables = V >= 2000 && variablesOut.length > 0;
   if (V < 2000 && variablesOut.length) {
     skipped.push(`${variablesOut.length} drawing variables (AcDbVariableDictionary needs R2000 or later)`);
@@ -2177,7 +2272,7 @@ const writeDwgImpl = (
     if (!written(en.handle)) return false;
     if (d.dictPath === undefined) return true;
     const t = sealedByH.get(en.handle.toUpperCase());
-    return !t || !sealWrap(t);
+    return !t || (!sealWrap(t) && !tagViewStyle(t));
   };
   /** The references a DXF-born record's tags carry (handle-typed groups
    *  past the common section), as the reference codes they become in
@@ -2386,7 +2481,7 @@ const writeDwgImpl = (
     const o = outOf(p.ownerHandle);
     if (o === undefined || !p.ownerHandle) return undefined;
     const self = p.handle ? sealedByH.get(p.handle.toUpperCase()) : undefined;
-    if (self && sealWrap(self)) {
+    if (self && (sealWrap(self) || tagViewStyle(self))) {
       const os = sealedByH.get(p.ownerHandle.toUpperCase());
       if (os && isDict(os) && os.dictPath !== undefined) return undefined;
     }
@@ -2676,6 +2771,31 @@ const writeDwgImpl = (
    *  text; whatever strings the payload keeps there follow it. */
   const proxyCn = (w: BitWriter, cpp: string): void => {
     if (V >= 2007) w.t('cn:' + cpp);
+  };
+  /** A proxy's payload re-emitted: a DXF-format one (from-DXF) opens
+   *  with `BL 499|498, BL class number` — the source file's number for
+   *  the class, which this file numbers for itself (a second class
+   *  registered before it moves it) — so the head takes this file's
+   *  number and the rest of the bits go out verbatim; any other payload
+   *  goes out as it was. Both spellings of the number are the two-word
+   *  form (a class number is never below 500), so the length holds. */
+  const putProxyData = (
+    w: BitWriter, data: string, dataBits: number, fromDxf: boolean, clsNum: number | undefined
+  ): void => {
+    const bytes = fromBase64(data);
+    if (fromDxf && clsNum !== undefined && dataBits >= 68) {
+      const r = new BitReader(bytes, 0, dataBits);
+      const fixed = r.bl();
+      const headEnd = r.pos;
+      const old = headEnd === 34 ? r.bl() : -1;
+      const numEnd = r.pos;
+      if ((fixed === 499 || fixed === 498) && old >= 500 && numEnd === 68) {
+        w.bl(fixed); w.bl(clsNum);
+        for (let i = 68; i < dataBits; i++) w.b((bytes[i >> 3] >> (7 - (i & 7))) & 1);
+        return;
+      }
+    }
+    w.putBits(bytes, dataBits);
   };
   /** A foreign-generation seal's payload under its own filer: the data
    *  bits as that generation's record lays them out. An R2007+
@@ -4870,7 +4990,7 @@ const writeDwgImpl = (
             if (e.strData && e.strBits) w.strTarget?.putBits(fromBase64(e.strData), e.strBits);
             else proxyCn(w, cpp);
           }
-          if (e.data && e.dataBits) w.putBits(fromBase64(e.data), e.dataBits);
+          if (e.data && e.dataBits) putProxyData(w, e.data, e.dataBits, !!e.fromDxf, cls?.num);
         }, (w) => {
           for (const ref of e.refs ?? []) {
             w.h(ref.code, mapRef(ref.value));
@@ -6280,7 +6400,7 @@ const writeDwgImpl = (
         if (p.strData && p.strBits) w.strTarget?.putBits(fromBase64(p.strData), p.strBits);
         else proxyCn(w, cpp);
       }
-      if (p.data && p.dataBits) w.putBits(fromBase64(p.data), p.dataBits);
+      if (p.data && p.dataBits) putProxyData(w, p.data, p.dataBits, !!p.fromDxf, cls?.num);
     }, refs, xd, p.xdata, reactors.length);
   });
 
@@ -6297,6 +6417,9 @@ const writeDwgImpl = (
        out under this record */
     const owner = ownerOut(p) ?? nod;
     const reactors = (p.reactors ?? [])
+      /* a tag-born view style re-homed flat under the root drops the
+         reactor it had on the dictionary that listed it */
+      .filter((r) => !(tagViewStyle(p) && owner === nod && r.toUpperCase() === p.ownerHandle?.toUpperCase()))
       .map((r) => outOf(r))
       .filter((r): r is number => r !== undefined);
     const xd = xdictByOwner.get(h)?.h ?? 0;

@@ -17,6 +17,7 @@ import { readDxf } from '../src/dxf/reader.js';
 import { writeDxf, writeDxfBinary } from '../src/dxf/writer.js';
 import { readDwg } from '../src/dwg/reader.js';
 import { writeDwg2018 } from '../src/dwg/writer.js';
+import { BitWriter } from '../src/dwg/bitwriter.js';
 import { emptyDrawing } from '../src/core/model.js';
 import type { Drawing, Entity, ProxyEntity } from '../src/core/model.js';
 
@@ -230,6 +231,95 @@ describe('proxy objects through DXF', () => {
     expect(again?.data).toBe(p?.data);
     expect(again?.dataBits).toBe(p?.dataBits);
     expect(again?.refs).toEqual(p?.refs);
+  });
+});
+
+describe('an R2007-filer proxy object with a string stream through DXF', () => {
+  /* Measured on the reference with a proxy of a class it lacks, written
+     by us into 2007 and 2018 DWGs (data 87 bits, string stream "cn:AcmeNote",
+     "hello world", "" = 374 bits): its own 2018 DXF spells the strings past
+     "cn:" apart (162 = 188, 311 hex) and the data under 161/310; our DXF
+     closes the 93/310 payload with those strings, their size word and the
+     flag (93 = 87 + 188 + 17 = 292), which it opens at AUDIT 0 and DXFOUTs
+     with the same 161/162; readDxf gives the same data and string stream
+     back from either spelling. */
+  const bits = (w: BitWriter): { data: string; dataBits: number } => ({ data: b64(w.bytes()), dataBits: w.pos });
+  const payload = new BitWriter();
+  payload.bl(7); payload.bd(2.5); payload.bs(3); payload.b(1);
+  const stream = new BitWriter();
+  stream.tu('cn:AcmeNote'); stream.tu('hello world'); stream.tu('');
+  const d = emptyDrawing();
+  d.header.version = 'R2007';
+  d.structureHandles = { NOD: 'C' };
+  d.entities = [{
+    type: 'line', handle: 'A0', layer: '0', color: { kind: 'byLayer' },
+    start: { x: 0, y: 0, z: 0 }, end: { x: 1, y: 1, z: 0 }
+  } as Entity];
+  d.proxyObjects = [{
+    handle: 'E1', ownerHandle: 'C', name: 'ACME_NOTE_1', sourceType: 'ACME_NOTE',
+    appClass: { dxfName: 'ACME_NOTE', cppName: 'AcmeNote', appName: 'ACME', dwgVersion: 27, maintVersion: 50 },
+    proxyVersion: 27, proxyMaint: 50, fromDxf: false,
+    ...bits(payload), strData: b64(stream.bytes()), strBits: stream.pos,
+    refs: [{ code: 5, value: 'A0' }]
+  }];
+  const text = writeDxf(d, { preserveHandles: true });
+
+  it('closes the payload with the strings past "cn:", their size and the flag', () => {
+    const lines = text.split(/\r?\n/);
+    const at = lines.findIndex((l) => l.trim() === 'ACAD_PROXY_OBJECT');
+    const i93 = lines.findIndex((l, i) => i > at && l.trim() === '93');
+    expect(lines[i93 + 1].trim()).toBe(String(payload.pos + (stream.pos - (10 + 16 * 'cn:AcmeNote'.length)) + 16 + 1));
+    expect(lines[i93 + 1].trim()).toBe('292');
+  });
+
+  it('reads back as the same proxy object, string stream included', () => {
+    const p = readDxf(text).proxyObjects?.[0];
+    expect(p?.sourceType).toBe('ACME_NOTE');
+    expect(p?.proxyVersion).toBe(27);
+    expect(p?.proxyMaint).toBe(50);
+    expect(p?.data).toBe(b64(payload.bytes()));
+    expect(p?.dataBits).toBe(payload.pos);
+    expect(p?.strData).toBe(b64(stream.bytes()));
+    expect(p?.strBits).toBe(stream.pos);
+    expect(p?.refs).toEqual([{ code: 5, value: 'A0' }]);
+    /* and again: the same proxy record (past its owner group — the root
+       dictionary is numbered by each writer for itself) */
+    const record = (t: string): string => {
+      const lines = t.split(/\r?\n/);
+      const at = lines.findIndex((l) => l.trim() === 'ACAD_PROXY_OBJECT');
+      const end = lines.findIndex((l, i) => i > at && l.trim() === '0');
+      const body = lines.slice(at, end);
+      const owner = body.findIndex((l) => l.trim() === '330');
+      return [...body.slice(0, owner), ...body.slice(owner + 2)].join('\n');
+    };
+    expect(record(writeDxf(readDxf(text), { preserveHandles: true }))).toBe(record(text));
+  });
+
+  it('reads the reference\'s own 2018 spelling of the same record back the same', () => {
+    const hex = (w: BitWriter, from = 0): string => {
+      const out = new BitWriter();
+      const bytes = w.bytes();
+      for (let i = from; i < w.pos; i++) out.b((bytes[i >> 3] >> (7 - (i & 7))) & 1);
+      return Buffer.from(out.bytes()).toString('hex').toUpperCase();
+    };
+    const cnBits = 10 + 16 * 'cn:AcmeNote'.length;
+    const ref = [
+      '0', 'SECTION', '2', 'CLASSES',
+      '0', 'CLASS', '1', 'ACME_NOTE', '2', 'AcmeNote', '3', 'ACME', '90', '0', '91', '1', '280', '0', '281', '0',
+      '0', 'ENDSEC',
+      '0', 'SECTION', '2', 'OBJECTS',
+      '0', 'ACAD_PROXY_OBJECT', '5', 'E1', '330', 'C', '100', 'AcDbProxyObject',
+      '90', '499', '91', '500', '71', '27', '97', '50', '70', '0',
+      '162', String(stream.pos - cnBits), '311', hex(stream, cnBits),
+      '161', String(payload.pos), '310', hex(payload),
+      '340', 'A0', '94', '0',
+      '0', 'ENDSEC', '0', 'EOF'
+    ].join('\n');
+    const p = readDxf(ref).proxyObjects?.[0];
+    expect(p?.data).toBe(b64(payload.bytes()));
+    expect(p?.dataBits).toBe(payload.pos);
+    expect(p?.strData).toBe(b64(stream.bytes()));
+    expect(p?.strBits).toBe(stream.pos);
   });
 });
 

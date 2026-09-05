@@ -22,6 +22,7 @@ import { readDxf } from '../src/dxf/reader.js';
 import { writeDxf } from '../src/dxf/writer.js';
 import { readDwg } from '../src/dwg/reader.js';
 import { writeDwg2000, writeDwg2018 } from '../src/dwg/writer.js';
+import { BitWriter } from '../src/dwg/bitwriter.js';
 import { emptyDrawing } from '../src/core/model.js';
 import type { Drawing, Entity, UnknownObject } from '../src/core/model.js';
 
@@ -480,18 +481,31 @@ describe('a record sealed as DWG bits leaves as a proxy of its class', () => {
     expect(bits.slice(59, 60)).toBe('1');
   });
 
-  it('reads back as the seal the DWG reader keeps, and leaves the same way again', () => {
+  it('reads back as a proxy object of its class — the record the reference itself keeps for an application it lacks — its data and strings whole, and leaves the same way again', () => {
+    /* a class of the reference's own would read back as the seal (the
+       FIELDs and SCALEs the DXF writer spells this way, unwrapped on
+       open); any other application's class is a proxy object, as it is
+       in a DWG: the payload's data bits, and its strings back in the
+       record's own string stream behind the "cn:<class>" text */
     const back = readDxf(text);
-    const thing = back.unknownObjects?.find((o) => o.handle === 'D0');
+    expect(back.unknownObjects?.find((o) => o.handle === 'D0')).toBeUndefined();
+    const thing = back.proxyObjects?.find((o) => o.handle === 'D0');
     expect(thing).toMatchObject({
-      sourceType: 'ACME_THING', ownerHandle: 'B0', reactors: ['B0'], encoding: 2007,
-      data: 'qrvM3A==', dataBits: 30, strData: 'ESA=', strBits: 13,
+      sourceType: 'ACME_THING', ownerHandle: 'B0', reactors: ['B0'], proxyVersion: 27, fromDxf: false,
+      data: 'qrvM3A==', dataBits: 30,
       refs: [{ code: 3, value: 'A0' }, { code: 4, value: 'DEAD' }],
       appClass: { dxfName: 'ACME_THING', cppName: 'AcmeThing', appName: 'ACME' }
     });
-    expect(back.proxyObjects ?? []).toEqual([]);
+    const cn = new BitWriter();
+    cn.tu('cn:AcmeThing');
+    expect(thing?.strBits).toBe(cn.pos + 13);
+    expect(bitsOfHex(Buffer.from(thing!.strData!, 'base64').toString('hex')).slice(0, cn.pos))
+      .toBe(bitsOfHex(Buffer.from(cn.bytes()).toString('hex')).slice(0, cn.pos));
+    expect(bitsOfHex(Buffer.from(thing!.strData!, 'base64').toString('hex')).slice(cn.pos, cn.pos + 13))
+      .toBe(bitsOfHex('1120').slice(0, 13));
     const again = recordsOf(writeDxf(back, { preserveHandles: true }));
     expect(proxyPayload(byHandle(again, 'D0')!)).toBe(proxyPayload(proxy));
+    expect(groupOf(byHandle(again, 'D0')!, 93)).toBe(String(30 + 13 + 16 + 1));
   });
 
   it('from an R2000 source: the data bits alone, and its references renumbered', () => {
@@ -505,8 +519,8 @@ describe('a record sealed as DWG bits leaves as a proxy of its class', () => {
     expect(bitsOfHex(proxyPayload(p)).slice(0, 30)).toBe(bitsOfHex('AABBCCDC').slice(0, 30));
     const tail = p.groups.slice(p.groups.findIndex(([c]) => c === 93));
     expect(tail.filter(([c]) => c === 330 || c === 360)).toEqual([[360, ownHandle(line)!], [330, 'DEAD']]);
-    const thing = readDxf(text2).unknownObjects?.find((o) => o.sourceType === 'ACME_THING');
-    expect(thing).toMatchObject({ encoding: 2000, data: 'qrvM3A==', dataBits: 30 });
+    const thing = readDxf(text2).proxyObjects?.find((o) => o.sourceType === 'ACME_THING');
+    expect(thing).toMatchObject({ proxyVersion: 23, data: 'qrvM3A==', dataBits: 30 });
     expect(thing?.strData).toBeUndefined();
   });
 });

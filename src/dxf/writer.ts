@@ -14,6 +14,7 @@ import type {
 import { sabToSat } from '../acis/sab.js';
 import { nearestAci } from '../core/color.js';
 import { BitWriter } from '../dwg/bitwriter.js';
+import { BitReader } from '../dwg/bitstream.js';
 import { hasComplexScript, mirrorBrackets, shapeArabic } from '../text/arabic.js';
 import { encodeCadSymbols, escapeUnicode } from '../text/escapes.js';
 import { flattenMtextParagraphs } from '../text/mtext.js';
@@ -1519,12 +1520,43 @@ export const writeDxf = (drawing: Drawing, options: DxfWriteOptions = {}): strin
     }
   };
 
+  /** The strings of an R2007+ proxy record's own string stream past the
+   *  "cn:<class>" text the reference gives every proxy: the payload's
+   *  own strings. `strData` is the whole stream, bit-exact; the "cn:"
+   *  text is its first counted UTF-16 text. */
+  const payloadStrings = (
+    p: { strData?: string; strBits?: number }
+  ): { bytes: Uint8Array; from: number; bits: number } | null => {
+    if (!p.strData || !p.strBits) return null;
+    const bytes = fromBase64(p.strData);
+    const r = new BitReader(bytes, 0, p.strBits);
+    let from = 0;
+    try {
+      const n = r.bs();
+      if (n >= 3 && r.pos + n * 16 <= p.strBits) {
+        let text = '';
+        for (let i = 0; i < 3; i++) text += String.fromCharCode(r.rs());
+        if (text === 'cn:') { for (let i = 3; i < n; i++) r.rs(); from = r.pos; }
+      }
+    } catch { from = 0; }
+    return from < p.strBits ? { bytes, from, bits: p.strBits - from } : null;
+  };
   /** The shared tail of both proxy record forms: payload blocks, handle
    *  references, end marker, version word and origin flag. 92 counts the
    *  graphics bytes; 93 counts the entity data in BITS (the DXF reference
-   *  measure), so a non-byte-aligned payload keeps its exact length. */
+   *  measure), so a non-byte-aligned payload keeps its exact length. A
+   *  payload written by an R2007+ filer (format code 27 and up) keeps
+   *  its strings in the record's own string stream in a DWG; here they
+   *  close the payload the way writeSealedProxy lays a sealed record
+   *  out — the string bits, their size word (two words past 0x7FFF) and
+   *  the strings-present flag as the last bit, a bare 0 bit when there
+   *  are none — the form the reference reads back into the string
+   *  stream on DXFIN (its own 2018 DXF spells the same strings under
+   *  162/311 and the data under 161/310, measured on a proxy of a class
+   *  it lacks: 161 = our data bits, 162 = our string bits past "cn:"). */
   const writeProxyBody = (p: {
     data?: string; dataBits?: number; graphicsData?: string;
+    strData?: string; strBits?: number;
     refs?: { code: number; value: string }[];
     proxyVersion?: number; proxyMaint?: number; fromDxf?: boolean;
   }): void => {
@@ -1543,10 +1575,27 @@ export const writeDxf = (drawing: Drawing, options: DxfWriteOptions = {}): strin
       w(92, bytes.length);
       emit310Chunks(bytes);
     }
-    if (p.data) {
-      const bytes = fromBase64(p.data);
-      w(93, p.dataBits ?? bytes.length * 8);
-      emit310Chunks(bytes);
+    const r2007Filer = ((p.proxyVersion ?? 0) & 0xffff) >= 27;
+    const strings = r2007Filer ? payloadStrings(p) : null;
+    if (p.data || strings) {
+      const payload = new BitWriter();
+      if (p.data) {
+        const bytes = fromBase64(p.data);
+        payload.putBits(bytes, p.dataBits ?? bytes.length * 8);
+      }
+      if (r2007Filer) {
+        if (!strings) payload.b(0);
+        else {
+          for (let i = strings.from; i < strings.from + strings.bits; i++) {
+            payload.b((strings.bytes[i >> 3] >> (7 - (i & 7))) & 1);
+          }
+          const sb = strings.bits;
+          if (sb >= 0x8000) { payload.rs(sb >> 15); payload.rs((sb & 0x7fff) | 0x8000); } else payload.rs(sb);
+          payload.b(1);
+        }
+      }
+      w(93, payload.pos);
+      emit310Chunks(payload.bytes());
     }
     writeProxyRefs(p.refs);
     w(94, 0);                            /* end of the reference run */
