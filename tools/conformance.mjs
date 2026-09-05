@@ -228,7 +228,24 @@ for (const src of corpus) {
     try { res = w(drawing, { preserveHandles: true }); writeFileSync(out, res.data); }
     catch (err) { row.writes[v] = { error: String(err.message ?? err) }; line(`  write ${v}: WRITER THREW ${row.writes[v].error}`); continue; }
     const back = parseProbe(runAcad(out, scr));
-    const dd = back.opened ? diffCounts(ref.ents, back.ents) : [];
+    /* R14 knows one paper space, and the reference converts a plain 2D
+       heavy polyline to a light one while opening an R14 file (PLINETYPE):
+       the census it can show for our R14 write is the original's less
+       the further layouts' viewports and those polylines */
+    const expected = { ...ref.ents };
+    if (v === 'R14') {
+      const extraVp = Object.entries(drawing.blocks ?? {})
+        .filter(([nm]) => /^\*paper_space.+$/i.test(nm))
+        .reduce((n, [, b]) => n + b.entities.filter((e) => e.type === 'viewport').length, 0);
+      /* the layouts only — the census walks no block definition */
+      const plain2d = [drawing.entities, drawing.paperSpace ?? [],
+        ...Object.entries(drawing.blocks ?? {}).filter(([nm]) => /^\*paper_space.+$/i.test(nm)).map(([, b]) => b.entities)]
+        .flat().filter((e) => e.type === 'polyline' && e.heavy === '2d' && !e.fit && !e.vertices.some((x) => x.z !== undefined)).length;
+      if (extraVp) expected.VIEWPORT = (expected.VIEWPORT ?? 0) - extraVp;
+      if (plain2d) { expected.POLYLINE = (expected.POLYLINE ?? 0) - plain2d; expected.LWPOLYLINE = (expected.LWPOLYLINE ?? 0) + plain2d; }
+      for (const k of Object.keys(expected)) if (expected[k] <= 0) delete expected[k];
+    }
+    const dd = back.opened ? diffCounts(expected, back.ents) : [];
     row.writes[v] = { opened: back.opened, why: back.why, audit: back.audit, diff: dd, skipped: res.skipped?.length ?? 0, downgraded: res.downgraded?.length ?? 0 };
     line(`  write ${String(v).padEnd(4)}: ${back.opened ? `open, audit ${back.audit?.join('/')}, ${dd.length ? 'DIFF ' + dd.join(', ') : 'entities match'}` : 'REJECTED ' + back.why}${res.skipped?.length ? ` (skipped ${res.skipped.length})` : ''}`);
   }
