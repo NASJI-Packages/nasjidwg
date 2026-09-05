@@ -393,6 +393,13 @@ export interface ViewportEntity extends EntityCommon {
   twistAngle?: number;             /* radians */
   lensLength?: number;
   statusFlag?: number;
+  /** The viewport's number in its layout, as the reference counts them
+   *  (DXF 69): 1 is the layout's own paper — the overall viewport, always
+   *  on layer 0 — and the rest follow in file order. Kept so a rewrite
+   *  puts the paper first again after the draw order has been applied
+   *  to the array; the reference audits a layout whose first viewport is
+   *  not its paper ("Paperspace vport layer Not 0"). */
+  id?: number;
   frozenLayers?: string[];
 }
 

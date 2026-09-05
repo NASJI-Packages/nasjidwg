@@ -1655,7 +1655,7 @@ export const writeDxf = (drawing: Drawing): string => {
         entStart('VIEWPORT', ent, 'AcDbViewport');
         w(10, fmt(ent.center.x)); w(20, fmt(ent.center.y)); w(30, fmt(ent.center.z ?? 0));
         w(40, fmt(ent.width)); w(41, fmt(ent.height));
-        w(68, 1); w(69, 1);
+        w(68, 1); w(69, ent.id ?? 1);
         w(12, fmt(ent.viewCenter?.x ?? 0)); w(22, fmt(ent.viewCenter?.y ?? 0));
         if (ent.viewTarget) {
           w(17, fmt(ent.viewTarget.x)); w(27, fmt(ent.viewTarget.y)); w(37, fmt(ent.viewTarget.z ?? 0));

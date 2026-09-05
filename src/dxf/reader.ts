@@ -1445,7 +1445,8 @@ export const readDxf = (text: string | Uint8Array): Drawing => {
             center: pt3(q, 10, 20, 30),
             width: q.num(40, 0), height: q.num(41, 0),
             viewCenter: { x: q.num(12, 0), y: q.num(22, 0) },
-            viewHeight: q.num(45, 0) || undefined
+            viewHeight: q.num(45, 0) || undefined,
+            ...(q.int(69, 0) > 0 ? { id: q.int(69, 0) } : {})
           };
 
         case 'ACAD_PROXY_ENTITY': {

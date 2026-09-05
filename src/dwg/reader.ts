@@ -763,6 +763,19 @@ export const readDwg = (
      under its own handle. The reorder is in place, so the array a
      consumer draws IS the draw order — the object itself is consumed
      here, never sealed and never re-emitted stale. ---- */
+  /* the reference numbers a layout's viewports in file order (1 = the
+     paper itself); the draw order applied below may move them, so the
+     number is taken here, before it does */
+  {
+    const number = (list: Entity[]): void => {
+      let n = 0;
+      for (const e of list) if (e.type === 'viewport') e.id = ++n;
+    };
+    number(drawing.paperSpace ?? []);
+    for (const [nm, b] of Object.entries(drawing.blocks)) {
+      if (/^\*paper_space/i.test(nm)) number(b.entities);
+    }
+  }
   for (const raw of order) {
     const se = raw.sortents;
     if (!se || !se.ents.length) continue;

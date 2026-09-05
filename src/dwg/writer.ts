@@ -1176,10 +1176,23 @@ const writeDwgImpl = (
       return false;
     });
   const modelEnts = filterEnts(drawing.entities);
-  const paperEnts = filterEnts(drawing.paperSpace ?? []);
+  /* a layout's first viewport in the file is its paper (number 1, on
+     layer 0): the draw order may have moved it in the array, so it goes
+     back before the first viewport in the chain — the draw order itself
+     still comes from the array through SORTENTSTABLE */
+  const paperFirst = (list: Entity[]): Entity[] => {
+    const first = list.findIndex((e) => e.type === 'viewport');
+    const one = list.findIndex((e) => e.type === 'viewport' && e.id === 1);
+    if (first < 0 || one <= first) return list;
+    const out = [...list];
+    const [vp] = out.splice(one, 1);
+    out.splice(first, 0, vp);
+    return out;
+  };
+  const paperEnts = paperFirst(filterEnts(drawing.paperSpace ?? []));
   const blockEnts = new Map<string, Entity[]>();
   for (const nm of userBlocks) {
-    blockEnts.set(nm, filterEnts(drawing.blocks[nm].entities));
+    blockEnts.set(nm, isExtraPaper(nm) ? paperFirst(filterEnts(drawing.blocks[nm].entities)) : filterEnts(drawing.blocks[nm].entities));
   }
 
   /* per-space entity handle lists + BLOCK/ENDBLK entities */
